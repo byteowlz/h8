@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
-from typing import Optional
+from typing import Optional, Any
 
 from exchangelib import EWSDateTime
 from exchangelib.account import Account
@@ -21,6 +21,8 @@ def find_free_slots(
 ) -> list[dict]:
     """Find free slots in the calendar.
     
+    Uses the GetUserAvailability API for efficient free/busy queries.
+    
     Args:
         account: EWS account
         weeks: Number of weeks to look at (1 = current week until Sunday)
@@ -37,12 +39,9 @@ def find_free_slots(
     fs_config = config.get('free_slots', {})
     
     # Use config defaults if not specified
-    if start_hour is None:
-        start_hour = fs_config.get('start_hour', 9)
-    if end_hour is None:
-        end_hour = fs_config.get('end_hour', 17)
-    if exclude_weekends is None:
-        exclude_weekends = fs_config.get('exclude_weekends', True)
+    work_start_hour = start_hour if start_hour is not None else fs_config.get('start_hour', 9)
+    work_end_hour = end_hour if end_hour is not None else fs_config.get('end_hour', 17)
+    skip_weekends = exclude_weekends if exclude_weekends is not None else fs_config.get('exclude_weekends', True)
     
     tz = ZoneInfo(config.get('timezone', 'Europe/Berlin'))
     now = datetime.now(tz=tz)
@@ -56,33 +55,97 @@ def find_free_slots(
     # Set to end of day
     end_date = end_date.replace(hour=23, minute=59, second=59)
     
-    # Get all events in the period
     start = EWSDateTime.from_datetime(now)
     end = EWSDateTime.from_datetime(end_date)
     
-    # Collect busy times
+    # Use GetUserAvailability API - much faster than calendar.view()
+    # Returns calendar events with busy_type: Free, Tentative, Busy, OOF, WorkingElsewhere, NoData
     busy_times: list[tuple[datetime, datetime]] = []
-    for item in account.calendar.view(start=start, end=end):
+    
+    try:
+        info = list(account.protocol.get_free_busy_info(
+            accounts=[(account, 'Required', False)],
+            start=start,
+            end=end,
+            merged_free_busy_interval=15,  # 15 minute granularity
+            requested_view='FreeBusy'
+        ))
+        
+        if info and len(info) > 0:
+            fb_view: Any = info[0]
+            if hasattr(fb_view, 'calendar_events') and fb_view.calendar_events:
+                for event in fb_view.calendar_events:
+                    # Skip free events (we only care about busy times)
+                    if event.busy_type == 'Free':
+                        continue
+                    
+                    # Convert to local timezone
+                    event_start = event.start
+                    event_end = event.end
+                    
+                    if hasattr(event_start, 'tzinfo') and event_start.tzinfo is not None:
+                        event_start = event_start.astimezone(tz)
+                    if hasattr(event_end, 'tzinfo') and event_end.tzinfo is not None:
+                        event_end = event_end.astimezone(tz)
+                    
+                    busy_times.append((event_start, event_end))
+    except Exception:
+        # Fallback to calendar.view() if GetUserAvailability fails
+        pass
+    
+    # Fallback if no busy times from GetUserAvailability
+    if not busy_times:
+        busy_times = _get_busy_times_from_calendar(account, start, end, tz)
+    
+    # Sort busy times
+    busy_times.sort(key=lambda x: x[0])
+    
+    # Merge overlapping busy times
+    merged_busy: list[tuple[datetime, datetime]] = []
+    for busy_start, busy_end in busy_times:
+        if merged_busy and busy_start <= merged_busy[-1][1]:
+            # Overlapping, extend the last busy period
+            merged_busy[-1] = (merged_busy[-1][0], max(merged_busy[-1][1], busy_end))
+        else:
+            merged_busy.append((busy_start, busy_end))
+    
+    # Find free slots
+    return _find_slots_from_busy_times(
+        merged_busy, now, end_date, tz,
+        work_start_hour, work_end_hour, skip_weekends,
+        duration_minutes, limit
+    )
+
+
+def _get_busy_times_from_calendar(
+    account: Account,
+    start: EWSDateTime,
+    end: EWSDateTime,
+    tz: ZoneInfo
+) -> list[tuple[datetime, datetime]]:
+    """Fallback: Get busy times from calendar.view() with .only() optimization."""
+    busy_times: list[tuple[datetime, datetime]] = []
+    
+    calendar: Any = account.calendar
+    query = calendar.view(start=start, end=end).only(
+        'start', 'end', 'is_cancelled'
+    )
+    
+    for item in query:
         if not hasattr(item, 'start') or not hasattr(item, 'end'):
             continue
-        # Skip cancelled events
         if hasattr(item, 'is_cancelled') and item.is_cancelled:
             continue
         
-        # Convert to timezone-aware datetime
         item_start = item.start
         item_end = item.end
         
         # Handle all-day events (EWSDate has no hour attribute)
         if not hasattr(item_start, 'hour'):
-            # All-day event: treat as blocking entire day
             item_start = datetime.combine(item_start, time(0, 0), tzinfo=tz)
             item_end = datetime.combine(item_end, time(0, 0), tzinfo=tz)
         else:
-            # EWSDateTime comes with timezone info (usually UTC)
-            # Convert to a proper datetime and then to local timezone
             if hasattr(item_start, 'tzinfo') and item_start.tzinfo is not None:
-                # Create datetime preserving the original timezone, then convert to local
                 item_start = datetime(
                     item_start.year, item_start.month, item_start.day,
                     item_start.hour, item_start.minute, item_start.second,
@@ -110,23 +173,24 @@ def find_free_slots(
         
         busy_times.append((item_start, item_end))
     
-    # Sort busy times
-    busy_times.sort(key=lambda x: x[0])
-    
-    # Merge overlapping busy times
-    merged_busy: list[tuple[datetime, datetime]] = []
-    for busy_start, busy_end in busy_times:
-        if merged_busy and busy_start <= merged_busy[-1][1]:
-            # Overlapping, extend the last busy period
-            merged_busy[-1] = (merged_busy[-1][0], max(merged_busy[-1][1], busy_end))
-        else:
-            merged_busy.append((busy_start, busy_end))
-    
-    # Find free slots
+    return busy_times
+
+
+def _find_slots_from_busy_times(
+    merged_busy: list[tuple[datetime, datetime]],
+    now: datetime,
+    end_date: datetime,
+    tz: ZoneInfo,
+    start_hour: int,
+    end_hour: int,
+    exclude_weekends: bool,
+    duration_minutes: int,
+    limit: Optional[int],
+) -> list[dict]:
+    """Find free slots given merged busy times."""
     free_slots: list[dict] = []
     duration = timedelta(minutes=duration_minutes)
     
-    # Iterate through each day
     current_day = now.date()
     end_day = end_date.date()
     
