@@ -21,8 +21,6 @@ def find_free_slots(
 ) -> list[dict]:
     """Find free slots in the calendar.
     
-    Uses the GetUserAvailability API for efficient free/busy queries.
-    
     Args:
         account: EWS account
         weeks: Number of weeks to look at (1 = current week until Sunday)
@@ -58,44 +56,8 @@ def find_free_slots(
     start = EWSDateTime.from_datetime(now)
     end = EWSDateTime.from_datetime(end_date)
     
-    # Use GetUserAvailability API - much faster than calendar.view()
-    # Returns calendar events with busy_type: Free, Tentative, Busy, OOF, WorkingElsewhere, NoData
-    busy_times: list[tuple[datetime, datetime]] = []
-    
-    try:
-        info = list(account.protocol.get_free_busy_info(
-            accounts=[(account, 'Required', False)],
-            start=start,
-            end=end,
-            merged_free_busy_interval=15,  # 15 minute granularity
-            requested_view='FreeBusy'
-        ))
-        
-        if info and len(info) > 0:
-            fb_view: Any = info[0]
-            if hasattr(fb_view, 'calendar_events') and fb_view.calendar_events:
-                for event in fb_view.calendar_events:
-                    # Skip free events (we only care about busy times)
-                    if event.busy_type == 'Free':
-                        continue
-                    
-                    # Convert to local timezone
-                    event_start = event.start
-                    event_end = event.end
-                    
-                    if hasattr(event_start, 'tzinfo') and event_start.tzinfo is not None:
-                        event_start = event_start.astimezone(tz)
-                    if hasattr(event_end, 'tzinfo') and event_end.tzinfo is not None:
-                        event_end = event_end.astimezone(tz)
-                    
-                    busy_times.append((event_start, event_end))
-    except Exception:
-        # Fallback to calendar.view() if GetUserAvailability fails
-        pass
-    
-    # Fallback if no busy times from GetUserAvailability
-    if not busy_times:
-        busy_times = _get_busy_times_from_calendar(account, start, end, tz)
+    # Get busy times using calendar.view() with .only() optimization
+    busy_times = _get_busy_times_from_calendar(account, start, end, tz)
     
     # Sort busy times
     busy_times.sort(key=lambda x: x[0])
