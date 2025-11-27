@@ -1,13 +1,33 @@
 """Calendar operations."""
 
+import re
 import sys
 import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Optional
+from typing import Optional, Any
 
 from exchangelib import EWSDateTime, EWSTimeZone, CalendarItem
 from exchangelib.account import Account
+
+
+# Pattern to extract online meeting URLs from body
+MEETING_URL_PATTERN = re.compile(
+    r'https://(?:'
+    r'teams\.microsoft\.com/l/meetup-join/[^\s<>"\']+|'
+    r'[^\s<>"\']*\.zoom\.us/[^\s<>"\']+|'
+    r'meet\.google\.com/[^\s<>"\']+|'
+    r'[^\s<>"\']*webex\.com/[^\s<>"\']+|'
+    r'dialin\.teams\.microsoft\.com/[^\s<>"\']+)'
+)
+
+
+def _extract_meeting_url(body: str) -> Optional[str]:
+    """Extract online meeting URL from calendar item body."""
+    if not body:
+        return None
+    match = MEETING_URL_PATTERN.search(body)
+    return match.group(0) if match else None
 
 
 def list_events(
@@ -32,11 +52,12 @@ def list_events(
     start = EWSDateTime.from_datetime(start_dt)
     end = EWSDateTime.from_datetime(end_dt)
     
-    # Use .only() to fetch only required fields - avoids fetching large HTML bodies
-    # which dramatically speeds up the query (12x faster in testing)
-    query = account.calendar.view(start=start, end=end).only(
+    # Use .only() to fetch only required fields
+    # Include body and is_online_meeting for extracting meeting URLs
+    calendar: Any = account.calendar
+    query = calendar.view(start=start, end=end).only(
         'id', 'changekey', 'subject', 'start', 'end', 'location',
-        'organizer', 'is_all_day', 'is_cancelled'
+        'organizer', 'is_all_day', 'is_cancelled', 'is_online_meeting', 'body'
     )
     
     events = []
@@ -48,7 +69,13 @@ def list_events(
         start_str = item.start.isoformat() if hasattr(item.start, 'isoformat') else str(item.start)
         end_str = item.end.isoformat() if hasattr(item.end, 'isoformat') else str(item.end)
         
-        events.append({
+        # Extract meeting URL if it's an online meeting
+        meeting_url = None
+        is_online = getattr(item, 'is_online_meeting', False)
+        if is_online and item.body:
+            meeting_url = _extract_meeting_url(str(item.body))
+        
+        event = {
             'id': item.id,
             'changekey': item.changekey,
             'subject': item.subject,
@@ -58,7 +85,13 @@ def list_events(
             'organizer': item.organizer.email_address if item.organizer else None,
             'is_all_day': item.is_all_day,
             'is_cancelled': item.is_cancelled,
-        })
+        }
+        
+        # Only include meeting_url if present
+        if meeting_url:
+            event['meeting_url'] = meeting_url
+        
+        events.append(event)
     
     return events
 
@@ -76,9 +109,10 @@ def create_event(account: Account, event_data: dict) -> dict:
     if end_dt.tzinfo is None:
         end_dt = end_dt.replace(tzinfo=ZoneInfo('Europe/Berlin'))
     
+    calendar: Any = account.calendar
     item = CalendarItem(
         account=account,
-        folder=account.calendar,
+        folder=calendar,
         subject=event_data['subject'],
         start=EWSDateTime.from_datetime(start_dt),
         end=EWSDateTime.from_datetime(end_dt),
@@ -87,12 +121,14 @@ def create_event(account: Account, event_data: dict) -> dict:
     )
     item.save()
     
+    item_start: Any = item.start
+    item_end: Any = item.end
     return {
         'id': item.id,
         'changekey': item.changekey,
         'subject': item.subject,
-        'start': item.start.isoformat(),
-        'end': item.end.isoformat(),
+        'start': str(item_start.isoformat()),
+        'end': str(item_end.isoformat()),
     }
 
 
@@ -101,7 +137,8 @@ def delete_event(account: Account, item_id: str) -> dict:
     from exchangelib import ItemId
     
     # Find the item by ID
-    items = list(account.calendar.filter(id=item_id))
+    calendar: Any = account.calendar
+    items = list(calendar.filter(id=item_id))
     
     if not items:
         return {'success': False, 'error': 'Event not found'}
