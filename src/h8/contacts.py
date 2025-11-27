@@ -10,9 +10,15 @@ def list_contacts(account: Account, limit: int = 100, search: Optional[str] = No
     """List contacts, optionally filtered by search query."""
     contacts = []
     
+    # Use .only() to fetch only required fields - avoids fetching large data
+    base_query = account.contacts.all().only(
+        'id', 'changekey', 'display_name', 'given_name', 'surname',
+        'email_addresses', 'phone_numbers', 'company_name', 'job_title'
+    )
+    
     if search:
         search_lower = search.lower()
-        for item in account.contacts.all():
+        for item in base_query:
             if not isinstance(item, Contact):
                 continue
             
@@ -39,7 +45,7 @@ def list_contacts(account: Account, limit: int = 100, search: Optional[str] = No
                 if len(contacts) >= limit:
                     break
     else:
-        for item in account.contacts.all()[:limit]:
+        for item in base_query[:limit]:
             if not isinstance(item, Contact):
                 continue
             contacts.append(_contact_to_dict(item))
@@ -49,9 +55,14 @@ def list_contacts(account: Account, limit: int = 100, search: Optional[str] = No
 
 def get_contact(account: Account, item_id: str) -> dict:
     """Get a contact by ID."""
-    for item in account.contacts.all():
-        if item.id == item_id:
-            return _contact_to_dict(item)
+    # Use filter by ID instead of iterating all contacts
+    items = list(account.contacts.filter(id=item_id).only(
+        'id', 'changekey', 'display_name', 'given_name', 'surname',
+        'email_addresses', 'phone_numbers', 'company_name', 'job_title'
+    ))
+    
+    if items:
+        return _contact_to_dict(items[0])
     
     return {'error': 'Contact not found'}
 
@@ -102,10 +113,12 @@ def create_contact(account: Account, contact_data: dict) -> dict:
 
 def delete_contact(account: Account, item_id: str) -> dict:
     """Delete a contact by ID."""
-    for item in account.contacts.all():
-        if item.id == item_id:
-            item.delete()
-            return {'success': True, 'id': item_id}
+    # Use filter by ID instead of iterating all contacts
+    items = list(account.contacts.filter(id=item_id))
+    
+    if items:
+        items[0].delete()
+        return {'success': True, 'id': item_id}
     
     return {'success': False, 'error': 'Contact not found'}
 

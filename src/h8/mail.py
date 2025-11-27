@@ -54,7 +54,11 @@ def list_messages(
     if unread:
         query = query.filter(is_read=False)
     
-    query = query.order_by('-datetime_received')[:limit]
+    # Use .only() to fetch only required fields - avoids fetching large bodies
+    query = query.order_by('-datetime_received').only(
+        'id', 'changekey', 'subject', 'sender', 'to_recipients',
+        'cc_recipients', 'datetime_received', 'is_read', 'has_attachments'
+    )[:limit]
     
     messages = []
     for item in query:

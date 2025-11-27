@@ -1,6 +1,7 @@
 """Authentication and EWS account connection."""
 
 import subprocess
+from functools import lru_cache
 from exchangelib import Account, Configuration, DELEGATE
 from exchangelib import OAuth2AuthorizationCodeCredentials
 
@@ -10,8 +11,12 @@ def get_token(email: str) -> str:
     return subprocess.check_output(['oama', 'access', email]).decode().strip()
 
 
+@lru_cache(maxsize=1)
 def get_account(email: str) -> Account:
-    """Create and return an authenticated EWS Account."""
+    """Create and return an authenticated EWS Account.
+    
+    Cached to avoid repeated authentication overhead within the same process.
+    """
     token = get_token(email)
     
     credentials = OAuth2AuthorizationCodeCredentials(
