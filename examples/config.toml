@@ -1,0 +1,17 @@
+# h8 configuration
+# Place this file at ~/.config/h8/config.toml or $XDG_CONFIG_HOME/h8/config.toml
+
+# Default email account
+account = "your.email@example.com"
+
+# Timezone for calendar operations
+timezone = "Europe/Berlin"
+
+# Free slots configuration
+[free_slots]
+# Only consider times between these hours (24h format)
+start_hour = 9
+end_hour = 17
+
+# Exclude weekends when finding free slots
+exclude_weekends = true

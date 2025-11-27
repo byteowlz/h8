@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# h8 - EWS CLI wrapper
+# Runs h8 via uv from its project directory
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+exec uv run --project "$PROJECT_DIR" h8 "$@"
