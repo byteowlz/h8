@@ -1,8 +1,10 @@
+//! h8 CLI - Exchange Web Services client.
+
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command as ProcCommand;
 use std::process::Stdio;
 use std::time::Duration;
@@ -11,15 +13,12 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
-use config::{Config, Environment, File, FileFormat};
-use dirs;
 use env_logger::fmt::WriteStyle;
-use libc;
+use h8_core::{AppConfig, AppPaths, ServiceClient};
+
 use log::{LevelFilter, debug};
-use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shellexpand;
 
 const APP_NAME: &str = env!("CARGO_PKG_NAME");
 
@@ -230,6 +229,15 @@ enum FetchFormat {
     Mbox,
 }
 
+impl From<FetchFormat> for h8_core::types::FetchFormat {
+    fn from(f: FetchFormat) -> Self {
+        match f {
+            FetchFormat::Maildir => h8_core::types::FetchFormat::Maildir,
+            FetchFormat::Mbox => h8_core::types::FetchFormat::Mbox,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 struct MailSendArgs {
     #[arg(long)]
@@ -313,9 +321,12 @@ struct RuntimeContext {
 
 impl RuntimeContext {
     fn new(common: CommonOpts) -> Result<Self> {
-        let mut paths = AppPaths::discover(common.config.clone())?;
-        ensure_default_config(&paths.global_config)?;
-        let config = load_config(&mut paths, &common)?;
+        let paths = AppPaths::discover(common.config.clone())
+            .map_err(|e| anyhow!("{e}"))?;
+        AppConfig::ensure_default(&paths.global_config)
+            .map_err(|e| anyhow!("{e}"))?;
+        let config = AppConfig::load(&paths, common.account.as_deref())
+            .map_err(|e| anyhow!("{e}"))?;
         Ok(Self {
             common,
             paths,
@@ -375,75 +386,17 @@ impl RuntimeContext {
             }
         }
     }
-}
 
-#[derive(Debug, Clone)]
-struct AppPaths {
-    global_config: PathBuf,
-    local_config: PathBuf,
-    cli_config: Option<PathBuf>,
-    state_dir: PathBuf,
-}
-
-impl AppPaths {
-    fn discover(cli_config: Option<PathBuf>) -> Result<Self> {
-        let global_config = default_config_dir()?.join("config.toml");
-        let local_config = env::current_dir()
-            .context("determining current directory")?
-            .join("config.toml");
-        let cli_config = cli_config.map(expand_path).transpose()?;
-        let state_dir = default_state_dir()?;
-
-        Ok(Self {
-            global_config,
-            local_config,
-            cli_config,
-            state_dir,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct AppConfig {
-    account: String,
-    timezone: String,
-    service_url: String,
-    free_slots: FreeSlotsConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            account: "your.email@example.com".to_string(),
-            timezone: "Europe/Berlin".to_string(),
-            service_url: "http://127.0.0.1:8787".to_string(),
-            free_slots: FreeSlotsConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct FreeSlotsConfig {
-    start_hour: u8,
-    end_hour: u8,
-    exclude_weekends: bool,
-}
-
-impl Default for FreeSlotsConfig {
-    fn default() -> Self {
-        Self {
-            start_hour: 9,
-            end_hour: 17,
-            exclude_weekends: true,
-        }
+    fn service_client(&self) -> Result<ServiceClient> {
+        let timeout = self.common.timeout.map(Duration::from_secs);
+        ServiceClient::new(&self.config.service_url, timeout)
+            .map_err(|e| anyhow!("{e}"))
     }
 }
 
 fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
     let account = effective_account(ctx);
-    let client = ServiceClient::new(ctx)?;
+    let client = ctx.service_client()?;
     match cmd {
         CalendarCommand::List(args) => {
             let events = client.calendar_list(
@@ -451,16 +404,18 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 args.days,
                 args.from_date.as_deref(),
                 args.to_date.as_deref(),
-            )?;
+            ).map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &events)?;
         }
         CalendarCommand::Create(args) => {
             let payload = read_json_payload(args.file.as_ref())?;
-            let event = client.calendar_create(&account, payload)?;
+            let event = client.calendar_create(&account, payload)
+                .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &event)?;
         }
         CalendarCommand::Delete(args) => {
-            let result = client.calendar_delete(&account, &args.id, args.change_key.as_deref())?;
+            let result = client.calendar_delete(&account, &args.id, args.change_key.as_deref())
+                .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &result)?;
         }
     }
@@ -469,14 +424,16 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
 
 fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
     let account = effective_account(ctx);
-    let client = ServiceClient::new(ctx)?;
+    let client = ctx.service_client()?;
     match cmd {
         MailCommand::List(args) => {
-            let messages = client.mail_list(&account, &args.folder, args.limit, args.unread)?;
+            let messages = client.mail_list(&account, &args.folder, args.limit, args.unread)
+                .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &messages)?;
         }
         MailCommand::Get(args) => {
-            let message = client.mail_get(&account, &args.folder, &args.id)?;
+            let message = client.mail_get(&account, &args.folder, &args.id)
+                .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &message)?;
         }
         MailCommand::Fetch(args) => {
@@ -484,14 +441,15 @@ fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
                 &account,
                 &args.folder,
                 &args.output,
-                args.format,
+                args.format.into(),
                 args.limit,
-            )?;
+            ).map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &result)?;
         }
         MailCommand::Send(args) => {
             let payload = read_json_payload(args.file.as_ref())?;
-            let result = client.mail_send(&account, payload)?;
+            let result = client.mail_send(&account, payload)
+                .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &result)?;
         }
     }
@@ -500,23 +458,27 @@ fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
 
 fn handle_contacts(ctx: &RuntimeContext, cmd: ContactsCommand) -> Result<()> {
     let account = effective_account(ctx);
-    let client = ServiceClient::new(ctx)?;
+    let client = ctx.service_client()?;
     match cmd {
         ContactsCommand::List(args) => {
-            let contacts = client.contacts_list(&account, args.limit, args.search.as_deref())?;
+            let contacts = client.contacts_list(&account, args.limit, args.search.as_deref())
+                .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &contacts)?;
         }
         ContactsCommand::Get(args) => {
-            let contact = client.contacts_get(&account, &args.id)?;
+            let contact = client.contacts_get(&account, &args.id)
+                .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &contact)?;
         }
         ContactsCommand::Create(args) => {
             let payload = read_json_payload(args.file.as_ref())?;
-            let result = client.contacts_create(&account, payload)?;
+            let result = client.contacts_create(&account, payload)
+                .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &result)?;
         }
         ContactsCommand::Delete(args) => {
-            let result = client.contacts_delete(&account, &args.id)?;
+            let result = client.contacts_delete(&account, &args.id)
+                .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &result)?;
         }
     }
@@ -525,7 +487,7 @@ fn handle_contacts(ctx: &RuntimeContext, cmd: ContactsCommand) -> Result<()> {
 
 fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
     let account = args.account.unwrap_or_else(|| effective_account(ctx));
-    let client = ServiceClient::new(ctx)?;
+    let client = ctx.service_client()?;
 
     // Today range in configured timezone
     let tz = ctx
@@ -542,7 +504,7 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
         1,
         Some(&start.format("%Y-%m-%dT%H:%M:%S").to_string()),
         Some(&end.format("%Y-%m-%dT%H:%M:%S").to_string()),
-    )?;
+    ).map_err(|e| anyhow!("{e}"))?;
 
     if ctx.common.json || ctx.common.yaml || !io::stdout().is_terminal() {
         emit_output(&ctx.common, &events_val)?;
@@ -557,8 +519,9 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
 
 fn handle_free(ctx: &RuntimeContext, cmd: FreeCommand) -> Result<()> {
     let account = effective_account(ctx);
-    let client = ServiceClient::new(ctx)?;
-    let slots = client.free_slots(&account, cmd.weeks, cmd.duration, cmd.limit)?;
+    let client = ctx.service_client()?;
+    let slots = client.free_slots(&account, cmd.weeks, cmd.duration, cmd.limit)
+        .map_err(|e| anyhow!("{e}"))?;
     emit_output(&ctx.common, &slots)?;
     Ok(())
 }
@@ -570,7 +533,10 @@ fn handle_config(ctx: &RuntimeContext, command: ConfigCommand) -> Result<()> {
             println!("{}", ctx.paths.global_config.display());
             Ok(())
         }
-        ConfigCommand::Reset => write_default_config(&ctx.paths.global_config),
+        ConfigCommand::Reset => {
+            AppConfig::write_default(&ctx.paths.global_config)
+                .map_err(|e| anyhow!("{e}"))
+        }
     }
 }
 
@@ -588,7 +554,8 @@ fn handle_init(ctx: &RuntimeContext, cmd: InitCommand) -> Result<()> {
         );
         return Ok(());
     }
-    write_default_config(&ctx.paths.global_config)
+    AppConfig::write_default(&ctx.paths.global_config)
+        .map_err(|e| anyhow!("{e}"))
 }
 
 fn handle_completions(shell: Shell) -> Result<()> {
@@ -682,10 +649,10 @@ fn pretty_print_item(v: &Value) {
         if let Some(end) = obj.get("end").and_then(|v| v.as_str()) {
             println!("  End: {}", end);
         }
-        if let Some(loc) = obj.get("location").and_then(|v| v.as_str()) {
-            if !loc.is_empty() {
-                println!("  Location: {}", loc);
-            }
+        if let Some(loc) = obj.get("location").and_then(|v| v.as_str())
+            && !loc.is_empty()
+        {
+            println!("  Location: {}", loc);
         }
         if let Some(from) = obj.get("from").and_then(|v| v.as_str()) {
             println!("  From: {}", from);
@@ -735,132 +702,13 @@ fn pretty_print_item(v: &Value) {
     println!("{:#?}", obj);
 }
 
-fn ensure_default_config(path: &Path) -> Result<()> {
-    if path.exists() {
-        return Ok(());
-    }
-    write_default_config(path)
-}
-
-fn write_default_config(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating config directory {parent:?}"))?;
-    }
-    let cfg = AppConfig::default();
-    let toml = toml::to_string_pretty(&cfg).context("serializing default config")?;
-    let mut header = String::new();
-    header.push_str("# h8 configuration\n");
-    header.push_str(
-        "# Place this file at $XDG_CONFIG_HOME/h8/config.toml (or ~/.config/h8/config.toml)\n\n",
-    );
-    fs::write(path, format!("{header}{toml}\n"))
-        .with_context(|| format!("writing config file to {}", path.display()))
-}
-
-fn load_config(paths: &mut AppPaths, common: &CommonOpts) -> Result<AppConfig> {
-    let env_prefix = env_prefix();
-    let mut builder = Config::builder()
-        .add_source(
-            File::from(paths.global_config.as_path())
-                .format(FileFormat::Toml)
-                .required(false),
-        )
-        .add_source(
-            File::from(paths.local_config.as_path())
-                .format(FileFormat::Toml)
-                .required(false),
-        )
-        .add_source(Environment::with_prefix(env_prefix.as_str()).separator("__"));
-
-    if let Some(cli_cfg) = &paths.cli_config {
-        builder = builder.add_source(
-            File::from(cli_cfg.as_path())
-                .format(FileFormat::Toml)
-                .required(true),
-        );
-    }
-
-    builder = builder
-        .set_default("account", AppConfig::default().account.clone())?
-        .set_default("timezone", AppConfig::default().timezone.clone())?
-        .set_default("service_url", AppConfig::default().service_url.clone())?
-        .set_default("free_slots.start_hour", 9)?
-        .set_default("free_slots.end_hour", 17)?
-        .set_default("free_slots.exclude_weekends", true)?;
-
-    let mut config: AppConfig = builder.build()?.try_deserialize()?;
-
-    if let Some(account) = &common.account {
-        config.account = account.clone();
-    }
-
-    Ok(config)
-}
-
-fn expand_path(path: PathBuf) -> Result<PathBuf> {
-    if let Some(text) = path.to_str() {
-        expand_str_path(text)
-    } else {
-        Ok(path)
-    }
-}
-
-fn expand_str_path(text: &str) -> Result<PathBuf> {
-    let expanded = shellexpand::full(text).context("expanding path")?;
-    Ok(PathBuf::from(expanded.to_string()))
-}
-
-fn default_config_dir() -> Result<PathBuf> {
-    if let Some(dir) = env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        let mut path = PathBuf::from(dir);
-        path.push(APP_NAME);
-        return Ok(path);
-    }
-    if let Some(mut dir) = dirs::config_dir() {
-        dir.push(APP_NAME);
-        return Ok(dir);
-    }
-    dirs::home_dir()
-        .map(|home| home.join(".config").join(APP_NAME))
-        .ok_or_else(|| anyhow!("unable to determine configuration directory"))
-}
-
-fn default_state_dir() -> Result<PathBuf> {
-    if let Some(dir) = env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
-        let mut path = PathBuf::from(dir);
-        path.push(APP_NAME);
-        return Ok(path);
-    }
-    if let Some(mut dir) = dirs::state_dir() {
-        dir.push(APP_NAME);
-        return Ok(dir);
-    }
-    dirs::home_dir()
-        .map(|home| home.join(".local").join("state").join(APP_NAME))
-        .ok_or_else(|| anyhow!("unable to determine state directory"))
-}
-
-fn env_prefix() -> String {
-    APP_NAME
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 fn service_pid_path(ctx: &RuntimeContext) -> Result<PathBuf> {
     fs::create_dir_all(&ctx.paths.state_dir)
         .with_context(|| format!("creating state directory {}", ctx.paths.state_dir.display()))?;
     Ok(ctx.paths.state_dir.join("service.pid"))
 }
 
-fn read_pid(path: &Path) -> Result<Option<u32>> {
+fn read_pid(path: &std::path::Path) -> Result<Option<u32>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -871,10 +719,10 @@ fn read_pid(path: &Path) -> Result<Option<u32>> {
 
 fn start_service(ctx: &RuntimeContext) -> Result<()> {
     let pid_path = service_pid_path(ctx)?;
-    if let Some(pid) = read_pid(&pid_path)? {
-        if pid_running(pid) {
-            return Err(anyhow!("service already running with pid {}", pid));
-        }
+    if let Some(pid) = read_pid(&pid_path)?
+        && pid_running(pid)
+    {
+        return Err(anyhow!("service already running with pid {}", pid));
     }
 
     let log_path = ctx.paths.state_dir.join("service.log");
@@ -974,189 +822,6 @@ fn terminate_pid(pid: u32) -> Result<()> {
         })
 }
 
-#[derive(Debug, Clone)]
-struct ServiceClient {
-    http: reqwest::blocking::Client,
-    base_url: String,
-}
-
-impl ServiceClient {
-    fn new(ctx: &RuntimeContext) -> Result<Self> {
-        let mut builder = reqwest::blocking::Client::builder();
-        if let Some(secs) = ctx.common.timeout {
-            builder = builder.timeout(Duration::from_secs(secs));
-        }
-        let http = builder.build().context("building HTTP client")?;
-        let base_url = ctx.config.service_url.trim_end_matches('/').to_string();
-        Ok(Self { http, base_url })
-    }
-
-    fn calendar_list(
-        &self,
-        account: &str,
-        days: i64,
-        from_date: Option<&str>,
-        to_date: Option<&str>,
-    ) -> Result<Value> {
-        let mut req = self
-            .http
-            .get(format!("{}/calendar", self.base_url))
-            .query(&[("account", account), ("days", &days.to_string())]);
-        if let Some(f) = from_date {
-            req = req.query(&[("from_date", f)]);
-        }
-        if let Some(t) = to_date {
-            req = req.query(&[("to_date", t)]);
-        }
-        Self::send(req)
-    }
-
-    fn calendar_create(&self, account: &str, payload: Value) -> Result<Value> {
-        let req = self
-            .http
-            .post(format!("{}/calendar", self.base_url))
-            .query(&[("account", account)])
-            .json(&payload);
-        Self::send(req)
-    }
-
-    fn calendar_delete(&self, account: &str, id: &str, change_key: Option<&str>) -> Result<Value> {
-        let mut req = self
-            .http
-            .delete(format!("{}/calendar/{}", self.base_url, id))
-            .query(&[("account", account)]);
-        if let Some(ck) = change_key {
-            req = req.query(&[("changekey", ck)]);
-        }
-        Self::send(req)
-    }
-
-    fn mail_list(&self, account: &str, folder: &str, limit: usize, unread: bool) -> Result<Value> {
-        let req = self.http.get(format!("{}/mail", self.base_url)).query(&[
-            ("account", account),
-            ("folder", folder),
-            ("limit", &limit.to_string()),
-            ("unread", &unread.to_string()),
-        ]);
-        Self::send(req)
-    }
-
-    fn mail_get(&self, account: &str, folder: &str, id: &str) -> Result<Value> {
-        let req = self
-            .http
-            .get(format!("{}/mail/{}", self.base_url, id))
-            .query(&[("account", account), ("folder", folder)]);
-        Self::send(req)
-    }
-
-    fn mail_send(&self, account: &str, payload: Value) -> Result<Value> {
-        let req = self
-            .http
-            .post(format!("{}/mail/send", self.base_url))
-            .query(&[("account", account)])
-            .json(&payload);
-        Self::send(req)
-    }
-
-    fn mail_fetch(
-        &self,
-        account: &str,
-        folder: &str,
-        output: &Path,
-        format: FetchFormat,
-        limit: Option<usize>,
-    ) -> Result<Value> {
-        let mut body = serde_json::json!({
-            "folder": folder,
-            "output": output.display().to_string(),
-            "format": match format { FetchFormat::Maildir => "maildir", FetchFormat::Mbox => "mbox" },
-        });
-        if let Some(lim) = limit {
-            body["limit"] = serde_json::json!(lim);
-        }
-        let req = self
-            .http
-            .post(format!("{}/mail/fetch", self.base_url))
-            .query(&[("account", account)])
-            .json(&body);
-        Self::send(req)
-    }
-
-    fn contacts_list(&self, account: &str, limit: usize, search: Option<&str>) -> Result<Value> {
-        let mut req = self
-            .http
-            .get(format!("{}/contacts", self.base_url))
-            .query(&[("account", account), ("limit", &limit.to_string())]);
-        if let Some(s) = search {
-            req = req.query(&[("search", s)]);
-        }
-        Self::send(req)
-    }
-
-    fn contacts_get(&self, account: &str, id: &str) -> Result<Value> {
-        let req = self
-            .http
-            .get(format!("{}/contacts/{}", self.base_url, id))
-            .query(&[("account", account)]);
-        Self::send(req)
-    }
-
-    fn contacts_create(&self, account: &str, payload: Value) -> Result<Value> {
-        let req = self
-            .http
-            .post(format!("{}/contacts", self.base_url))
-            .query(&[("account", account)])
-            .json(&payload);
-        Self::send(req)
-    }
-
-    fn contacts_delete(&self, account: &str, id: &str) -> Result<Value> {
-        let req = self
-            .http
-            .delete(format!("{}/contacts/{}", self.base_url, id))
-            .query(&[("account", account)]);
-        Self::send(req)
-    }
-
-    fn free_slots(
-        &self,
-        account: &str,
-        weeks: u8,
-        duration: u32,
-        limit: Option<usize>,
-    ) -> Result<Value> {
-        let mut req = self.http.get(format!("{}/free", self.base_url)).query(&[
-            ("account", account),
-            ("weeks", &weeks.to_string()),
-            ("duration", &duration.to_string()),
-        ]);
-        if let Some(lim) = limit {
-            req = req.query(&[("limit", &lim.to_string())]);
-        }
-        Self::send(req)
-    }
-
-    fn send(req: reqwest::blocking::RequestBuilder) -> Result<Value> {
-        let resp = req.send().context("sending request to service")?;
-        let status = resp.status();
-        let text = resp.text().context("reading service response")?;
-        if !status.is_success() {
-            if let Ok(val) = serde_json::from_str::<Value>(&text) {
-                if let Some(detail) = val
-                    .as_object()
-                    .and_then(|m| m.get("detail"))
-                    .and_then(|d| d.as_str())
-                {
-                    return Err(anyhow!("service error: {}", detail));
-                }
-            }
-            let snippet: String = text.chars().take(400).collect();
-            return Err(anyhow!("service error: {}", snippet));
-        }
-        serde_json::from_str(&text).context("parsing JSON from service")
-    }
-}
-
 fn render_agenda(events: &[AgendaItem], tz: chrono_tz::Tz) -> Result<()> {
     let today = Local::now().with_timezone(&tz).date_naive();
     let start_naive = today.and_hms_opt(0, 0, 0).unwrap();
@@ -1233,7 +898,7 @@ fn render_agenda(events: &[AgendaItem], tz: chrono_tz::Tz) -> Result<()> {
 
     for slot in slots {
         let start_tick = (slot.start_min / minutes_per_tick).min(width as u32 - 1);
-        let end_tick = ((slot.end_min + minutes_per_tick - 1) / minutes_per_tick)
+        let end_tick = slot.end_min.div_ceil(minutes_per_tick)
             .clamp(start_tick + 1, width as u32);
         let mut bar = vec![' '; width];
         for idx in start_tick..end_tick {

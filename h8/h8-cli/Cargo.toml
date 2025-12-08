@@ -1,0 +1,24 @@
+[package]
+name = "h8"
+version.workspace = true
+edition.workspace = true
+description = "CLI for h8 - Exchange Web Services client"
+
+[[bin]]
+name = "h8"
+path = "src/main.rs"
+
+[dependencies]
+h8-core = { path = "../h8-core" }
+anyhow.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+clap = { version = "4.5.49", features = ["derive", "env"] }
+clap_complete = "4.5.23"
+env_logger = "0.11.5"
+libc = "0.2.169"
+log.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
