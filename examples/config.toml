@@ -1,11 +1,14 @@
-# h8 configuration
-# Place this file at ~/.config/h8/config.toml or $XDG_CONFIG_HOME/h8/config.toml
+# h8 configuration (Rust CLI)
+# Place this at ~/.config/h8/config.toml or $XDG_CONFIG_HOME/h8/config.toml
 
 # Default email account
 account = "your.email@example.com"
 
 # Timezone for calendar operations
 timezone = "Europe/Berlin"
+
+# Service endpoint
+service_url = "http://127.0.0.1:8787"
 
 # Free slots configuration
 [free_slots]
