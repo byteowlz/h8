@@ -12,26 +12,26 @@ from exchangelib.account import Account
 
 
 FOLDER_MAP = {
-    'inbox': 'inbox',
-    'sent': 'sent',
-    'drafts': 'drafts',
-    'trash': 'trash',
-    'junk': 'junk',
+    "inbox": "inbox",
+    "sent": "sent",
+    "drafts": "drafts",
+    "trash": "trash",
+    "junk": "junk",
 }
 
 
 def get_folder(account: Account, folder_name: str):
     """Get a folder by name."""
     name = folder_name.lower()
-    if name == 'inbox':
+    if name == "inbox":
         return account.inbox
-    elif name == 'sent':
+    elif name == "sent":
         return account.sent
-    elif name == 'drafts':
+    elif name == "drafts":
         return account.drafts
-    elif name == 'trash':
+    elif name == "trash":
         return account.trash
-    elif name == 'junk':
+    elif name == "junk":
         return account.junk
     else:
         # Try to find by name in all folders
@@ -43,199 +43,393 @@ def get_folder(account: Account, folder_name: str):
 
 def list_messages(
     account: Account,
-    folder: str = 'inbox',
+    folder: str = "inbox",
     limit: int = 20,
     unread: bool = False,
 ) -> list[dict]:
     """List messages in a folder."""
     mail_folder = get_folder(account, folder)
-    
+
     query = mail_folder.all()
     if unread:
         query = query.filter(is_read=False)
-    
+
     # Use .only() to fetch only required fields - avoids fetching large bodies
-    query = query.order_by('-datetime_received').only(
-        'id', 'changekey', 'subject', 'sender', 'to_recipients',
-        'cc_recipients', 'datetime_received', 'is_read', 'has_attachments'
+    query = query.order_by("-datetime_received").only(
+        "id",
+        "changekey",
+        "subject",
+        "sender",
+        "to_recipients",
+        "cc_recipients",
+        "datetime_received",
+        "is_read",
+        "has_attachments",
     )[:limit]
-    
+
     messages = []
     for item in query:
-        if not hasattr(item, 'subject'):
+        if not hasattr(item, "subject"):
             continue
-        
-        messages.append({
-            'id': item.id,
-            'changekey': item.changekey,
-            'subject': item.subject,
-            'from': item.sender.email_address if item.sender else None,
-            'to': [r.email_address for r in (item.to_recipients or [])],
-            'cc': [r.email_address for r in (item.cc_recipients or [])],
-            'datetime_received': item.datetime_received.isoformat() if item.datetime_received else None,
-            'is_read': item.is_read,
-            'has_attachments': item.has_attachments,
-        })
-    
+
+        messages.append(
+            {
+                "id": item.id,
+                "changekey": item.changekey,
+                "subject": item.subject,
+                "from": item.sender.email_address if item.sender else None,
+                "to": [r.email_address for r in (item.to_recipients or [])],
+                "cc": [r.email_address for r in (item.cc_recipients or [])],
+                "datetime_received": item.datetime_received.isoformat()
+                if item.datetime_received
+                else None,
+                "is_read": item.is_read,
+                "has_attachments": item.has_attachments,
+            }
+        )
+
     return messages
 
 
-def get_message(account: Account, item_id: str, folder: str = 'inbox') -> dict:
+def get_message(account: Account, item_id: str, folder: str = "inbox") -> dict:
     """Get a full message by ID including body."""
     mail_folder = get_folder(account, folder)
-    
+
     # Search in the folder
     for item in mail_folder.all():
         if item.id == item_id:
             return {
-                'id': item.id,
-                'changekey': item.changekey,
-                'subject': item.subject,
-                'from': item.sender.email_address if item.sender else None,
-                'to': [r.email_address for r in (item.to_recipients or [])],
-                'cc': [r.email_address for r in (item.cc_recipients or [])],
-                'datetime_received': item.datetime_received.isoformat() if item.datetime_received else None,
-                'is_read': item.is_read,
-                'has_attachments': item.has_attachments,
-                'body': item.body,
-                'body_type': 'html' if isinstance(item.body, HTMLBody) else 'text',
+                "id": item.id,
+                "changekey": item.changekey,
+                "subject": item.subject,
+                "from": item.sender.email_address if item.sender else None,
+                "to": [r.email_address for r in (item.to_recipients or [])],
+                "cc": [r.email_address for r in (item.cc_recipients or [])],
+                "datetime_received": item.datetime_received.isoformat()
+                if item.datetime_received
+                else None,
+                "is_read": item.is_read,
+                "has_attachments": item.has_attachments,
+                "body": item.body,
+                "body_type": "html" if isinstance(item.body, HTMLBody) else "text",
             }
-    
-    return {'error': 'Message not found'}
+
+    return {"error": "Message not found"}
 
 
 def fetch_messages(
     account: Account,
     folder: str,
     output_dir: str,
-    format: str = 'maildir',
+    format: str = "maildir",
     limit: Optional[int] = None,
 ) -> dict:
     """Fetch messages and save to maildir or mbox format."""
     mail_folder = get_folder(account, folder)
-    
-    if format == 'maildir':
+
+    if format == "maildir":
         return _fetch_to_maildir(mail_folder, output_dir, limit)
-    elif format == 'mbox':
+    elif format == "mbox":
         return _fetch_to_mbox(mail_folder, output_dir, limit)
     else:
-        return {'error': f'Unknown format: {format}'}
+        return {"error": f"Unknown format: {format}"}
 
 
 def _fetch_to_maildir(mail_folder, output_dir: str, limit: Optional[int]) -> dict:
     """Save messages to Maildir format."""
     # Create Maildir structure
-    cur_dir = os.path.join(output_dir, 'cur')
-    new_dir = os.path.join(output_dir, 'new')
-    tmp_dir = os.path.join(output_dir, 'tmp')
-    
+    cur_dir = os.path.join(output_dir, "cur")
+    new_dir = os.path.join(output_dir, "new")
+    tmp_dir = os.path.join(output_dir, "tmp")
+
     os.makedirs(cur_dir, exist_ok=True)
     os.makedirs(new_dir, exist_ok=True)
     os.makedirs(tmp_dir, exist_ok=True)
-    
-    query = mail_folder.all().order_by('-datetime_received')
+
+    query = mail_folder.all().order_by("-datetime_received")
     if limit:
         query = query[:limit]
-    
+
     count = 0
     for item in query:
-        if not hasattr(item, 'subject'):
+        if not hasattr(item, "subject"):
             continue
-        
+
         # Build email message
         msg = _item_to_email(item)
-        
+
         # Generate filename
-        timestamp = item.datetime_received.timestamp() if item.datetime_received else datetime.now().timestamp()
-        flags = 'S' if item.is_read else ''
+        timestamp = (
+            item.datetime_received.timestamp()
+            if item.datetime_received
+            else datetime.now().timestamp()
+        )
+        flags = "S" if item.is_read else ""
         filename = f"{int(timestamp)}.{item.id[:20]}.h8:2,{flags}"
-        
+
         # Save to cur or new based on read status
         target_dir = cur_dir if item.is_read else new_dir
         filepath = os.path.join(target_dir, filename)
-        
-        with open(filepath, 'w') as f:
+
+        with open(filepath, "w") as f:
             f.write(msg.as_string())
-        
+
         count += 1
-    
-    return {'success': True, 'count': count, 'output': output_dir}
+
+    return {"success": True, "count": count, "output": output_dir}
 
 
 def _fetch_to_mbox(mail_folder, output_dir: str, limit: Optional[int]) -> dict:
     """Save messages to mbox format."""
     import mailbox
-    
+
     os.makedirs(output_dir, exist_ok=True)
-    mbox_path = os.path.join(output_dir, 'mail.mbox')
-    
+    mbox_path = os.path.join(output_dir, "mail.mbox")
+
     mbox = mailbox.mbox(mbox_path)
     mbox.lock()
-    
-    query = mail_folder.all().order_by('-datetime_received')
+
+    query = mail_folder.all().order_by("-datetime_received")
     if limit:
         query = query[:limit]
-    
+
     count = 0
     try:
         for item in query:
-            if not hasattr(item, 'subject'):
+            if not hasattr(item, "subject"):
                 continue
-            
+
             msg = _item_to_email(item)
             mbox.add(msg)
             count += 1
     finally:
         mbox.unlock()
         mbox.close()
-    
-    return {'success': True, 'count': count, 'output': mbox_path}
+
+    return {"success": True, "count": count, "output": mbox_path}
 
 
 def _item_to_email(item) -> email.message.EmailMessage:
     """Convert an EWS item to an email.message.EmailMessage."""
-    msg = MIMEMultipart('alternative')
-    
-    msg['Subject'] = item.subject or ''
-    msg['From'] = item.sender.email_address if item.sender else ''
-    msg['To'] = ', '.join(r.email_address for r in (item.to_recipients or []))
+    msg = MIMEMultipart("alternative")
+
+    msg["Subject"] = item.subject or ""
+    msg["From"] = item.sender.email_address if item.sender else ""
+    msg["To"] = ", ".join(r.email_address for r in (item.to_recipients or []))
     if item.cc_recipients:
-        msg['Cc'] = ', '.join(r.email_address for r in item.cc_recipients)
+        msg["Cc"] = ", ".join(r.email_address for r in item.cc_recipients)
     if item.datetime_received:
-        msg['Date'] = item.datetime_received.strftime('%a, %d %b %Y %H:%M:%S %z')
-    msg['Message-ID'] = f"<{item.id}@ews>"
-    
+        msg["Date"] = item.datetime_received.strftime("%a, %d %b %Y %H:%M:%S %z")
+    msg["Message-ID"] = f"<{item.id}@ews>"
+
     # Add body
     if item.body:
         if isinstance(item.body, HTMLBody):
-            msg.attach(MIMEText(str(item.body), 'html'))
+            msg.attach(MIMEText(str(item.body), "html"))
         else:
-            msg.attach(MIMEText(str(item.body), 'plain'))
-    
+            msg.attach(MIMEText(str(item.body), "plain"))
+
     return msg
 
 
 def send_message(account: Account, message_data: dict) -> dict:
     """Send an email message."""
-    to_recipients = [Mailbox(email_address=addr) for addr in message_data['to']]
-    cc_recipients = [Mailbox(email_address=addr) for addr in message_data.get('cc', [])]
-    
-    body = message_data.get('body', '')
-    if message_data.get('html', False):
+    to_recipients = [Mailbox(email_address=addr) for addr in message_data["to"]]
+    cc_recipients = [Mailbox(email_address=addr) for addr in message_data.get("cc", [])]
+
+    body = message_data.get("body", "")
+    if message_data.get("html", False):
         body = HTMLBody(body)
-    
+
     msg = Message(
         account=account,
-        subject=message_data['subject'],
+        subject=message_data["subject"],
         body=body,
         to_recipients=to_recipients,
         cc_recipients=cc_recipients if cc_recipients else None,
     )
-    
+
     msg.send()
-    
+
     return {
-        'success': True,
-        'subject': message_data['subject'],
-        'to': message_data['to'],
+        "success": True,
+        "subject": message_data["subject"],
+        "to": message_data["to"],
     }
+
+
+def save_draft(account: Account, draft_data: dict) -> dict:
+    """Save a new draft to Exchange drafts folder.
+
+    Args:
+        account: EWS account
+        draft_data: Dict with keys: to, cc, bcc, subject, body, html, in_reply_to, references
+
+    Returns:
+        Dict with id, changekey, and success status
+    """
+    to_recipients = [Mailbox(email_address=addr) for addr in draft_data.get("to", [])]
+    cc_recipients = [Mailbox(email_address=addr) for addr in draft_data.get("cc", [])]
+    bcc_recipients = [Mailbox(email_address=addr) for addr in draft_data.get("bcc", [])]
+
+    body = draft_data.get("body", "")
+    if draft_data.get("html", False):
+        body = HTMLBody(body)
+
+    msg = Message(
+        account=account,
+        folder=account.drafts,
+        subject=draft_data.get("subject", ""),
+        body=body,
+        to_recipients=to_recipients if to_recipients else None,
+        cc_recipients=cc_recipients if cc_recipients else None,
+        bcc_recipients=bcc_recipients if bcc_recipients else None,
+    )
+
+    # Set reply headers if provided
+    if draft_data.get("in_reply_to"):
+        msg.in_reply_to = draft_data["in_reply_to"]
+    if draft_data.get("references"):
+        msg.references = draft_data["references"]
+
+    # Save the draft
+    msg.save()
+
+    return {
+        "success": True,
+        "id": msg.id,
+        "changekey": msg.changekey,
+        "subject": draft_data.get("subject", ""),
+    }
+
+
+def update_draft(account: Account, item_id: str, update_data: dict) -> dict:
+    """Update an existing draft.
+
+    Args:
+        account: EWS account
+        item_id: The item ID of the draft to update
+        update_data: Dict with fields to update (to, cc, bcc, subject, body, html)
+
+    Returns:
+        Dict with updated id, changekey, and success status
+    """
+    # Find the draft
+    drafts_folder = account.drafts
+    draft = None
+
+    for item in drafts_folder.all():
+        if item.id == item_id:
+            draft = item
+            break
+
+    if draft is None:
+        return {"success": False, "error": f"Draft not found: {item_id}"}
+
+    # Update fields
+    if "to" in update_data:
+        draft.to_recipients = [
+            Mailbox(email_address=addr) for addr in update_data["to"]
+        ]
+    if "cc" in update_data:
+        draft.cc_recipients = [
+            Mailbox(email_address=addr) for addr in update_data["cc"]
+        ]
+    if "bcc" in update_data:
+        draft.bcc_recipients = [
+            Mailbox(email_address=addr) for addr in update_data["bcc"]
+        ]
+    if "subject" in update_data:
+        draft.subject = update_data["subject"]
+    if "body" in update_data:
+        body = update_data["body"]
+        if update_data.get("html", False):
+            body = HTMLBody(body)
+        draft.body = body
+
+    # Save the changes
+    draft.save()
+
+    return {
+        "success": True,
+        "id": draft.id,
+        "changekey": draft.changekey,
+        "subject": draft.subject,
+    }
+
+
+def delete_draft(account: Account, item_id: str) -> dict:
+    """Delete a draft.
+
+    Args:
+        account: EWS account
+        item_id: The item ID of the draft to delete
+
+    Returns:
+        Dict with success status
+    """
+    # Find the draft
+    drafts_folder = account.drafts
+    draft = None
+
+    for item in drafts_folder.all():
+        if item.id == item_id:
+            draft = item
+            break
+
+    if draft is None:
+        return {"success": False, "error": f"Draft not found: {item_id}"}
+
+    # Delete the draft (move to trash by default, or hard delete)
+    draft.delete()
+
+    return {
+        "success": True,
+        "id": item_id,
+    }
+
+
+def list_drafts(account: Account, limit: int = 20) -> list[dict]:
+    """List drafts in the drafts folder.
+
+    Args:
+        account: EWS account
+        limit: Maximum number of drafts to return
+
+    Returns:
+        List of draft dictionaries
+    """
+    drafts_folder = account.drafts
+
+    query = (
+        drafts_folder.all()
+        .order_by("-last_modified_time")
+        .only(
+            "id",
+            "changekey",
+            "subject",
+            "to_recipients",
+            "cc_recipients",
+            "last_modified_time",
+        )[:limit]
+    )
+
+    drafts = []
+    for item in query:
+        if not hasattr(item, "subject"):
+            continue
+
+        drafts.append(
+            {
+                "id": item.id,
+                "changekey": item.changekey,
+                "subject": item.subject,
+                "to": [r.email_address for r in (item.to_recipients or [])],
+                "cc": [r.email_address for r in (item.cc_recipients or [])],
+                "last_modified": item.last_modified_time.isoformat()
+                if item.last_modified_time
+                else None,
+            }
+        )
+
+    return drafts
