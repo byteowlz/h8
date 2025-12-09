@@ -122,6 +122,7 @@ pub struct MessageSync {
     pub received_at: Option<String>,
     pub is_read: bool,
     pub is_draft: bool,
+    pub has_attachments: bool,
     pub synced_at: Option<String>,
     pub local_hash: Option<String>,
 }

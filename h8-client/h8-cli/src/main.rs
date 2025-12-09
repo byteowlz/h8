@@ -207,6 +207,9 @@ enum MailCommand {
     Edit(MailEditArgs),
     /// Sync messages with server
     Sync(MailSyncArgs),
+    /// List or download attachments
+    #[command(alias = "att")]
+    Attachments(MailAttachmentsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -385,6 +388,21 @@ struct MailSyncArgs {
     /// Force full re-sync (ignore sync tokens)
     #[arg(long)]
     full: bool,
+}
+
+#[derive(Debug, Args)]
+struct MailAttachmentsArgs {
+    /// Message ID
+    id: String,
+    /// Folder containing the message
+    #[arg(short = 'f', long, default_value = "inbox")]
+    folder: String,
+    /// Download attachment by index
+    #[arg(short = 'd', long)]
+    download: Option<usize>,
+    /// Output path (directory or file)
+    #[arg(short = 'o', long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -584,6 +602,7 @@ fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
         MailCommand::Drafts(args) => handle_mail_drafts(ctx, &account, args),
         MailCommand::Edit(args) => handle_mail_edit(ctx, &account, args),
         MailCommand::Sync(args) => handle_mail_sync(ctx, &client, &account, args),
+        MailCommand::Attachments(args) => handle_mail_attachments(ctx, &client, &account, args),
     }
 }
 
@@ -1116,6 +1135,11 @@ fn handle_mail_sync(
             mail_dir.store_with_id(folder, content.as_bytes(), &flags, &local_id)
                 .map_err(|e| anyhow!("{e}"))?;
             
+            // Check for attachments
+            let has_attachments = full_msg.get("has_attachments")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            
             // Store in database
             let msg_sync = h8_core::types::MessageSync {
                 local_id: local_id.clone(),
@@ -1127,6 +1151,7 @@ fn handle_mail_sync(
                 received_at: Some(date.to_string()),
                 is_read,
                 is_draft: folder == FOLDER_DRAFTS,
+                has_attachments,
                 synced_at: Some(chrono::Utc::now().to_rfc3339()),
                 local_hash: None,
             };
@@ -1139,6 +1164,70 @@ fn handle_mail_sync(
     }
     
     println!("Sync complete");
+    Ok(())
+}
+
+fn handle_mail_attachments(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    args: MailAttachmentsArgs,
+) -> Result<()> {
+    // Resolve human-readable ID to remote ID if needed
+    let db_path = ctx.paths.sync_db_path(account);
+    let remote_id = if db_path.exists() {
+        let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+        let id_gen = IdGenerator::new(&db);
+        id_gen.resolve(&args.id)
+            .map_err(|e| anyhow!("{e}"))?
+            .unwrap_or_else(|| args.id.clone())
+    } else {
+        args.id.clone()
+    };
+    
+    if let Some(index) = args.download {
+        // Download specific attachment
+        let output_path = args.output.unwrap_or_else(|| PathBuf::from("."));
+        let result = client.mail_attachment_download(
+            account,
+            &args.folder,
+            &remote_id,
+            index,
+            &output_path,
+        ).map_err(|e| anyhow!("{e}"))?;
+        
+        if let Some(path) = result.get("path").and_then(|v| v.as_str()) {
+            println!("Downloaded: {}", path);
+        }
+        emit_output(&ctx.common, &result)?;
+    } else {
+        // List attachments
+        let attachments = client.mail_attachments_list(account, &args.folder, &remote_id)
+            .map_err(|e| anyhow!("{e}"))?;
+        
+        if let Some(arr) = attachments.as_array() {
+            if arr.is_empty() {
+                println!("No attachments");
+                return Ok(());
+            }
+            
+            for att in arr {
+                let idx = att.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                let name = att.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
+                let size = att.get("size").and_then(|v| v.as_u64());
+                let ctype = att.get("content_type").and_then(|v| v.as_str()).unwrap_or("unknown");
+                
+                if let Some(s) = size {
+                    println!("[{}] {} ({} bytes, {})", idx, name, s, ctype);
+                } else {
+                    println!("[{}] {} ({})", idx, name, ctype);
+                }
+            }
+        } else {
+            emit_output(&ctx.common, &attachments)?;
+        }
+    }
+    
     Ok(())
 }
 

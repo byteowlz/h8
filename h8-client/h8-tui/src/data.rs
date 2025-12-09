@@ -14,6 +14,7 @@ pub type Result<T> = std::result::Result<T, DataError>;
 
 /// Errors that can occur during data operations.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum DataError {
     /// h8-core error.
     Core(h8_core::Error),
@@ -86,6 +87,7 @@ impl DataSource {
     }
 
     /// Get the current account, if any.
+    #[allow(dead_code)]
     pub fn account(&self) -> Option<&str> {
         self.account.as_deref()
     }
@@ -180,6 +182,7 @@ impl DataSource {
     }
 
     /// Get a single email by local ID.
+    #[allow(dead_code)]
     pub fn get_email(&mut self, local_id: &str) -> Result<Option<MessageSync>> {
         let db = self.get_db()?;
         let msg = db.get_message(local_id)?;
@@ -197,7 +200,8 @@ impl DataSource {
         }
     }
 
-    /// Delete emails by local IDs.
+    /// Delete emails by local IDs (permanent deletion).
+    #[allow(dead_code)]
     pub fn delete_emails(&mut self, folder: &str, local_ids: &[&str]) -> Result<usize> {
         let maildir = self.get_maildir()?;
         let mut deleted = 0;

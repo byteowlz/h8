@@ -61,6 +61,9 @@ pub fn draw_middle_pane(frame: &mut Frame, app: &App, area: Rect) {
             // Unread indicator
             let unread = if email.is_read { " " } else { "*" };
 
+            // Attachment indicator
+            let attach = if email.has_attachments { "@" } else { " " };
+
             // Subject (truncate if needed)
             let subject = email
                 .subject
@@ -79,7 +82,7 @@ pub fn draw_middle_pane(frame: &mut Frame, app: &App, area: Rect) {
                 .take(20)
                 .collect::<String>();
 
-            let content = format!("{} {} {} - {}", marker, unread, from, subject);
+            let content = format!("{} {}{} {} - {}", marker, unread, attach, from, subject);
 
             let style = if is_selected_cursor && is_focused {
                 Style::default()
@@ -128,6 +131,7 @@ mod tests {
             received_at: None,
             is_read,
             is_draft: false,
+            has_attachments: false,
             synced_at: None,
             local_hash: None,
         }

@@ -46,6 +46,7 @@ impl Database {
                 received_at TEXT,
                 is_read INTEGER DEFAULT 0,
                 is_draft INTEGER DEFAULT 0,
+                has_attachments INTEGER DEFAULT 0,
                 synced_at TEXT,
                 local_hash TEXT
             );
@@ -68,6 +69,13 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_id_pool_status ON id_pool(status);
             "#,
         )?;
+        
+        // Migration: add has_attachments column if it doesn't exist
+        let _ = self.conn.execute(
+            "ALTER TABLE messages ADD COLUMN has_attachments INTEGER DEFAULT 0",
+            [],
+        );
+        
         Ok(())
     }
 
@@ -75,8 +83,8 @@ impl Database {
     pub fn upsert_message(&self, msg: &MessageSync) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO messages (local_id, remote_id, change_key, folder, subject, from_addr, received_at, is_read, is_draft, synced_at, local_hash)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            INSERT INTO messages (local_id, remote_id, change_key, folder, subject, from_addr, received_at, is_read, is_draft, has_attachments, synced_at, local_hash)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(local_id) DO UPDATE SET
                 remote_id = excluded.remote_id,
                 change_key = excluded.change_key,
@@ -86,6 +94,7 @@ impl Database {
                 received_at = excluded.received_at,
                 is_read = excluded.is_read,
                 is_draft = excluded.is_draft,
+                has_attachments = excluded.has_attachments,
                 synced_at = excluded.synced_at,
                 local_hash = excluded.local_hash
             "#,
@@ -99,6 +108,7 @@ impl Database {
                 msg.received_at,
                 msg.is_read,
                 msg.is_draft,
+                msg.has_attachments,
                 msg.synced_at,
                 msg.local_hash,
             ],
@@ -109,7 +119,7 @@ impl Database {
     /// Get a message by local ID.
     pub fn get_message(&self, local_id: &str) -> Result<Option<MessageSync>> {
         let mut stmt = self.conn.prepare(
-            "SELECT local_id, remote_id, change_key, folder, subject, from_addr, received_at, is_read, is_draft, synced_at, local_hash FROM messages WHERE local_id = ?1",
+            "SELECT local_id, remote_id, change_key, folder, subject, from_addr, received_at, is_read, is_draft, has_attachments, synced_at, local_hash FROM messages WHERE local_id = ?1",
         )?;
         let mut rows = stmt.query(params![local_id])?;
         if let Some(row) = rows.next()? {
@@ -123,8 +133,9 @@ impl Database {
                 received_at: row.get(6)?,
                 is_read: row.get(7)?,
                 is_draft: row.get(8)?,
-                synced_at: row.get(9)?,
-                local_hash: row.get(10)?,
+                has_attachments: row.get(9)?,
+                synced_at: row.get(10)?,
+                local_hash: row.get(11)?,
             }))
         } else {
             Ok(None)
@@ -134,7 +145,7 @@ impl Database {
     /// Get a message by remote ID.
     pub fn get_message_by_remote_id(&self, remote_id: &str) -> Result<Option<MessageSync>> {
         let mut stmt = self.conn.prepare(
-            "SELECT local_id, remote_id, change_key, folder, subject, from_addr, received_at, is_read, is_draft, synced_at, local_hash FROM messages WHERE remote_id = ?1",
+            "SELECT local_id, remote_id, change_key, folder, subject, from_addr, received_at, is_read, is_draft, has_attachments, synced_at, local_hash FROM messages WHERE remote_id = ?1",
         )?;
         let mut rows = stmt.query(params![remote_id])?;
         if let Some(row) = rows.next()? {
@@ -148,8 +159,9 @@ impl Database {
                 received_at: row.get(6)?,
                 is_read: row.get(7)?,
                 is_draft: row.get(8)?,
-                synced_at: row.get(9)?,
-                local_hash: row.get(10)?,
+                has_attachments: row.get(9)?,
+                synced_at: row.get(10)?,
+                local_hash: row.get(11)?,
             }))
         } else {
             Ok(None)
@@ -159,7 +171,7 @@ impl Database {
     /// List messages in a folder.
     pub fn list_messages(&self, folder: &str, limit: usize) -> Result<Vec<MessageSync>> {
         let mut stmt = self.conn.prepare(
-            "SELECT local_id, remote_id, change_key, folder, subject, from_addr, received_at, is_read, is_draft, synced_at, local_hash FROM messages WHERE folder = ?1 ORDER BY received_at DESC LIMIT ?2",
+            "SELECT local_id, remote_id, change_key, folder, subject, from_addr, received_at, is_read, is_draft, has_attachments, synced_at, local_hash FROM messages WHERE folder = ?1 ORDER BY received_at DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![folder, limit], |row| {
             Ok(MessageSync {
@@ -172,8 +184,9 @@ impl Database {
                 received_at: row.get(6)?,
                 is_read: row.get(7)?,
                 is_draft: row.get(8)?,
-                synced_at: row.get(9)?,
-                local_hash: row.get(10)?,
+                has_attachments: row.get(9)?,
+                synced_at: row.get(10)?,
+                local_hash: row.get(11)?,
             })
         })?;
         let mut messages = Vec::new();
@@ -351,6 +364,7 @@ mod tests {
             received_at: Some("2024-01-01T00:00:00Z".to_string()),
             is_read: false,
             is_draft: false,
+            has_attachments: true,
             synced_at: None,
             local_hash: None,
         };
@@ -360,12 +374,15 @@ mod tests {
         let retrieved = db.get_message("test-local").unwrap().unwrap();
         assert_eq!(retrieved.remote_id, "remote-123");
         assert_eq!(retrieved.subject, Some("Test Subject".to_string()));
+        assert!(retrieved.has_attachments);
         
         let by_remote = db.get_message_by_remote_id("remote-123").unwrap().unwrap();
         assert_eq!(by_remote.local_id, "test-local");
+        assert!(by_remote.has_attachments);
         
         let messages = db.list_messages("inbox", 10).unwrap();
         assert_eq!(messages.len(), 1);
+        assert!(messages[0].has_attachments);
         
         assert!(db.delete_message("test-local").unwrap());
         assert!(db.get_message("test-local").unwrap().is_none());

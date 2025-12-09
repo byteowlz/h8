@@ -134,6 +134,31 @@ impl ServiceClient {
         self.delete(&format!("/mail/draft/{}?account={}", id, account))
     }
 
+    /// List attachments for a message.
+    pub fn mail_attachments_list(&self, account: &str, folder: &str, id: &str) -> Result<Value> {
+        let params = [("account", account), ("folder", folder)];
+        self.get(&format!("/mail/{}/attachments", id), &params)
+    }
+
+    /// Download a specific attachment.
+    pub fn mail_attachment_download(
+        &self,
+        account: &str,
+        folder: &str,
+        id: &str,
+        index: usize,
+        output_path: &Path,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "index": index,
+            "output_path": output_path.display().to_string(),
+        });
+        self.post_json(
+            &format!("/mail/{}/attachments/download?account={}&folder={}", id, account, folder),
+            payload,
+        )
+    }
+
     /// List contacts.
     pub fn contacts_list(&self, account: &str, limit: usize, search: Option<&str>) -> Result<Value> {
         let limit_str = limit.to_string();

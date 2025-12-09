@@ -480,6 +480,46 @@ async def draft_delete(item_id: str, account: Optional[str] = None):
     return await safe_call_with_retry(mail.delete_draft, email, acct, item_id)
 
 
+@app.get("/mail/{item_id}/attachments")
+async def mail_attachments_list(
+    item_id: str, folder: str = "inbox", account: Optional[str] = None
+):
+    """List attachments for a message."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        mail.list_attachments, email, acct, item_id, folder
+    )
+
+
+class AttachmentDownload(BaseModel):
+    """Request model for downloading an attachment."""
+
+    index: int
+    output_path: str
+
+
+@app.post("/mail/{item_id}/attachments/download")
+async def mail_attachment_download(
+    item_id: str,
+    payload: AttachmentDownload,
+    folder: str = "inbox",
+    account: Optional[str] = None,
+):
+    """Download a specific attachment."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        mail.download_attachment,
+        email,
+        acct,
+        item_id,
+        payload.index,
+        payload.output_path,
+        folder,
+    )
+
+
 @app.get("/contacts")
 async def contacts_list(
     limit: int = 100,

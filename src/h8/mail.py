@@ -433,3 +433,95 @@ def list_drafts(account: Account, limit: int = 20) -> list[dict]:
         )
 
     return drafts
+
+
+def list_attachments(
+    account: Account, item_id: str, folder: str = "inbox"
+) -> list[dict]:
+    """List attachments for a message.
+
+    Args:
+        account: EWS account
+        item_id: The item ID of the message
+        folder: Folder containing the message
+
+    Returns:
+        List of attachment dictionaries with id, name, size, content_type
+    """
+    mail_folder = get_folder(account, folder)
+
+    for item in mail_folder.all():
+        if item.id == item_id:
+            if not item.has_attachments or not item.attachments:
+                return []
+
+            attachments = []
+            for i, att in enumerate(item.attachments):
+                attachments.append(
+                    {
+                        "index": i,
+                        "name": att.name or f"attachment_{i}",
+                        "size": getattr(att, "size", None),
+                        "content_type": getattr(
+                            att, "content_type", "application/octet-stream"
+                        ),
+                    }
+                )
+            return attachments
+
+    return []
+
+
+def download_attachment(
+    account: Account,
+    item_id: str,
+    attachment_index: int,
+    output_path: str,
+    folder: str = "inbox",
+) -> dict:
+    """Download a specific attachment from a message.
+
+    Args:
+        account: EWS account
+        item_id: The item ID of the message
+        attachment_index: Index of the attachment to download
+        output_path: Path to save the attachment
+        folder: Folder containing the message
+
+    Returns:
+        Dict with success status and file path
+    """
+    mail_folder = get_folder(account, folder)
+
+    for item in mail_folder.all():
+        if item.id == item_id:
+            if not item.has_attachments or not item.attachments:
+                return {"success": False, "error": "Message has no attachments"}
+
+            if attachment_index < 0 or attachment_index >= len(item.attachments):
+                return {
+                    "success": False,
+                    "error": f"Invalid attachment index: {attachment_index}",
+                }
+
+            att = item.attachments[attachment_index]
+
+            # Determine output file path
+            filename = att.name or f"attachment_{attachment_index}"
+            if os.path.isdir(output_path):
+                filepath = os.path.join(output_path, filename)
+            else:
+                filepath = output_path
+
+            # Write attachment content
+            with open(filepath, "wb") as f:
+                f.write(att.content)
+
+            return {
+                "success": True,
+                "path": filepath,
+                "name": filename,
+                "size": len(att.content),
+            }
+
+    return {"success": False, "error": "Message not found"}

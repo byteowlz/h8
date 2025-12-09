@@ -77,6 +77,9 @@ fn run_app<B: ratatui::backend::Backend>(
         // Draw the UI
         terminal.draw(|frame| ui::draw(frame, app))?;
 
+        // Process any pending actions
+        process_pending_action(app, data_source);
+
         // Poll for events
         if event::poll(Duration::from_millis(POLL_TIMEOUT_MS))? {
             if let Event::Key(key_event) = event::read()? {
@@ -123,6 +126,124 @@ fn handle_key_with_data(app: &mut App, data_source: &mut DataSource, action: Key
 
     // Default handling
     handle_key(app, action)
+}
+
+/// Process any pending actions that need data source access.
+fn process_pending_action(app: &mut App, data_source: &mut DataSource) {
+    use app::PendingAction;
+
+    let action = std::mem::take(&mut app.pending_action);
+    match action {
+        PendingAction::None => {}
+        PendingAction::MarkRead => {
+            execute_mark_read(app, data_source);
+        }
+        PendingAction::MarkUnread => {
+            execute_mark_unread(app, data_source);
+        }
+        PendingAction::LoadFolder(folder) => {
+            load_folder(app, data_source, &folder);
+        }
+        PendingAction::ViewEmail(id) => {
+            view_email(app, data_source, &id);
+        }
+    }
+}
+
+/// Mark selected emails as read.
+fn execute_mark_read(app: &mut App, data_source: &mut DataSource) {
+    let indices = app.get_operation_indices();
+    let ids: Vec<String> = indices
+        .iter()
+        .filter_map(|&i| app.emails.get(i).map(|e| e.local_id.clone()))
+        .collect();
+
+    if ids.is_empty() {
+        return;
+    }
+
+    let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+
+    match data_source.mark_read(&app.current_folder, &id_refs) {
+        Ok(count) => {
+            // Update local state
+            for id in &ids {
+                if let Some(email) = app.emails.iter_mut().find(|e| &e.local_id == id) {
+                    email.is_read = true;
+                }
+            }
+            app.email_selection.deselect_all();
+            app.set_status(format!("Marked {} email(s) as read", count));
+        }
+        Err(e) => {
+            app.set_status(format!("Failed to mark as read: {}", e));
+        }
+    }
+}
+
+/// Mark selected emails as unread.
+fn execute_mark_unread(app: &mut App, data_source: &mut DataSource) {
+    let indices = app.get_operation_indices();
+    let ids: Vec<String> = indices
+        .iter()
+        .filter_map(|&i| app.emails.get(i).map(|e| e.local_id.clone()))
+        .collect();
+
+    if ids.is_empty() {
+        return;
+    }
+
+    let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+
+    match data_source.mark_unread(&app.current_folder, &id_refs) {
+        Ok(count) => {
+            // Update local state
+            for id in &ids {
+                if let Some(email) = app.emails.iter_mut().find(|e| &e.local_id == id) {
+                    email.is_read = false;
+                }
+            }
+            app.email_selection.deselect_all();
+            app.set_status(format!("Marked {} email(s) as unread", count));
+        }
+        Err(e) => {
+            app.set_status(format!("Failed to mark as unread: {}", e));
+        }
+    }
+}
+
+/// Load emails from a specific folder.
+fn load_folder(app: &mut App, data_source: &mut DataSource, folder: &str) {
+    app.current_folder = folder.to_string();
+    match data_source.load_emails(folder, EMAIL_LIMIT) {
+        Ok(emails) => {
+            app.emails = emails;
+            app.email_selection.reset();
+            let display_name = app.current_folder_display().to_string();
+            app.set_status(format!("Loaded {} - {} emails", display_name, app.emails.len()));
+        }
+        Err(e) => {
+            app.set_status(format!("Failed to load {}: {}", folder, e));
+        }
+    }
+}
+
+/// View an email (load full content).
+fn view_email(app: &mut App, data_source: &mut DataSource, local_id: &str) {
+    match data_source.get_email_content(&app.current_folder, local_id) {
+        Ok(Some(content)) => {
+            // For now, just show that we loaded it
+            let lines = content.lines().count();
+            app.set_status(format!("Loaded email ({} lines)", lines));
+            app.focus_right();
+        }
+        Ok(None) => {
+            app.set_status("Email not found in maildir");
+        }
+        Err(e) => {
+            app.set_status(format!("Failed to load email: {}", e));
+        }
+    }
 }
 
 /// Try to load real data from h8-core.
@@ -275,6 +396,7 @@ fn load_demo_data(app: &mut App) {
             received_at: Some("2024-12-09 09:30:00".to_string()),
             is_read: false,
             is_draft: false,
+            has_attachments: true,
             synced_at: None,
             local_hash: None,
         },
@@ -288,6 +410,7 @@ fn load_demo_data(app: &mut App) {
             received_at: Some("2024-12-09 08:45:00".to_string()),
             is_read: false,
             is_draft: false,
+            has_attachments: false,
             synced_at: None,
             local_hash: None,
         },
@@ -301,6 +424,7 @@ fn load_demo_data(app: &mut App) {
             received_at: Some("2024-12-09 07:15:00".to_string()),
             is_read: false,
             is_draft: false,
+            has_attachments: false,
             synced_at: None,
             local_hash: None,
         },
@@ -314,6 +438,7 @@ fn load_demo_data(app: &mut App) {
             received_at: Some("2024-12-08 16:00:00".to_string()),
             is_read: true,
             is_draft: false,
+            has_attachments: true,
             synced_at: None,
             local_hash: None,
         },
@@ -327,6 +452,7 @@ fn load_demo_data(app: &mut App) {
             received_at: Some("2024-12-08 10:00:00".to_string()),
             is_read: true,
             is_draft: false,
+            has_attachments: false,
             synced_at: None,
             local_hash: None,
         },
@@ -340,6 +466,7 @@ fn load_demo_data(app: &mut App) {
             received_at: Some("2024-12-07 14:30:00".to_string()),
             is_read: true,
             is_draft: false,
+            has_attachments: true,
             synced_at: None,
             local_hash: None,
         },
@@ -353,6 +480,7 @@ fn load_demo_data(app: &mut App) {
             received_at: Some("2024-12-06 09:00:00".to_string()),
             is_read: true,
             is_draft: false,
+            has_attachments: true,
             synced_at: None,
             local_hash: None,
         },
@@ -366,6 +494,7 @@ fn load_demo_data(app: &mut App) {
             received_at: Some("2024-12-05 22:15:00".to_string()),
             is_read: true,
             is_draft: false,
+            has_attachments: false,
             synced_at: None,
             local_hash: None,
         },
@@ -379,6 +508,7 @@ fn load_demo_data(app: &mut App) {
             received_at: Some("2024-12-05 11:00:00".to_string()),
             is_read: true,
             is_draft: false,
+            has_attachments: true,
             synced_at: None,
             local_hash: None,
         },
@@ -392,6 +522,7 @@ fn load_demo_data(app: &mut App) {
             received_at: Some("2024-12-01 09:00:00".to_string()),
             is_read: true,
             is_draft: false,
+            has_attachments: false,
             synced_at: None,
             local_hash: None,
         },
