@@ -4,7 +4,7 @@ mod key_action;
 
 pub use key_action::KeyAction;
 
-use crate::app::{App, AppMode, FocusedPane, SortOption, WhichKeyContext};
+use crate::app::{App, AppMode, FocusedPane, PendingAction, SortOption, WhichKeyContext};
 
 /// Handle a key action in the application.
 /// Returns true if the app should quit.
@@ -194,10 +194,40 @@ fn handle_which_key_mode(app: &mut App, action: KeyAction) -> bool {
     match action {
         KeyAction::Escape => app.return_to_normal(),
         KeyAction::Char(c) => {
-            let options = context.options();
-            if let Some((_, label)) = options.iter().find(|(k, _)| *k == c) {
-                app.set_status(format!("Selected: {}", label));
-                // In a real implementation, we'd perform the action here
+            // Handle context-specific actions
+            match (&context, c) {
+                // Mark context actions
+                (WhichKeyContext::Mark, 'r') => {
+                    app.pending_action = PendingAction::MarkRead;
+                    app.set_status("Marking as read...");
+                }
+                (WhichKeyContext::Mark, 'u') => {
+                    app.pending_action = PendingAction::MarkUnread;
+                    app.set_status("Marking as unread...");
+                }
+                // Folder context actions
+                (WhichKeyContext::Folder, 'i') => {
+                    app.pending_action = PendingAction::LoadFolder("inbox".to_string());
+                }
+                (WhichKeyContext::Folder, 's') => {
+                    app.pending_action = PendingAction::LoadFolder("sent".to_string());
+                }
+                (WhichKeyContext::Folder, 'd') => {
+                    app.pending_action = PendingAction::LoadFolder("drafts".to_string());
+                }
+                (WhichKeyContext::Folder, 't') => {
+                    app.pending_action = PendingAction::LoadFolder("trash".to_string());
+                }
+                (WhichKeyContext::Folder, 'a') => {
+                    app.pending_action = PendingAction::LoadFolder("archive".to_string());
+                }
+                // Default: just show status
+                _ => {
+                    let options = context.options();
+                    if let Some((_, label)) = options.iter().find(|(k, _)| *k == c) {
+                        app.set_status(format!("Selected: {}", label));
+                    }
+                }
             }
             app.return_to_normal();
         }
@@ -367,6 +397,7 @@ mod tests {
             received_at: None,
             is_read: true,
             is_draft: false,
+            has_attachments: false,
             synced_at: None,
             local_hash: None,
         }
@@ -718,7 +749,28 @@ mod tests {
 
             handle_key(&mut app, KeyAction::Char('i'));
             assert_eq!(app.mode, AppMode::Normal);
-            assert!(app.status_message.is_some());
+            // Folder selection triggers LoadFolder pending action
+            assert_eq!(app.pending_action, PendingAction::LoadFolder("inbox".to_string()));
+        }
+
+        #[test]
+        fn test_which_key_mark_read() {
+            let mut app = App::new();
+            app.enter_which_key(WhichKeyContext::Mark);
+
+            handle_key(&mut app, KeyAction::Char('r'));
+            assert_eq!(app.mode, AppMode::Normal);
+            assert_eq!(app.pending_action, PendingAction::MarkRead);
+        }
+
+        #[test]
+        fn test_which_key_mark_unread() {
+            let mut app = App::new();
+            app.enter_which_key(WhichKeyContext::Mark);
+
+            handle_key(&mut app, KeyAction::Char('u'));
+            assert_eq!(app.mode, AppMode::Normal);
+            assert_eq!(app.pending_action, PendingAction::MarkUnread);
         }
     }
 

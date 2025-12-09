@@ -68,6 +68,9 @@ pub fn draw_right_pane(frame: &mut Frame, app: &App, area: Rect) {
     if email.is_draft {
         status_parts.push(Span::styled("DRAFT", Style::default().fg(Color::Magenta)));
     }
+    if email.has_attachments {
+        status_parts.push(Span::styled("ATTACHMENTS", Style::default().fg(Color::Cyan)));
+    }
     if !status_parts.is_empty() {
         let mut status_line = vec![Span::styled(
             "Status: ",
@@ -118,6 +121,7 @@ mod tests {
             received_at: Some("2024-01-15 10:30:00".to_string()),
             is_read: false,
             is_draft: false,
+            has_attachments: false,
             synced_at: None,
             local_hash: None,
         }
@@ -181,6 +185,24 @@ mod tests {
         let mut app = App::new();
         app.emails.push(create_test_email());
         app.focus_right();
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_right_pane(frame, &app, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_draw_right_pane_with_attachments() {
+        let backend = TestBackend::new(50, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        let mut email = create_test_email();
+        email.has_attachments = true;
+        app.emails.push(email);
 
         terminal
             .draw(|frame| {

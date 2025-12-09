@@ -321,6 +321,7 @@ impl FolderInfo {
 
 /// Pending data operation to be executed by main loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum PendingAction {
     /// No pending action.
     None,
@@ -874,6 +875,7 @@ mod tests {
                 received_at: None,
                 is_read: false,
                 is_draft: false,
+                has_attachments: false,
                 synced_at: None,
                 local_hash: None,
             });
@@ -953,6 +955,7 @@ mod tests {
                 received_at: None,
                 is_read: false,
                 is_draft: false,
+                has_attachments: false,
                 synced_at: None,
                 local_hash: None,
             });
@@ -1016,6 +1019,7 @@ mod tests {
                 received_at: None,
                 is_read: false,
                 is_draft: false,
+                has_attachments: false,
                 synced_at: None,
                 local_hash: None,
             });

@@ -13,7 +13,7 @@ from . import contacts
 from . import free
 
 
-DEFAULT_ACCOUNT = 'tommy.falkowski@iem.fraunhofer.de'
+DEFAULT_ACCOUNT = "tommy.falkowski@iem.fraunhofer.de"
 
 
 def output(data: Any, as_json: bool = True):
@@ -33,36 +33,40 @@ def output(data: Any, as_json: bool = True):
 
 def print_item(item: dict):
     """Print a single item in human-readable format."""
-    if 'error' in item:
+    if "error" in item:
         print(f"Error: {item['error']}", file=sys.stderr)
         return
-    
-    if 'subject' in item:  # Calendar or mail
+
+    if "subject" in item:  # Calendar or mail
         print(f"- {item.get('subject', 'No subject')}")
-        if 'start' in item:
+        if "start" in item:
             print(f"  Start: {item['start']}")
             print(f"  End: {item.get('end', 'N/A')}")
-            if item.get('location'):
+            if item.get("location"):
                 print(f"  Location: {item['location']}")
-        if 'from' in item:
+        if "from" in item:
             print(f"  From: {item['from']}")
             print(f"  Date: {item.get('datetime_received', 'N/A')}")
         print()
-    elif 'display_name' in item:  # Contact
+    elif "display_name" in item:  # Contact
         print(f"- {item.get('display_name', 'No name')}")
-        if item.get('email'):
+        if item.get("email"):
             print(f"  Email: {item['email']}")
-        if item.get('phone'):
+        if item.get("phone"):
             print(f"  Phone: {item['phone']}")
-        if item.get('company'):
+        if item.get("company"):
             print(f"  Company: {item['company']}")
         print()
-    elif 'duration_minutes' in item and 'day' in item:  # Free slot
-        start = item['start'].split('T')[1][:5] if 'T' in item['start'] else item['start']
-        end = item['end'].split('T')[1][:5] if 'T' in item['end'] else item['end']
-        print(f"- {item['day']} {item['date']}: {start} - {end} ({item['duration_minutes']} min)")
-    elif 'success' in item:
-        if item['success']:
+    elif "duration_minutes" in item and "day" in item:  # Free slot
+        start = (
+            item["start"].split("T")[1][:5] if "T" in item["start"] else item["start"]
+        )
+        end = item["end"].split("T")[1][:5] if "T" in item["end"] else item["end"]
+        print(
+            f"- {item['day']} {item['date']}: {start} - {end} ({item['duration_minutes']} min)"
+        )
+    elif "success" in item:
+        if item["success"]:
             print("Success")
         else:
             print(f"Failed: {item.get('error', 'Unknown error')}", file=sys.stderr)
@@ -139,10 +143,30 @@ def cmd_mail_send(args):
     output(result, args.json)
 
 
+def cmd_mail_attachments(args):
+    """List or download attachments from a message."""
+    account = get_account(args.account)
+
+    if args.download is not None:
+        # Download specific attachment
+        result = mail.download_attachment(
+            account,
+            args.id,
+            args.download,
+            args.output or ".",
+            folder=args.folder,
+        )
+        output(result, args.json)
+    else:
+        # List attachments
+        attachments = mail.list_attachments(account, args.id, folder=args.folder)
+        output(attachments, args.json)
+
+
 def cmd_contacts_list(args):
     """List contacts."""
     account = get_account(args.account)
-    search = getattr(args, 'search', None)
+    search = getattr(args, "search", None)
     contact_list = contacts.list_contacts(account, limit=args.limit, search=search)
     output(contact_list, args.json)
 
@@ -183,128 +207,183 @@ def cmd_free(args):
 
 def add_common_args(parser):
     """Add common arguments to a parser."""
-    parser.add_argument('--json', '-j', action='store_true',
-                        help='Output as JSON')
-    parser.add_argument('--account', '-a', default=DEFAULT_ACCOUNT,
-                        help=f'Email account (default: {DEFAULT_ACCOUNT})')
+    parser.add_argument("--json", "-j", action="store_true", help="Output as JSON")
+    parser.add_argument(
+        "--account",
+        "-a",
+        default=DEFAULT_ACCOUNT,
+        help=f"Email account (default: {DEFAULT_ACCOUNT})",
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(
-        prog='h8',
-        description='EWS CLI for calendar, mail, and contacts',
+        prog="h8",
+        description="EWS CLI for calendar, mail, and contacts",
     )
-    parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     add_common_args(parser)
-    
-    subparsers = parser.add_subparsers(dest='command', required=True)
-    
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
     # Calendar commands
-    cal_parser = subparsers.add_parser('calendar', aliases=['cal'], help='Calendar operations')
+    cal_parser = subparsers.add_parser(
+        "calendar", aliases=["cal"], help="Calendar operations"
+    )
     add_common_args(cal_parser)
-    cal_subparsers = cal_parser.add_subparsers(dest='subcommand', required=True)
-    
+    cal_subparsers = cal_parser.add_subparsers(dest="subcommand", required=True)
+
     # calendar list
-    cal_list = cal_subparsers.add_parser('list', aliases=['ls'], help='List calendar events')
+    cal_list = cal_subparsers.add_parser(
+        "list", aliases=["ls"], help="List calendar events"
+    )
     add_common_args(cal_list)
-    cal_list.add_argument('--days', '-d', type=int, default=7, help='Number of days to show')
-    cal_list.add_argument('--from', dest='from_date', help='Start date (ISO format)')
-    cal_list.add_argument('--to', dest='to_date', help='End date (ISO format)')
+    cal_list.add_argument(
+        "--days", "-d", type=int, default=7, help="Number of days to show"
+    )
+    cal_list.add_argument("--from", dest="from_date", help="Start date (ISO format)")
+    cal_list.add_argument("--to", dest="to_date", help="End date (ISO format)")
     cal_list.set_defaults(func=cmd_calendar_list)
-    
+
     # calendar create
-    cal_create = cal_subparsers.add_parser('create', aliases=['new'], help='Create event (JSON from stdin)')
+    cal_create = cal_subparsers.add_parser(
+        "create", aliases=["new"], help="Create event (JSON from stdin)"
+    )
     add_common_args(cal_create)
     cal_create.set_defaults(func=cmd_calendar_create)
-    
+
     # calendar delete
-    cal_delete = cal_subparsers.add_parser('delete', aliases=['rm'], help='Delete event')
+    cal_delete = cal_subparsers.add_parser(
+        "delete", aliases=["rm"], help="Delete event"
+    )
     add_common_args(cal_delete)
-    cal_delete.add_argument('--id', required=True, help='Event ID')
+    cal_delete.add_argument("--id", required=True, help="Event ID")
     cal_delete.set_defaults(func=cmd_calendar_delete)
-    
+
     # Mail commands
-    mail_parser = subparsers.add_parser('mail', aliases=['m'], help='Mail operations')
+    mail_parser = subparsers.add_parser("mail", aliases=["m"], help="Mail operations")
     add_common_args(mail_parser)
-    mail_subparsers = mail_parser.add_subparsers(dest='subcommand', required=True)
-    
+    mail_subparsers = mail_parser.add_subparsers(dest="subcommand", required=True)
+
     # mail list
-    mail_list = mail_subparsers.add_parser('list', aliases=['ls'], help='List messages')
+    mail_list = mail_subparsers.add_parser("list", aliases=["ls"], help="List messages")
     add_common_args(mail_list)
-    mail_list.add_argument('--folder', '-f', default='inbox', help='Folder name')
-    mail_list.add_argument('--limit', '-l', type=int, default=20, help='Max messages')
-    mail_list.add_argument('--unread', '-u', action='store_true', help='Only unread')
+    mail_list.add_argument("--folder", "-f", default="inbox", help="Folder name")
+    mail_list.add_argument("--limit", "-l", type=int, default=20, help="Max messages")
+    mail_list.add_argument("--unread", "-u", action="store_true", help="Only unread")
     mail_list.set_defaults(func=cmd_mail_list)
-    
+
     # mail get
-    mail_get = mail_subparsers.add_parser('get', help='Get full message')
+    mail_get = mail_subparsers.add_parser("get", help="Get full message")
     add_common_args(mail_get)
-    mail_get.add_argument('--id', required=True, help='Message ID')
-    mail_get.add_argument('--folder', '-f', default='inbox', help='Folder name')
+    mail_get.add_argument("--id", required=True, help="Message ID")
+    mail_get.add_argument("--folder", "-f", default="inbox", help="Folder name")
     mail_get.set_defaults(func=cmd_mail_get)
-    
+
     # mail fetch
-    mail_fetch = mail_subparsers.add_parser('fetch', help='Fetch to maildir/mbox')
+    mail_fetch = mail_subparsers.add_parser("fetch", help="Fetch to maildir/mbox")
     add_common_args(mail_fetch)
-    mail_fetch.add_argument('--folder', '-f', default='inbox', help='Folder name')
-    mail_fetch.add_argument('--output', '-o', required=True, help='Output directory')
-    mail_fetch.add_argument('--format', choices=['maildir', 'mbox'], default='maildir')
-    mail_fetch.add_argument('--limit', '-l', type=int, help='Max messages')
+    mail_fetch.add_argument("--folder", "-f", default="inbox", help="Folder name")
+    mail_fetch.add_argument("--output", "-o", required=True, help="Output directory")
+    mail_fetch.add_argument("--format", choices=["maildir", "mbox"], default="maildir")
+    mail_fetch.add_argument("--limit", "-l", type=int, help="Max messages")
     mail_fetch.set_defaults(func=cmd_mail_fetch)
-    
+
     # mail send
-    mail_send = mail_subparsers.add_parser('send', help='Send email (JSON from stdin)')
+    mail_send = mail_subparsers.add_parser("send", help="Send email (JSON from stdin)")
     add_common_args(mail_send)
     mail_send.set_defaults(func=cmd_mail_send)
-    
+
+    # mail attachments
+    mail_attach = mail_subparsers.add_parser(
+        "attachments", aliases=["att"], help="List or download attachments"
+    )
+    add_common_args(mail_attach)
+    mail_attach.add_argument("--id", required=True, help="Message ID")
+    mail_attach.add_argument("--folder", "-f", default="inbox", help="Folder name")
+    mail_attach.add_argument(
+        "--download",
+        "-d",
+        type=int,
+        metavar="INDEX",
+        help="Download attachment by index",
+    )
+    mail_attach.add_argument("--output", "-o", help="Output path (directory or file)")
+    mail_attach.set_defaults(func=cmd_mail_attachments)
+
     # Contacts commands
-    contacts_parser = subparsers.add_parser('contacts', aliases=['c'], help='Contacts operations')
+    contacts_parser = subparsers.add_parser(
+        "contacts", aliases=["c"], help="Contacts operations"
+    )
     add_common_args(contacts_parser)
-    contacts_subparsers = contacts_parser.add_subparsers(dest='subcommand', required=True)
-    
+    contacts_subparsers = contacts_parser.add_subparsers(
+        dest="subcommand", required=True
+    )
+
     # contacts list
-    contacts_list = contacts_subparsers.add_parser('list', aliases=['ls'], help='List contacts')
+    contacts_list = contacts_subparsers.add_parser(
+        "list", aliases=["ls"], help="List contacts"
+    )
     add_common_args(contacts_list)
-    contacts_list.add_argument('--limit', '-l', type=int, default=100, help='Max contacts')
-    contacts_list.add_argument('--search', '-s', help='Search by name or email')
+    contacts_list.add_argument(
+        "--limit", "-l", type=int, default=100, help="Max contacts"
+    )
+    contacts_list.add_argument("--search", "-s", help="Search by name or email")
     contacts_list.set_defaults(func=cmd_contacts_list)
-    
+
     # contacts get
-    contacts_get = contacts_subparsers.add_parser('get', help='Get contact')
+    contacts_get = contacts_subparsers.add_parser("get", help="Get contact")
     add_common_args(contacts_get)
-    contacts_get.add_argument('--id', required=True, help='Contact ID')
+    contacts_get.add_argument("--id", required=True, help="Contact ID")
     contacts_get.set_defaults(func=cmd_contacts_get)
-    
+
     # contacts create
-    contacts_create = contacts_subparsers.add_parser('create', aliases=['new'], help='Create contact (JSON from stdin)')
+    contacts_create = contacts_subparsers.add_parser(
+        "create", aliases=["new"], help="Create contact (JSON from stdin)"
+    )
     add_common_args(contacts_create)
     contacts_create.set_defaults(func=cmd_contacts_create)
-    
+
     # contacts delete
-    contacts_delete = contacts_subparsers.add_parser('delete', aliases=['rm'], help='Delete contact')
+    contacts_delete = contacts_subparsers.add_parser(
+        "delete", aliases=["rm"], help="Delete contact"
+    )
     add_common_args(contacts_delete)
-    contacts_delete.add_argument('--id', required=True, help='Contact ID')
+    contacts_delete.add_argument("--id", required=True, help="Contact ID")
     contacts_delete.set_defaults(func=cmd_contacts_delete)
-    
+
     # Free slots command
-    free_parser = subparsers.add_parser('free', help='Find free slots in calendar')
+    free_parser = subparsers.add_parser("free", help="Find free slots in calendar")
     add_common_args(free_parser)
-    free_parser.add_argument('--weeks', '-w', type=int, default=1,
-                             help='Number of weeks to look at (1 = current week)')
-    free_parser.add_argument('--duration', '-d', type=int, default=30,
-                             help='Minimum slot duration in minutes')
-    free_parser.add_argument('--limit', '-l', type=int,
-                             help='Maximum number of slots to return')
+    free_parser.add_argument(
+        "--weeks",
+        "-w",
+        type=int,
+        default=1,
+        help="Number of weeks to look at (1 = current week)",
+    )
+    free_parser.add_argument(
+        "--duration",
+        "-d",
+        type=int,
+        default=30,
+        help="Minimum slot duration in minutes",
+    )
+    free_parser.add_argument(
+        "--limit", "-l", type=int, help="Maximum number of slots to return"
+    )
     free_parser.set_defaults(func=cmd_free)
-    
+
     args = parser.parse_args()
-    
+
     try:
         args.func(args)
     except Exception as e:
-        output({'error': str(e)}, args.json)
+        output({"error": str(e)}, args.json)
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

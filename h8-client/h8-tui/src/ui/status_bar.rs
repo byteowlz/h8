@@ -175,6 +175,7 @@ mod tests {
             received_at: None,
             is_read: true,
             is_draft: false,
+            has_attachments: false,
             synced_at: None,
             local_hash: None,
         });
