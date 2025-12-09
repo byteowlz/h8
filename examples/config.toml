@@ -18,3 +18,33 @@ end_hour = 17
 
 # Exclude weekends when finding free slots
 exclude_weekends = true
+
+# Mail configuration
+[mail]
+# Override data directory for mail storage (default: $XDG_DATA_HOME/h8/mail)
+# data_dir = "~/.local/share/h8/mail"
+
+# Editor command for composing (default: $EDITOR)
+# editor = "nvim"
+
+# Pager for reading messages
+pager = "less -R"
+
+# Folders to sync
+sync_folders = ["inbox", "sent", "drafts"]
+
+# Email signature (use multi-line string)
+signature = '''
+--
+Your Name
+'''
+
+[mail.compose]
+# Format for composing emails (text or html)
+format = "text"
+
+# Quote prefix style for replies
+quote_style = "> "
+
+# Include signature in new messages
+include_signature = true

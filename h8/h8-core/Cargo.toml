@@ -10,6 +10,7 @@ chrono.workspace = true
 chrono-tz.workspace = true
 config.workspace = true
 dirs.workspace = true
+hostname.workspace = true
 log.workspace = true
 rand.workspace = true
 reqwest.workspace = true
