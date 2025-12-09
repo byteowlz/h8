@@ -1,5 +1,5 @@
 [workspace]
-members = ["h8-core", "h8-cli"]
+members = ["h8-core", "h8-cli", "h8-tui"]
 resolver = "2"
 
 [workspace.package]

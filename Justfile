@@ -2,7 +2,8 @@ set shell := ["bash", "-cu"]
 
 install:
     uv sync
-    cargo install --path h8 --locked
+    cargo install --path h8/h8-cli --locked
+    cargo install --path h8/h8-tui --locked
 
 service-start:
     cargo run --manifest-path h8/Cargo.toml -- service start

@@ -1,0 +1,26 @@
+[package]
+name = "h8-tui"
+version.workspace = true
+edition.workspace = true
+description = "TUI email client for h8 - Exchange Web Services"
+
+[[bin]]
+name = "h8-tui"
+path = "src/main.rs"
+
+[dependencies]
+h8-core = { path = "../h8-core" }
+anyhow.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# TUI dependencies
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1.42", features = ["full"] }
+
+[dev-dependencies]
+tempfile.workspace = true
