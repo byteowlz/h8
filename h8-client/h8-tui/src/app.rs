@@ -362,6 +362,9 @@ pub struct App {
     /// Email selection state.
     pub email_selection: Selection,
 
+    /// Cached body content for the current email (local_id -> body).
+    pub current_email_body: Option<(String, String)>,
+
     /// Search query buffer.
     pub search_query: String,
     /// Current search mode.
@@ -410,6 +413,7 @@ impl App {
             current_folder: "inbox".to_string(),
             emails: Vec::new(),
             email_selection: Selection::new(),
+            current_email_body: None,
             search_query: String::new(),
             search_mode: SearchMode::default(),
             sort_option: SortOption::default(),

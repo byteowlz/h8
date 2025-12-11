@@ -15,13 +15,15 @@ use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use h8_core::paths::expand_str_path;
+use h8_core::{AppConfig, AppPaths};
+use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::App;
 use data::DataSource;
-use handlers::{handle_key, KeyAction};
+use handlers::{KeyAction, handle_key};
 
 /// Event polling timeout in milliseconds.
 const POLL_TIMEOUT_MS: u64 = 100;
@@ -37,12 +39,29 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // Load configuration shared with the CLI
+    let paths = AppPaths::discover(None)?;
+    AppConfig::ensure_default(&paths.global_config)?;
+    let config = AppConfig::load(&paths, None)?;
+
     // Create app state and data source
     let mut app = App::new();
-    let mut data_source = DataSource::default();
+    let mut data_source = DataSource::with_paths(paths);
+
+    // Respect custom mail data directory overrides
+    if let Some(ref data_dir) = config.mail.data_dir {
+        let expanded = expand_str_path(data_dir)?;
+        data_source.set_mail_data_dir(expanded);
+    }
+
+    let preferred_account = config.account.trim();
 
     // Try to load real data, fall back to demo data if not available
-    if let Err(e) = load_real_data(&mut app, &mut data_source) {
+    if let Err(e) = load_real_data(
+        &mut app,
+        &mut data_source,
+        (!preferred_account.is_empty()).then_some(preferred_account),
+    ) {
         log::warn!("Failed to load real data: {}, using demo data", e);
         load_demo_data(&mut app);
     }
@@ -117,8 +136,10 @@ fn handle_key_with_data(app: &mut App, data_source: &mut DataSource, action: Key
     }
 
     // Check for delete confirmation
-    if matches!(app.mode, app::AppMode::Delete | app::AppMode::DeleteMultiple)
-        && matches!(action, KeyAction::Char('y') | KeyAction::Char('Y'))
+    if matches!(
+        app.mode,
+        app::AppMode::Delete | app::AppMode::DeleteMultiple
+    ) && matches!(action, KeyAction::Char('y') | KeyAction::Char('Y'))
     {
         execute_delete(app, data_source);
         return false;
@@ -215,12 +236,17 @@ fn execute_mark_unread(app: &mut App, data_source: &mut DataSource) {
 /// Load emails from a specific folder.
 fn load_folder(app: &mut App, data_source: &mut DataSource, folder: &str) {
     app.current_folder = folder.to_string();
+    app.current_email_body = None; // Clear cached body when changing folders
     match data_source.load_emails(folder, EMAIL_LIMIT) {
         Ok(emails) => {
             app.emails = emails;
             app.email_selection.reset();
             let display_name = app.current_folder_display().to_string();
-            app.set_status(format!("Loaded {} - {} emails", display_name, app.emails.len()));
+            app.set_status(format!(
+                "Loaded {} - {} emails",
+                display_name,
+                app.emails.len()
+            ));
         }
         Err(e) => {
             app.set_status(format!("Failed to load {}: {}", folder, e));
@@ -232,10 +258,19 @@ fn load_folder(app: &mut App, data_source: &mut DataSource, folder: &str) {
 fn view_email(app: &mut App, data_source: &mut DataSource, local_id: &str) {
     match data_source.get_email_content(&app.current_folder, local_id) {
         Ok(Some(content)) => {
-            // For now, just show that we loaded it
-            let lines = content.lines().count();
-            app.set_status(format!("Loaded email ({} lines)", lines));
+            // Extract body from the raw email content
+            // The format is: From: ...\r\nSubject: ...\r\nDate: ...\r\n\r\n<body>
+            let body = if let Some(pos) = content.find("\r\n\r\n") {
+                content[pos + 4..].to_string()
+            } else if let Some(pos) = content.find("\n\n") {
+                content[pos + 2..].to_string()
+            } else {
+                content.clone()
+            };
+
+            app.current_email_body = Some((local_id.to_string(), body));
             app.focus_right();
+            app.set_status("Email loaded");
         }
         Ok(None) => {
             app.set_status("Email not found in maildir");
@@ -247,41 +282,50 @@ fn view_email(app: &mut App, data_source: &mut DataSource, local_id: &str) {
 }
 
 /// Try to load real data from h8-core.
-fn load_real_data(app: &mut App, data_source: &mut DataSource) -> data::Result<()> {
-    // Try to detect accounts
+fn load_real_data(
+    app: &mut App,
+    data_source: &mut DataSource,
+    preferred_account: Option<&str>,
+) -> data::Result<()> {
+    if let Some(account) = preferred_account {
+        if let Err(err) = load_account_data(app, data_source, account) {
+            log::warn!("Failed to load account {}: {}", account, err);
+        } else {
+            return Ok(());
+        }
+    }
+
+    // Try to detect any available accounts
     let accounts = data_source.detect_accounts()?;
     if accounts.is_empty() {
         return Err(data::DataError::NoAccount);
     }
 
-    // Use the first available account
-    let account = &accounts[0];
+    for account in accounts {
+        if load_account_data(app, data_source, &account).is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err(data::DataError::NoAccount)
+}
+
+fn load_account_data(
+    app: &mut App,
+    data_source: &mut DataSource,
+    account: &str,
+) -> data::Result<()> {
     data_source.set_account(account)?;
     app.set_status(format!("Account: {}", account));
 
-    // Load folders
-    match data_source.load_folders() {
-        Ok(folders) if !folders.is_empty() => {
-            app.folders = folders;
-        }
-        Ok(_) => {
-            // No folders found, keep defaults
-        }
-        Err(e) => {
-            app.set_status(format!("Failed to load folders: {}", e));
-        }
+    let folders = data_source.load_folders()?;
+    if !folders.is_empty() {
+        app.folders = folders;
     }
 
-    // Load emails for current folder
-    match data_source.load_emails(&app.current_folder, EMAIL_LIMIT) {
-        Ok(emails) => {
-            app.emails = emails;
-            app.email_selection.reset();
-        }
-        Err(e) => {
-            app.set_status(format!("Failed to load emails: {}", e));
-        }
-    }
+    let emails = data_source.load_emails(&app.current_folder, EMAIL_LIMIT)?;
+    app.emails = emails;
+    app.email_selection.reset();
 
     Ok(())
 }
@@ -318,13 +362,20 @@ fn execute_search(app: &mut App, data_source: &mut DataSource) {
         _ => data::SearchMode::All,
     };
 
-    match data_source.search_emails(&app.current_folder, &app.search_query, search_mode, EMAIL_LIMIT)
-    {
+    match data_source.search_emails(
+        &app.current_folder,
+        &app.search_query,
+        search_mode,
+        EMAIL_LIMIT,
+    ) {
         Ok(emails) => {
             let count = emails.len();
             app.emails = emails;
             app.email_selection.reset();
-            app.set_status(format!("Found {} emails matching '{}'", count, app.search_query));
+            app.set_status(format!(
+                "Found {} emails matching '{}'",
+                count, app.search_query
+            ));
         }
         Err(e) => {
             app.set_status(format!("Search failed: {}", e));
@@ -335,7 +386,7 @@ fn execute_search(app: &mut App, data_source: &mut DataSource) {
 /// Execute delete operation.
 fn execute_delete(app: &mut App, data_source: &mut DataSource) {
     let indices = app.get_operation_indices();
-    
+
     // Collect IDs as owned strings to avoid borrow issues
     let ids: Vec<String> = indices
         .iter()
@@ -593,7 +644,7 @@ mod tests {
         let mut data_source = DataSource::default();
 
         // This should fail gracefully without an account
-        let result = load_real_data(&mut app, &mut data_source);
+        let result = load_real_data(&mut app, &mut data_source, None);
         // Either works or fails with NoAccount - both are valid
         if result.is_err() {
             // Verify demo data can be loaded instead

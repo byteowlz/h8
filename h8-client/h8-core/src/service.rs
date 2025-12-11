@@ -44,19 +44,16 @@ impl ServiceClient {
         let days_str = days.to_string();
         let from_date_owned = from_date.map(|s| s.to_string());
         let to_date_owned = to_date.map(|s| s.to_string());
-        
-        let mut params: Vec<(&str, &str)> = vec![
-            ("account", account),
-            ("days", &days_str),
-        ];
-        
+
+        let mut params: Vec<(&str, &str)> = vec![("account", account), ("days", &days_str)];
+
         if let Some(ref f) = from_date_owned {
             params.push(("from_date", f));
         }
         if let Some(ref t) = to_date_owned {
             params.push(("to_date", t));
         }
-        
+
         self.get("/calendar", &params)
     }
 
@@ -66,7 +63,12 @@ impl ServiceClient {
     }
 
     /// Delete a calendar event.
-    pub fn calendar_delete(&self, account: &str, id: &str, change_key: Option<&str>) -> Result<Value> {
+    pub fn calendar_delete(
+        &self,
+        account: &str,
+        id: &str,
+        change_key: Option<&str>,
+    ) -> Result<Value> {
         let mut url = format!("/calendar/{}?account={}", id, account);
         if let Some(ck) = change_key {
             url.push_str(&format!("&changekey={}", ck));
@@ -75,7 +77,13 @@ impl ServiceClient {
     }
 
     /// List mail messages.
-    pub fn mail_list(&self, account: &str, folder: &str, limit: usize, unread: bool) -> Result<Value> {
+    pub fn mail_list(
+        &self,
+        account: &str,
+        folder: &str,
+        limit: usize,
+        unread: bool,
+    ) -> Result<Value> {
         let limit_str = limit.to_string();
         let unread_str = unread.to_string();
         let params = [
@@ -154,13 +162,21 @@ impl ServiceClient {
             "output_path": output_path.display().to_string(),
         });
         self.post_json(
-            &format!("/mail/{}/attachments/download?account={}&folder={}", id, account, folder),
+            &format!(
+                "/mail/{}/attachments/download?account={}&folder={}",
+                id, account, folder
+            ),
             payload,
         )
     }
 
     /// List contacts.
-    pub fn contacts_list(&self, account: &str, limit: usize, search: Option<&str>) -> Result<Value> {
+    pub fn contacts_list(
+        &self,
+        account: &str,
+        limit: usize,
+        search: Option<&str>,
+    ) -> Result<Value> {
         let limit_str = limit.to_string();
         let mut params = vec![("account", account), ("limit", &limit_str)];
         let search_owned;
@@ -239,20 +255,24 @@ impl ServiceClient {
     fn handle_response(&self, resp: reqwest::blocking::Response) -> Result<Value> {
         let status = resp.status();
         let text = resp.text()?;
-        
+
         if !status.is_success() {
             // Try to extract error detail from JSON response
             if let Ok(val) = serde_json::from_str::<Value>(&text)
-                && let Some(detail) = val.as_object()
+                && let Some(detail) = val
+                    .as_object()
                     .and_then(|m| m.get("detail"))
                     .and_then(|d| d.as_str())
             {
                 return Err(Error::Service(format!("service error: {}", detail)));
             }
             let snippet: String = text.chars().take(400).collect();
-            return Err(Error::Service(format!("service error ({}): {}", status, snippet)));
+            return Err(Error::Service(format!(
+                "service error ({}): {}",
+                status, snippet
+            )));
         }
-        
+
         serde_json::from_str(&text).map_err(Into::into)
     }
 }

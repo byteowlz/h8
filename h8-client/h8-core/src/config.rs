@@ -87,7 +87,11 @@ impl Default for MailConfig {
             data_dir: None,
             editor: None,
             pager: "less -R".to_string(),
-            sync_folders: vec!["inbox".to_string(), "sent".to_string(), "drafts".to_string()],
+            sync_folders: vec![
+                "inbox".to_string(),
+                "sent".to_string(),
+                "drafts".to_string(),
+            ],
             signature: String::new(),
             compose: ComposeConfig::default(),
         }
@@ -165,9 +169,8 @@ impl AppConfig {
     /// Write default config to a path.
     pub fn write_default(path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                Error::Config(format!("creating config directory {parent:?}: {e}"))
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|e| Error::Config(format!("creating config directory {parent:?}: {e}")))?;
         }
         let cfg = AppConfig::default();
         let toml = toml::to_string_pretty(&cfg)
@@ -179,9 +182,8 @@ impl AppConfig {
         );
         content.push_str(&toml);
         content.push('\n');
-        fs::write(path, content).map_err(|e| {
-            Error::Config(format!("writing config file to {}: {e}", path.display()))
-        })
+        fs::write(path, content)
+            .map_err(|e| Error::Config(format!("writing config file to {}: {e}", path.display())))
     }
 
     /// Ensure default config exists, creating it if necessary.
