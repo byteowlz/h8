@@ -93,11 +93,28 @@ def list_messages(
 
 def get_message(account: Account, item_id: str, folder: str = "inbox") -> dict:
     """Get a full message by ID including body."""
+    from exchangelib import ItemId
+
     mail_folder = get_folder(account, folder)
 
-    # Search in the folder
-    for item in mail_folder.all():
-        if item.id == item_id:
+    # Direct lookup by ID (much faster than iterating all messages)
+    try:
+        items = list(
+            mail_folder.filter(id=item_id).only(
+                "id",
+                "changekey",
+                "subject",
+                "sender",
+                "to_recipients",
+                "cc_recipients",
+                "datetime_received",
+                "is_read",
+                "has_attachments",
+                "body",
+            )
+        )
+        if items:
+            item = items[0]
             return {
                 "id": item.id,
                 "changekey": item.changekey,
@@ -113,6 +130,8 @@ def get_message(account: Account, item_id: str, folder: str = "inbox") -> dict:
                 "body": item.body,
                 "body_type": "html" if isinstance(item.body, HTMLBody) else "text",
             }
+    except Exception as e:
+        return {"error": f"Failed to fetch message: {e}"}
 
     return {"error": "Message not found"}
 
@@ -450,26 +469,32 @@ def list_attachments(
     """
     mail_folder = get_folder(account, folder)
 
-    for item in mail_folder.all():
-        if item.id == item_id:
-            if not item.has_attachments or not item.attachments:
-                return []
+    try:
+        items = list(
+            mail_folder.filter(id=item_id).only("id", "has_attachments", "attachments")
+        )
+        if not items:
+            return []
 
-            attachments = []
-            for i, att in enumerate(item.attachments):
-                attachments.append(
-                    {
-                        "index": i,
-                        "name": att.name or f"attachment_{i}",
-                        "size": getattr(att, "size", None),
-                        "content_type": getattr(
-                            att, "content_type", "application/octet-stream"
-                        ),
-                    }
-                )
-            return attachments
+        item = items[0]
+        if not item.has_attachments or not item.attachments:
+            return []
 
-    return []
+        attachments = []
+        for i, att in enumerate(item.attachments):
+            attachments.append(
+                {
+                    "index": i,
+                    "name": att.name or f"attachment_{i}",
+                    "size": getattr(att, "size", None),
+                    "content_type": getattr(
+                        att, "content_type", "application/octet-stream"
+                    ),
+                }
+            )
+        return attachments
+    except Exception:
+        return []
 
 
 def download_attachment(
@@ -493,35 +518,41 @@ def download_attachment(
     """
     mail_folder = get_folder(account, folder)
 
-    for item in mail_folder.all():
-        if item.id == item_id:
-            if not item.has_attachments or not item.attachments:
-                return {"success": False, "error": "Message has no attachments"}
+    try:
+        items = list(
+            mail_folder.filter(id=item_id).only("id", "has_attachments", "attachments")
+        )
+        if not items:
+            return {"success": False, "error": "Message not found"}
 
-            if attachment_index < 0 or attachment_index >= len(item.attachments):
-                return {
-                    "success": False,
-                    "error": f"Invalid attachment index: {attachment_index}",
-                }
+        item = items[0]
+        if not item.has_attachments or not item.attachments:
+            return {"success": False, "error": "Message has no attachments"}
 
-            att = item.attachments[attachment_index]
-
-            # Determine output file path
-            filename = att.name or f"attachment_{attachment_index}"
-            if os.path.isdir(output_path):
-                filepath = os.path.join(output_path, filename)
-            else:
-                filepath = output_path
-
-            # Write attachment content
-            with open(filepath, "wb") as f:
-                f.write(att.content)
-
+        if attachment_index < 0 or attachment_index >= len(item.attachments):
             return {
-                "success": True,
-                "path": filepath,
-                "name": filename,
-                "size": len(att.content),
+                "success": False,
+                "error": f"Invalid attachment index: {attachment_index}",
             }
 
-    return {"success": False, "error": "Message not found"}
+        att = item.attachments[attachment_index]
+
+        # Determine output file path
+        filename = att.name or f"attachment_{attachment_index}"
+        if os.path.isdir(output_path):
+            filepath = os.path.join(output_path, filename)
+        else:
+            filepath = output_path
+
+        # Write attachment content
+        with open(filepath, "wb") as f:
+            f.write(att.content)
+
+        return {
+            "success": True,
+            "path": filepath,
+            "name": filename,
+            "size": len(att.content),
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Failed to download attachment: {e}"}

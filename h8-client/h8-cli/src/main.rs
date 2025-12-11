@@ -474,6 +474,8 @@ enum ServiceCommand {
     Start,
     /// Stop the Python service
     Stop,
+    /// Restart the Python service
+    Restart,
     /// Show service status
     Status,
 }
@@ -1164,20 +1166,24 @@ fn handle_mail_sync(
         println!("  Fetching {} new messages...", total);
 
         let mut synced = 0;
+        let mut failed = 0;
         for (i, (remote_id, msg_val)) in to_sync.into_iter().enumerate() {
             // Progress indicator
-            if (i + 1) % 10 == 0 || i + 1 == total {
-                print!("\r  [{}/{}] Syncing...", i + 1, total);
-                let _ = io::stdout().flush();
-            }
+            print!("\r  [{}/{}] Syncing...    ", i + 1, total);
+            let _ = io::stdout().flush();
 
             // Allocate human-readable ID
             let local_id = id_gen.allocate(remote_id).map_err(|e| anyhow!("{e}"))?;
 
             // Fetch full message content (needed for body)
-            let full_msg = client
-                .mail_get(account, folder, remote_id)
-                .map_err(|e| anyhow!("{e}"))?;
+            let full_msg = match client.mail_get(account, folder, remote_id) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    log::warn!("Failed to fetch message {}: {}", remote_id, e);
+                    failed += 1;
+                    continue;
+                }
+            };
 
             // Build email content - use full_msg for body, msg_val for metadata
             let subject = msg_val
@@ -1243,7 +1249,11 @@ fn handle_mail_sync(
             synced += 1;
         }
 
-        println!("\r  Synced {} new messages        ", synced);
+        if failed > 0 {
+            println!("\r  Synced {} messages ({} failed)     ", synced, failed);
+        } else {
+            println!("\r  Synced {} new messages              ", synced);
+        }
     }
 
     println!("Sync complete");
@@ -1507,6 +1517,7 @@ fn handle_service(ctx: &RuntimeContext, command: ServiceCommand) -> Result<()> {
     match command {
         ServiceCommand::Start => start_service(ctx),
         ServiceCommand::Stop => stop_service(ctx),
+        ServiceCommand::Restart => restart_service(ctx),
         ServiceCommand::Status => status_service(ctx),
     }
 }
@@ -1707,6 +1718,20 @@ fn stop_service(ctx: &RuntimeContext) -> Result<()> {
     let _ = fs::remove_file(&pid_path);
     println!("service stopped (pid {})", pid);
     Ok(())
+}
+
+fn restart_service(ctx: &RuntimeContext) -> Result<()> {
+    let pid_path = service_pid_path(ctx)?;
+    if let Some(pid) = read_pid(&pid_path)? {
+        if pid_running(pid) {
+            terminate_pid(pid)?;
+            let _ = fs::remove_file(&pid_path);
+            println!("service stopped (pid {})", pid);
+        } else {
+            let _ = fs::remove_file(&pid_path);
+        }
+    }
+    start_service(ctx)
 }
 
 fn status_service(ctx: &RuntimeContext) -> Result<()> {
