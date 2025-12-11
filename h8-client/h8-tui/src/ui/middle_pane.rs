@@ -1,5 +1,6 @@
 //! Middle pane: Email list.
 
+use chrono::{DateTime, Datelike, Local};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -9,6 +10,34 @@ use ratatui::{
 };
 
 use crate::app::{App, FocusedPane};
+
+/// Format a datetime string to a short human-readable string for the list view.
+fn format_date_short(iso_date: &str) -> String {
+    let parsed = DateTime::parse_from_rfc3339(iso_date)
+        .or_else(|_| DateTime::parse_from_str(iso_date, "%Y-%m-%dT%H:%M:%S%z"))
+        .map(|dt| dt.with_timezone(&Local));
+
+    let local = match parsed {
+        Ok(dt) => dt,
+        Err(_) => return String::new(),
+    };
+
+    let now = Local::now();
+    let today = now.date_naive();
+    let date = local.date_naive();
+
+    if date == today {
+        local.format("%H:%M").to_string()
+    } else if date == today.pred_opt().unwrap_or(today) {
+        "Yesterday".to_string()
+    } else if (today - date).num_days() < 7 {
+        local.format("%a").to_string()
+    } else if date.year() == today.year() {
+        local.format("%b %-d").to_string()
+    } else {
+        local.format("%b %Y").to_string()
+    }
+}
 
 /// Draw the middle pane (email list).
 pub fn draw_middle_pane(frame: &mut Frame, app: &App, area: Rect) {
@@ -51,34 +80,49 @@ pub fn draw_middle_pane(frame: &mut Frame, app: &App, area: Rect) {
             let is_selected_cursor = i == app.email_selection.index;
             let is_multi_selected = app.email_selection.selected_indices.contains(&i);
 
-            // Selection marker
-            let marker = if is_multi_selected { "[x]" } else { "[ ]" };
-
             // Unread indicator
             let unread = if email.is_read { " " } else { "*" };
 
             // Attachment indicator
             let attach = if email.has_attachments { "@" } else { " " };
 
-            // Subject (truncate if needed)
-            let subject = email
-                .subject
-                .as_deref()
-                .unwrap_or("(no subject)")
-                .chars()
-                .take(30)
-                .collect::<String>();
+            // Word ID
+            let id = &email.local_id;
 
-            // From address (truncate)
-            let from = email
+            // Format date
+            let date = email
+                .received_at
+                .as_deref()
+                .map(|dt| format_date_short(dt))
+                .unwrap_or_default();
+
+            // From address - extract name or email (truncate)
+            let from: String = email
                 .from_addr
                 .as_deref()
                 .unwrap_or("unknown")
                 .chars()
-                .take(20)
-                .collect::<String>();
+                .take(18)
+                .collect();
 
-            let content = format!("{} {}{} {} - {}", marker, unread, attach, from, subject);
+            // Subject (truncate if needed - use remaining space)
+            let fixed_width = 3 + 2 + 18 + 1 + 10 + 1 + id.len() + 2; // "[ ] *@ from date id"
+            let max_subject_len = (area.width as usize).saturating_sub(fixed_width);
+            let subject: String = email
+                .subject
+                .as_deref()
+                .unwrap_or("(no subject)")
+                .chars()
+                .take(max_subject_len.max(10))
+                .collect();
+
+            // Selection marker
+            let marker = if is_multi_selected { "[x]" } else { "[ ]" };
+
+            let content = format!(
+                "{} {}{} {:18} {:10} {} [{}]",
+                marker, unread, attach, from, date, subject, id
+            );
 
             let style = if is_selected_cursor && is_focused {
                 Style::default()

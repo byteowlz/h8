@@ -101,6 +101,18 @@ impl ServiceClient {
         self.get(&format!("/mail/{}", id), &params)
     }
 
+    /// Batch fetch multiple messages by ID.
+    ///
+    /// This is much more efficient than calling `mail_get` multiple times
+    /// as it fetches all messages in a single HTTP request.
+    pub fn mail_batch_get(&self, account: &str, folder: &str, ids: &[&str]) -> Result<Value> {
+        let payload = serde_json::json!({
+            "ids": ids,
+            "folder": folder,
+        });
+        self.post_json(&format!("/mail/batch?account={}", account), payload)
+    }
+
     /// Send an email.
     pub fn mail_send(&self, account: &str, payload: Value) -> Result<Value> {
         self.post_json(&format!("/mail/send?account={}", account), payload)

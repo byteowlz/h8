@@ -1165,88 +1165,125 @@ fn handle_mail_sync(
 
         println!("  Fetching {} new messages...", total);
 
+        // Batch fetch all messages in chunks for efficiency
+        const BATCH_SIZE: usize = 50;
         let mut synced = 0;
         let mut failed = 0;
-        for (i, (remote_id, msg_val)) in to_sync.into_iter().enumerate() {
-            // Progress indicator
-            print!("\r  [{}/{}] Syncing...    ", i + 1, total);
+
+        for chunk in to_sync.chunks(BATCH_SIZE) {
+            // Collect IDs for batch request
+            let ids: Vec<&str> = chunk.iter().map(|(id, _)| *id).collect();
+
+            print!(
+                "\r  [{}/{}] Fetching batch...    ",
+                synced + 1,
+                total
+            );
             let _ = io::stdout().flush();
 
-            // Allocate human-readable ID
-            let local_id = id_gen.allocate(remote_id).map_err(|e| anyhow!("{e}"))?;
-
-            // Fetch full message content (needed for body)
-            let full_msg = match client.mail_get(account, folder, remote_id) {
-                Ok(msg) => msg,
+            // Batch fetch all messages in this chunk
+            let batch_result = client.mail_batch_get(account, folder, &ids);
+            let batch_messages: Vec<Option<Value>> = match batch_result {
+                Ok(val) => {
+                    if let Some(arr) = val.as_array() {
+                        arr.iter().map(|v| {
+                            if v.is_null() { None } else { Some(v.clone()) }
+                        }).collect()
+                    } else {
+                        // Fallback: treat as empty
+                        vec![None; ids.len()]
+                    }
+                }
                 Err(e) => {
-                    log::warn!("Failed to fetch message {}: {}", remote_id, e);
-                    failed += 1;
-                    continue;
+                    log::warn!("Batch fetch failed: {}, falling back to individual fetches", e);
+                    // Fall back to individual fetches
+                    ids.iter()
+                        .map(|id| client.mail_get(account, folder, id).ok())
+                        .collect()
                 }
             };
 
-            // Build email content - use full_msg for body, msg_val for metadata
-            let subject = msg_val
-                .get("subject")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no subject)");
-            let from = msg_val
-                .get("from")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let body = full_msg.get("body").and_then(|v| v.as_str()).unwrap_or("");
-            let date = msg_val
-                .get("datetime_received")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            // Process each message from the batch
+            for ((remote_id, msg_val), full_msg_opt) in chunk.iter().zip(batch_messages.into_iter()) {
+                // Progress indicator
+                print!("\r  [{}/{}] Syncing...    ", synced + 1, total);
+                let _ = io::stdout().flush();
 
-            let content = format!(
-                "From: {}\r\nSubject: {}\r\nDate: {}\r\n\r\n{}",
-                from, subject, date, body
-            );
+                let full_msg = match full_msg_opt {
+                    Some(msg) => msg,
+                    None => {
+                        log::warn!("Failed to fetch message {}", remote_id);
+                        failed += 1;
+                        continue;
+                    }
+                };
 
-            // Determine flags from list response (faster than full_msg)
-            let is_read = msg_val
-                .get("is_read")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let mut flags = MessageFlags::default();
-            if is_read {
-                flags.seen = true;
-            }
+                // Allocate human-readable ID
+                let local_id = id_gen.allocate(remote_id).map_err(|e| anyhow!("{e}"))?;
 
-            // Store in Maildir
-            mail_dir
-                .store_with_id(folder, content.as_bytes(), &flags, &local_id)
-                .map_err(|e| anyhow!("{e}"))?;
-
-            // Check for attachments from list response
-            let has_attachments = msg_val
-                .get("has_attachments")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            // Store in database
-            let msg_sync = h8_core::types::MessageSync {
-                local_id: local_id.clone(),
-                remote_id: remote_id.to_string(),
-                change_key: msg_val
-                    .get("changekey")
+                // Build email content - use full_msg for body, msg_val for metadata
+                let subject = msg_val
+                    .get("subject")
                     .and_then(|v| v.as_str())
-                    .map(String::from),
-                folder: folder.clone(),
-                subject: Some(subject.to_string()),
-                from_addr: Some(from.to_string()),
-                received_at: Some(date.to_string()),
-                is_read,
-                is_draft: folder == FOLDER_DRAFTS,
-                has_attachments,
-                synced_at: Some(chrono::Utc::now().to_rfc3339()),
-                local_hash: None,
-            };
-            db.upsert_message(&msg_sync).map_err(|e| anyhow!("{e}"))?;
+                    .unwrap_or("(no subject)");
+                let from = msg_val
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let body = full_msg.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                let date = msg_val
+                    .get("datetime_received")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
-            synced += 1;
+                let content = format!(
+                    "From: {}\r\nSubject: {}\r\nDate: {}\r\n\r\n{}",
+                    from, subject, date, body
+                );
+
+                // Determine flags from list response (faster than full_msg)
+                let is_read = msg_val
+                    .get("is_read")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let mut flags = MessageFlags::default();
+                if is_read {
+                    flags.seen = true;
+                }
+
+                // Store in Maildir
+                mail_dir
+                    .store_with_id(folder, content.as_bytes(), &flags, &local_id)
+                    .map_err(|e| anyhow!("{e}"))?;
+
+                // Check for attachments from list response
+                let has_attachments = msg_val
+                    .get("has_attachments")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                // Store in database
+                let msg_sync = h8_core::types::MessageSync {
+                    local_id: local_id.clone(),
+                    remote_id: remote_id.to_string(),
+                    change_key: msg_val
+                        .get("changekey")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    folder: folder.clone(),
+                    subject: Some(subject.to_string()),
+                    from_addr: Some(from.to_string()),
+                    received_at: Some(date.to_string()),
+                    is_read,
+                    is_draft: folder == FOLDER_DRAFTS,
+                    has_attachments,
+                    synced_at: Some(chrono::Utc::now().to_rfc3339()),
+                    local_hash: None,
+                };
+                db.upsert_message(&msg_sync).map_err(|e| anyhow!("{e}"))?;
+
+                synced += 1;
+            }
         }
 
         if failed > 0 {
@@ -1592,25 +1629,70 @@ fn pretty_print_item(v: &Value) {
             .get("subject")
             .and_then(|v| v.as_str())
             .unwrap_or("No subject");
-        println!("- {}", subject);
-        if let Some(start) = obj.get("start").and_then(|v| v.as_str()) {
-            println!("  Start: {}", start);
+        // Check if this is a mail message (has "from" field) vs calendar event (has "start" field)
+        let is_mail = obj.contains_key("from") && !obj.contains_key("start");
+        if is_mail {
+            // Mail message format
+            let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("???");
+            let from = obj.get("from").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let is_read = obj
+                .get("is_read")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            
+            // Format date human-readably
+            let date_str = obj.get("date")
+                .or_else(|| obj.get("datetime_received"))
+                .and_then(|v| v.as_str())
+                .map(|dt| format_date_human(dt))
+                .unwrap_or_default();
+            
+            // Use colors when outputting to TTY
+            use owo_colors::OwoColorize;
+            
+            let use_color = std::io::stdout().is_terminal();
+            
+            if is_read {
+                if use_color {
+                    println!("  {} - {} [{}]", subject, date_str.dimmed(), id.cyan());
+                } else {
+                    println!("  {} - {} [{}]", subject, date_str, id);
+                }
+            } else {
+                if use_color {
+                    println!("{} {} - {} [{}]", "*".yellow().bold(), subject.bold(), date_str.dimmed(), id.cyan());
+                } else {
+                    println!("* {} - {} [{}]", subject, date_str, id);
+                }
+            }
+            if use_color {
+                println!("  {}", from.dimmed());
+            } else {
+                println!("  {}", from);
+            }
+            println!();
+        } else {
+            // Calendar event format
+            println!("- {}", subject);
+            if let Some(start) = obj.get("start").and_then(|v| v.as_str()) {
+                println!("  Start: {}", start);
+            }
+            if let Some(end) = obj.get("end").and_then(|v| v.as_str()) {
+                println!("  End: {}", end);
+            }
+            if let Some(loc) = obj.get("location").and_then(|v| v.as_str())
+                && !loc.is_empty()
+            {
+                println!("  Location: {}", loc);
+            }
+            if let Some(from) = obj.get("from").and_then(|v| v.as_str()) {
+                println!("  From: {}", from);
+            }
+            if let Some(dt) = obj.get("datetime_received").and_then(|v| v.as_str()) {
+                println!("  Date: {}", dt);
+            }
+            println!();
         }
-        if let Some(end) = obj.get("end").and_then(|v| v.as_str()) {
-            println!("  End: {}", end);
-        }
-        if let Some(loc) = obj.get("location").and_then(|v| v.as_str())
-            && !loc.is_empty()
-        {
-            println!("  Location: {}", loc);
-        }
-        if let Some(from) = obj.get("from").and_then(|v| v.as_str()) {
-            println!("  From: {}", from);
-        }
-        if let Some(dt) = obj.get("datetime_received").and_then(|v| v.as_str()) {
-            println!("  Date: {}", dt);
-        }
-        println!();
         return;
     }
 
@@ -1650,6 +1732,41 @@ fn pretty_print_item(v: &Value) {
     }
 
     println!("{:#?}", obj);
+}
+
+/// Format an ISO date string to a human-readable format.
+/// Shows "Today 14:30", "Yesterday 09:15", "Mon 14:30", or "Dec 5" for older dates.
+fn format_date_human(iso_date: &str) -> String {
+    use chrono::{DateTime, Datelike, Local};
+    
+    let parsed = DateTime::parse_from_rfc3339(iso_date)
+        .or_else(|_| DateTime::parse_from_str(iso_date, "%Y-%m-%dT%H:%M:%S%z"))
+        .map(|dt| dt.with_timezone(&Local));
+    
+    let dt = match parsed {
+        Ok(dt) => dt,
+        Err(_) => return iso_date.to_string(),
+    };
+    
+    let now = Local::now();
+    let today = now.date_naive();
+    let date = dt.date_naive();
+    let yesterday = today.pred_opt().unwrap_or(today);
+    
+    if date == today {
+        format!("Today {}", dt.format("%H:%M"))
+    } else if date == yesterday {
+        format!("Yesterday {}", dt.format("%H:%M"))
+    } else if (today - date).num_days() < 7 {
+        // Within last week, show day name
+        dt.format("%a %H:%M").to_string()
+    } else if date.year() == today.year() {
+        // Same year, show month and day
+        dt.format("%b %-d").to_string()
+    } else {
+        // Different year
+        dt.format("%b %-d %Y").to_string()
+    }
 }
 
 fn service_pid_path(ctx: &RuntimeContext) -> Result<PathBuf> {
