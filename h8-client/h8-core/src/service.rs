@@ -16,14 +16,14 @@ pub struct ServiceClient {
     base_url: String,
 }
 
+/// Default request timeout in seconds.
+const DEFAULT_TIMEOUT_SECS: u64 = 60;
+
 impl ServiceClient {
     /// Create a new service client.
     pub fn new(base_url: &str, timeout: Option<Duration>) -> Result<Self> {
-        let mut builder = Client::builder();
-        if let Some(t) = timeout {
-            builder = builder.timeout(t);
-        }
-        let http = builder.build()?;
+        let timeout = timeout.unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        let http = Client::builder().timeout(timeout).build()?;
         let base_url = base_url.trim_end_matches('/').to_string();
         Ok(Self { http, base_url })
     }

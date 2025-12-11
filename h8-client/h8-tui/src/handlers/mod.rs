@@ -828,7 +828,10 @@ mod tests {
 
             handle_key(&mut app, KeyAction::Select);
             // Now sets pending action instead of directly changing folder
-            assert_eq!(app.pending_action, PendingAction::LoadFolder("sent".to_string()));
+            assert_eq!(
+                app.pending_action,
+                PendingAction::LoadFolder("sent".to_string())
+            );
             assert_eq!(app.focused_pane, FocusedPane::Middle);
         }
 
@@ -839,7 +842,10 @@ mod tests {
 
             handle_key(&mut app, KeyAction::Select);
             // Now sets pending action instead of directly focusing right
-            assert_eq!(app.pending_action, PendingAction::ViewEmail("1".to_string()));
+            assert_eq!(
+                app.pending_action,
+                PendingAction::ViewEmail("1".to_string())
+            );
         }
     }
 }
