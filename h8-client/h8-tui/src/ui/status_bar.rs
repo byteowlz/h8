@@ -32,9 +32,7 @@ pub fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
     spans.push(Span::styled(
         pane_text,
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::DarkGray),
+        Style::default().fg(Color::Black).bg(Color::DarkGray),
     ));
 
     // Current folder
@@ -64,10 +62,7 @@ pub fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     // G-prefix indicator
     if app.g_prefix {
         spans.push(Span::raw(" | "));
-        spans.push(Span::styled(
-            "g-",
-            Style::default().fg(Color::Yellow),
-        ));
+        spans.push(Span::styled("g-", Style::default().fg(Color::Yellow)));
     }
 
     // Status message
@@ -126,7 +121,7 @@ mod tests {
     use super::*;
     use crate::app::SearchMode;
     use h8_core::types::MessageSync;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn test_draw_status_bar_normal() {

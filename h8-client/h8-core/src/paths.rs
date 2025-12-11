@@ -64,8 +64,8 @@ pub fn expand_path(path: PathBuf) -> Result<PathBuf> {
 
 /// Expand shell variables and tilde in a path string.
 pub fn expand_str_path(text: &str) -> Result<PathBuf> {
-    let expanded = shellexpand::full(text)
-        .map_err(|e| Error::Path(format!("expanding path: {e}")))?;
+    let expanded =
+        shellexpand::full(text).map_err(|e| Error::Path(format!("expanding path: {e}")))?;
     Ok(PathBuf::from(expanded.to_string()))
 }
 

@@ -362,20 +362,19 @@ fn handle_enter(app: &mut App) {
     match app.focused_pane {
         FocusedPane::Left => {
             if let Some(folder) = app.folders.get(app.folder_selection.index) {
-                app.current_folder = folder.name.clone();
-                app.email_selection.reset();
-                app.set_status(format!("Switched to {}", folder.display_name));
+                let folder_name = folder.name.clone();
+                app.pending_action = PendingAction::LoadFolder(folder_name);
                 app.focus_middle();
             }
         }
         FocusedPane::Middle => {
-            if app.current_email().is_some() {
-                app.set_status("Opening email...");
-                app.focus_right();
+            if let Some(email) = app.current_email() {
+                let local_id = email.local_id.clone();
+                app.pending_action = PendingAction::ViewEmail(local_id);
             }
         }
         FocusedPane::Right => {
-            // Open full email view
+            // Already viewing email, nothing to do
         }
     }
 }
@@ -423,7 +422,7 @@ mod tests {
         fn test_navigation_down() {
             let mut app = App::new();
             app.emails = vec![create_test_email("1"), create_test_email("2")];
-            
+
             handle_key(&mut app, KeyAction::Char('j'));
             assert_eq!(app.email_selection.index, 1);
         }
@@ -532,7 +531,10 @@ mod tests {
         fn test_which_key_folder() {
             let mut app = App::new();
             handle_key(&mut app, KeyAction::Char('f'));
-            assert!(matches!(app.mode, AppMode::WhichKey(WhichKeyContext::Folder)));
+            assert!(matches!(
+                app.mode,
+                AppMode::WhichKey(WhichKeyContext::Folder)
+            ));
         }
 
         #[test]
@@ -750,7 +752,10 @@ mod tests {
             handle_key(&mut app, KeyAction::Char('i'));
             assert_eq!(app.mode, AppMode::Normal);
             // Folder selection triggers LoadFolder pending action
-            assert_eq!(app.pending_action, PendingAction::LoadFolder("inbox".to_string()));
+            assert_eq!(
+                app.pending_action,
+                PendingAction::LoadFolder("inbox".to_string())
+            );
         }
 
         #[test]
@@ -822,7 +827,8 @@ mod tests {
             app.folder_selection.index = 1; // Sent folder
 
             handle_key(&mut app, KeyAction::Select);
-            assert_eq!(app.current_folder, "sent");
+            // Now sets pending action instead of directly changing folder
+            assert_eq!(app.pending_action, PendingAction::LoadFolder("sent".to_string()));
             assert_eq!(app.focused_pane, FocusedPane::Middle);
         }
 
@@ -832,7 +838,8 @@ mod tests {
             app.emails = vec![create_test_email("1")];
 
             handle_key(&mut app, KeyAction::Select);
-            assert_eq!(app.focused_pane, FocusedPane::Right);
+            // Now sets pending action instead of directly focusing right
+            assert_eq!(app.pending_action, PendingAction::ViewEmail("1".to_string()));
         }
     }
 }

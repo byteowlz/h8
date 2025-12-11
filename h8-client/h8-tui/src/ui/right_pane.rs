@@ -69,7 +69,10 @@ pub fn draw_right_pane(frame: &mut Frame, app: &App, area: Rect) {
         status_parts.push(Span::styled("DRAFT", Style::default().fg(Color::Magenta)));
     }
     if email.has_attachments {
-        status_parts.push(Span::styled("ATTACHMENTS", Style::default().fg(Color::Cyan)));
+        status_parts.push(Span::styled(
+            "ATTACHMENTS",
+            Style::default().fg(Color::Cyan),
+        ));
     }
     if !status_parts.is_empty() {
         let mut status_line = vec![Span::styled(
@@ -93,13 +96,30 @@ pub fn draw_right_pane(frame: &mut Frame, app: &App, area: Rect) {
     )));
     lines.push(Line::from(""));
 
-    // Body placeholder (actual body would come from loading full email)
-    lines.push(Line::from(Span::styled(
-        "Press Enter to view full email...",
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-    )));
+    // Check if we have the body cached for this email
+    let body_available = app
+        .current_email_body
+        .as_ref()
+        .map(|(id, _)| id == &email.local_id)
+        .unwrap_or(false);
 
-    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    if body_available {
+        let (_, body) = app.current_email_body.as_ref().unwrap();
+        for line in body.lines() {
+            lines.push(Line::from(Span::raw(line.to_string())));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "(Press Enter to load email body...)",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(para, area);
 }
@@ -108,7 +128,7 @@ pub fn draw_right_pane(frame: &mut Frame, app: &App, area: Rect) {
 mod tests {
     use super::*;
     use h8_core::types::MessageSync;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn create_test_email() -> MessageSync {
         MessageSync {

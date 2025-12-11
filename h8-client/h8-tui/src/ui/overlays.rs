@@ -8,8 +8,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::app::{App, AppMode, SortOption, WhichKeyContext};
 use super::centered_rect;
+use crate::app::{App, AppMode, SortOption, WhichKeyContext};
 
 /// Draw the help overlay.
 pub fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
@@ -39,10 +39,7 @@ pub fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
                 let parts: Vec<&str> = line.splitn(2, ':').collect();
                 if parts.len() == 2 {
                     Line::from(vec![
-                        Span::styled(
-                            format!("{}:", parts[0]),
-                            Style::default().fg(Color::Yellow),
-                        ),
+                        Span::styled(format!("{}:", parts[0]), Style::default().fg(Color::Yellow)),
                         Span::raw(parts[1]),
                     ])
                 } else {
@@ -201,11 +198,7 @@ pub fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(Color::Green))
         .title(format!(" Search: {} ", mode_str));
 
-    let cursor_char = if app.search_query.is_empty() {
-        "_"
-    } else {
-        ""
-    };
+    let cursor_char = if app.search_query.is_empty() { "_" } else { "" };
 
     let line = Line::from(vec![
         Span::raw(&app.search_query),
@@ -269,7 +262,7 @@ Esc:          Cancel / return to normal
 mod tests {
     use super::*;
     use crate::app::SearchMode;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn test_draw_help() {

@@ -43,7 +43,11 @@ pub struct ComposeDocument {
     #[serde(default)]
     pub subject: String,
     /// In-Reply-To header for threading.
-    #[serde(rename = "in-reply-to", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "in-reply-to",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub in_reply_to: Option<String>,
     /// References header for threading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,7 +66,7 @@ impl ComposeDocument {
     /// Parse a compose document from text.
     pub fn parse(text: &str) -> Result<Self> {
         let (frontmatter, body) = split_frontmatter(text)?;
-        
+
         // Parse frontmatter
         let mut doc: ComposeDocument = if frontmatter.is_empty() {
             ComposeDocument::default()
@@ -70,9 +74,9 @@ impl ComposeDocument {
             // Handle comma-separated values for to, cc, bcc
             let yaml_value: serde_yaml::Value = serde_yaml::from_str(&frontmatter)
                 .map_err(|e| Error::Config(format!("parsing frontmatter YAML: {e}")))?;
-            
+
             let mut doc = ComposeDocument::default();
-            
+
             if let serde_yaml::Value::Mapping(map) = yaml_value {
                 for (key, value) in map {
                     let key_str = key.as_str().unwrap_or("");
@@ -87,10 +91,10 @@ impl ComposeDocument {
                     }
                 }
             }
-            
+
             doc
         };
-        
+
         doc.body = body;
         Ok(doc)
     }
@@ -98,60 +102,60 @@ impl ComposeDocument {
     /// Serialize the document to compose format.
     pub fn to_string(&self) -> Result<String> {
         let mut output = String::new();
-        
+
         // Build frontmatter
         output.push_str(FRONTMATTER_DELIM);
         output.push('\n');
-        
+
         // To
         if !self.to.is_empty() {
             output.push_str("to: ");
             output.push_str(&self.to.join(", "));
             output.push('\n');
         }
-        
+
         // CC
         if !self.cc.is_empty() {
             output.push_str("cc: ");
             output.push_str(&self.cc.join(", "));
             output.push('\n');
         }
-        
+
         // BCC
         if !self.bcc.is_empty() {
             output.push_str("bcc: ");
             output.push_str(&self.bcc.join(", "));
             output.push('\n');
         }
-        
+
         // Subject - quote if it contains special characters
         output.push_str("subject: ");
         output.push_str(&yaml_quote_if_needed(&self.subject));
         output.push('\n');
-        
+
         // In-Reply-To - quote if needed (usually contains angle brackets)
         if let Some(ref irt) = self.in_reply_to {
             output.push_str("in-reply-to: ");
             output.push_str(&yaml_quote_if_needed(irt));
             output.push('\n');
         }
-        
+
         // References - quote if needed
         if let Some(ref refs) = self.references {
             output.push_str("references: ");
             output.push_str(&yaml_quote_if_needed(refs));
             output.push('\n');
         }
-        
+
         output.push_str(FRONTMATTER_DELIM);
         output.push('\n');
-        
+
         // Body
         if !self.body.is_empty() {
             output.push('\n');
             output.push_str(&self.body);
         }
-        
+
         Ok(output)
     }
 
@@ -165,21 +169,21 @@ impl ComposeDocument {
         config: &ComposeConfig,
     ) -> Self {
         let mut doc = Self::new();
-        
+
         // Set recipient to original sender
         doc.to = vec![original_from.to_string()];
-        
+
         // Set subject with Re: prefix if not already present
         doc.subject = if original_subject.to_lowercase().starts_with("re:") {
             original_subject.to_string()
         } else {
             format!("Re: {}", original_subject)
         };
-        
+
         // Set threading headers
         if let Some(msg_id) = original_message_id {
             doc.in_reply_to = Some(msg_id.to_string());
-            
+
             // Build references chain
             let refs = match original_references {
                 Some(r) => format!("{} {}", r, msg_id),
@@ -187,10 +191,10 @@ impl ComposeDocument {
             };
             doc.references = Some(refs);
         }
-        
+
         // Quote original body
         doc.body = quote_text(original_body, &config.quote_style);
-        
+
         doc
     }
 
@@ -215,14 +219,14 @@ impl ComposeDocument {
             original_body,
             config,
         );
-        
+
         // Add original To recipients (excluding self) to CC
         let mut cc: Vec<String> = original_to
             .iter()
             .filter(|addr| !addr.eq_ignore_ascii_case(my_email))
             .cloned()
             .collect();
-        
+
         // Add original CC recipients (excluding self)
         cc.extend(
             original_cc
@@ -230,16 +234,16 @@ impl ComposeDocument {
                 .filter(|addr| !addr.eq_ignore_ascii_case(my_email))
                 .cloned(),
         );
-        
+
         // Remove duplicates
         cc.sort();
         cc.dedup();
-        
+
         // Remove the main recipient from CC if present
         cc.retain(|addr| !addr.eq_ignore_ascii_case(original_from));
-        
+
         doc.cc = cc;
-        
+
         doc
     }
 
@@ -253,15 +257,16 @@ impl ComposeDocument {
         _config: &ComposeConfig,
     ) -> Self {
         let mut doc = Self::new();
-        
+
         // Set subject with Fwd: prefix if not already present
-        doc.subject = if original_subject.to_lowercase().starts_with("fwd:") 
-            || original_subject.to_lowercase().starts_with("fw:") {
+        doc.subject = if original_subject.to_lowercase().starts_with("fwd:")
+            || original_subject.to_lowercase().starts_with("fw:")
+        {
             original_subject.to_string()
         } else {
             format!("Fwd: {}", original_subject)
         };
-        
+
         // Build forwarded message body
         let mut body = String::new();
         body.push_str("\n\n---------- Forwarded message ----------\n");
@@ -275,9 +280,9 @@ impl ComposeDocument {
         }
         body.push('\n');
         body.push_str(original_body);
-        
+
         doc.body = body;
-        
+
         doc
     }
 
@@ -286,19 +291,19 @@ impl ComposeDocument {
         if signature.is_empty() {
             return;
         }
-        
+
         // Ensure body ends with newline
         if !self.body.is_empty() && !self.body.ends_with('\n') {
             self.body.push('\n');
         }
-        
+
         // Add signature separator if not present
         if !signature.starts_with("--") {
             self.body.push_str("\n--\n");
         } else {
             self.body.push('\n');
         }
-        
+
         self.body.push_str(signature);
     }
 
@@ -307,14 +312,14 @@ impl ComposeDocument {
         if self.to.is_empty() {
             return Err(Error::Config("no recipients specified".into()));
         }
-        
+
         // Validate email addresses
         for addr in self.to.iter().chain(self.cc.iter()).chain(self.bcc.iter()) {
             if !is_valid_email(addr) {
                 return Err(Error::Config(format!("invalid email address: {}", addr)));
             }
         }
-        
+
         Ok(())
     }
 
@@ -331,31 +336,39 @@ impl ComposeDocument {
 /// Split text into frontmatter and body.
 fn split_frontmatter(text: &str) -> Result<(String, String)> {
     let trimmed = text.trim_start();
-    
+
     // Check if text starts with frontmatter delimiter
     if !trimmed.starts_with(FRONTMATTER_DELIM) {
         // No frontmatter, entire text is body
         return Ok((String::new(), text.to_string()));
     }
-    
+
     // Find the closing delimiter
     let after_first = &trimmed[FRONTMATTER_DELIM.len()..];
     let after_first = after_first.trim_start_matches(['\r', '\n']);
-    
+
     if let Some(end_pos) = after_first.find(&format!("\n{}", FRONTMATTER_DELIM)) {
         let frontmatter = &after_first[..end_pos];
         let body_start = end_pos + 1 + FRONTMATTER_DELIM.len();
-        let body = after_first.get(body_start..).unwrap_or("").trim_start_matches(['\r', '\n']);
+        let body = after_first
+            .get(body_start..)
+            .unwrap_or("")
+            .trim_start_matches(['\r', '\n']);
         Ok((frontmatter.to_string(), body.to_string()))
     } else if let Some(end_pos) = after_first.find(FRONTMATTER_DELIM) {
         // Delimiter on same line or at start of content
         let frontmatter = after_first[..end_pos].trim();
         let body_start = end_pos + FRONTMATTER_DELIM.len();
-        let body = after_first.get(body_start..).unwrap_or("").trim_start_matches(['\r', '\n']);
+        let body = after_first
+            .get(body_start..)
+            .unwrap_or("")
+            .trim_start_matches(['\r', '\n']);
         Ok((frontmatter.to_string(), body.to_string()))
     } else {
         // No closing delimiter - treat as error
-        Err(Error::Config("unclosed frontmatter (missing closing ---)".into()))
+        Err(Error::Config(
+            "unclosed frontmatter (missing closing ---)".into(),
+        ))
     }
 }
 
@@ -369,12 +382,11 @@ fn parse_address_list(value: &serde_yaml::Value) -> Vec<String> {
                 .filter(|addr| !addr.is_empty())
                 .collect()
         }
-        serde_yaml::Value::Sequence(seq) => {
-            seq.iter()
-                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-                .filter(|addr| !addr.is_empty())
-                .collect()
-        }
+        serde_yaml::Value::Sequence(seq) => seq
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|addr| !addr.is_empty())
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -382,11 +394,11 @@ fn parse_address_list(value: &serde_yaml::Value) -> Vec<String> {
 /// Quote a string for YAML if it contains special characters.
 fn yaml_quote_if_needed(s: &str) -> String {
     // Characters that require quoting in YAML
-    let needs_quoting = s.contains(':') 
-        || s.contains('#') 
-        || s.contains('<') 
-        || s.contains('>') 
-        || s.contains('[') 
+    let needs_quoting = s.contains(':')
+        || s.contains('#')
+        || s.contains('<')
+        || s.contains('>')
+        || s.contains('[')
         || s.contains(']')
         || s.contains('{')
         || s.contains('}')
@@ -400,7 +412,7 @@ fn yaml_quote_if_needed(s: &str) -> String {
         || s.ends_with(' ')
         || s.starts_with('@')
         || s.starts_with('`');
-    
+
     if needs_quoting {
         // Use double quotes, escaping internal double quotes
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
@@ -420,7 +432,7 @@ pub fn quote_text(text: &str, prefix: &str) -> String {
 /// Basic email validation.
 fn is_valid_email(email: &str) -> bool {
     let email = email.trim();
-    
+
     // Handle "Name <email>" format
     let email = if email.contains('<') && email.contains('>') {
         if let Some(start) = email.find('<') {
@@ -435,16 +447,16 @@ fn is_valid_email(email: &str) -> bool {
     } else {
         email
     };
-    
+
     // Basic validation: must have @ and at least one char on each side
     let parts: Vec<&str> = email.split('@').collect();
     if parts.len() != 2 {
         return false;
     }
-    
+
     let local = parts[0];
     let domain = parts[1];
-    
+
     !local.is_empty() && !domain.is_empty() && domain.contains('.')
 }
 
@@ -572,7 +584,10 @@ Thanks!"#;
         let doc = ComposeDocument::parse(text).unwrap();
         assert_eq!(doc.subject, "Re: Meeting");
         assert_eq!(doc.in_reply_to, Some("<original@example.com>".to_string()));
-        assert_eq!(doc.references, Some("<root@example.com> <original@example.com>".to_string()));
+        assert_eq!(
+            doc.references,
+            Some("<root@example.com> <original@example.com>".to_string())
+        );
     }
 
     #[test]
@@ -594,7 +609,10 @@ Thanks!"#;
     #[test]
     fn test_roundtrip() {
         let original = ComposeBuilder::new()
-            .to(vec!["alice@example.com".to_string(), "bob@example.com".to_string()])
+            .to(vec![
+                "alice@example.com".to_string(),
+                "bob@example.com".to_string(),
+            ])
             .cc(vec!["carol@example.com".to_string()])
             .subject("Test Subject")
             .in_reply_to("<msg@example.com>")
@@ -650,7 +668,10 @@ Thanks!"#;
         let config = ComposeConfig::default();
         let doc = ComposeDocument::reply_all(
             "sender@example.com",
-            &["me@example.com".to_string(), "other@example.com".to_string()],
+            &[
+                "me@example.com".to_string(),
+                "other@example.com".to_string(),
+            ],
             &["cc1@example.com".to_string()],
             "Subject",
             None,

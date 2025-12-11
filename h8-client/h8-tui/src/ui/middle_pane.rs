@@ -20,11 +20,7 @@ pub fn draw_middle_pane(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
-    let title = format!(
-        " {} ({}) ",
-        app.current_folder_display(),
-        app.emails.len()
-    );
+    let title = format!(" {} ({}) ", app.current_folder_display(), app.emails.len());
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -118,7 +114,7 @@ pub fn draw_middle_pane(frame: &mut Frame, app: &App, area: Rect) {
 mod tests {
     use super::*;
     use h8_core::types::MessageSync;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn create_test_email(id: &str, subject: &str, is_read: bool) -> MessageSync {
         MessageSync {
@@ -158,7 +154,8 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut app = App::new();
-        app.emails.push(create_test_email("1", "Hello World", false));
+        app.emails
+            .push(create_test_email("1", "Hello World", false));
         app.emails.push(create_test_email("2", "Re: Hello", true));
 
         terminal

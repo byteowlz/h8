@@ -69,13 +69,13 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_id_pool_status ON id_pool(status);
             "#,
         )?;
-        
+
         // Migration: add has_attachments column if it doesn't exist
         let _ = self.conn.execute(
             "ALTER TABLE messages ADD COLUMN has_attachments INTEGER DEFAULT 0",
             [],
         );
-        
+
         Ok(())
     }
 
@@ -222,9 +222,9 @@ impl Database {
 
     /// Get folder sync state.
     pub fn get_sync_state(&self, folder: &str) -> Result<Option<FolderSync>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT folder, last_sync, sync_token FROM sync_state WHERE folder = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT folder, last_sync, sync_token FROM sync_state WHERE folder = ?1")?;
         let mut rows = stmt.query(params![folder])?;
         if let Some(row) = rows.next()? {
             Ok(Some(FolderSync {
@@ -262,18 +262,18 @@ impl Database {
     /// Allocate a free ID from the pool.
     pub fn allocate_id(&self, remote_id: &str) -> Result<String> {
         let now = chrono::Utc::now().to_rfc3339();
-        
+
         // Try to find a free ID
         let mut stmt = self.conn.prepare(
             "SELECT short_id FROM id_pool WHERE status = 'free' ORDER BY RANDOM() LIMIT 1",
         )?;
         let mut rows = stmt.query([])?;
-        
+
         if let Some(row) = rows.next()? {
             let short_id: String = row.get(0)?;
             drop(rows);
             drop(stmt);
-            
+
             self.conn.execute(
                 "UPDATE id_pool SET status = 'used', assigned_at = ?1, message_remote_id = ?2 WHERE short_id = ?3",
                 params![now, remote_id, short_id],
@@ -295,9 +295,9 @@ impl Database {
 
     /// Get ID by remote message ID.
     pub fn get_id_by_remote(&self, remote_id: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT short_id FROM id_pool WHERE message_remote_id = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT short_id FROM id_pool WHERE message_remote_id = ?1")?;
         let mut rows = stmt.query(params![remote_id])?;
         if let Some(row) = rows.next()? {
             Ok(Some(row.get(0)?))
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn test_message_crud() {
         let db = Database::open_memory().unwrap();
-        
+
         let msg = MessageSync {
             local_id: "test-local".to_string(),
             remote_id: "remote-123".to_string(),
@@ -368,22 +368,22 @@ mod tests {
             synced_at: None,
             local_hash: None,
         };
-        
+
         db.upsert_message(&msg).unwrap();
-        
+
         let retrieved = db.get_message("test-local").unwrap().unwrap();
         assert_eq!(retrieved.remote_id, "remote-123");
         assert_eq!(retrieved.subject, Some("Test Subject".to_string()));
         assert!(retrieved.has_attachments);
-        
+
         let by_remote = db.get_message_by_remote_id("remote-123").unwrap().unwrap();
         assert_eq!(by_remote.local_id, "test-local");
         assert!(by_remote.has_attachments);
-        
+
         let messages = db.list_messages("inbox", 10).unwrap();
         assert_eq!(messages.len(), 1);
         assert!(messages[0].has_attachments);
-        
+
         assert!(db.delete_message("test-local").unwrap());
         assert!(db.get_message("test-local").unwrap().is_none());
     }
@@ -391,15 +391,15 @@ mod tests {
     #[test]
     fn test_sync_state() {
         let db = Database::open_memory().unwrap();
-        
+
         let state = FolderSync {
             folder: "inbox".to_string(),
             last_sync: Some("2024-01-01T00:00:00Z".to_string()),
             sync_token: Some("token-123".to_string()),
         };
-        
+
         db.upsert_sync_state(&state).unwrap();
-        
+
         let retrieved = db.get_sync_state("inbox").unwrap().unwrap();
         assert_eq!(retrieved.sync_token, Some("token-123".to_string()));
     }
@@ -407,22 +407,22 @@ mod tests {
     #[test]
     fn test_id_pool() {
         let db = Database::open_memory().unwrap();
-        
+
         let adjectives = ["cold", "blue", "fast"];
         let nouns = ["lamp", "frog", "cold"]; // "cold" is in both to test overlap
-        
+
         let count = db.seed_id_pool(&adjectives, &nouns).unwrap();
         // 3 adj * 3 nouns - 1 same-word pair (cold-cold) = 8
         assert_eq!(count, 8);
-        
+
         // Allocate an ID
         let id = db.allocate_id("remote-msg-1").unwrap();
         assert!(id.contains('-'));
-        
+
         // Verify it's marked as used
         let remote = db.get_remote_by_id(&id).unwrap();
         assert_eq!(remote, Some("remote-msg-1".to_string()));
-        
+
         // Free the ID
         assert!(db.free_id(&id).unwrap());
         assert!(db.get_remote_by_id(&id).unwrap().is_none());
@@ -431,16 +431,16 @@ mod tests {
     #[test]
     fn test_id_pool_exhaustion() {
         let db = Database::open_memory().unwrap();
-        
+
         let adjectives = ["cold"];
         let nouns = ["lamp"];
-        
+
         db.seed_id_pool(&adjectives, &nouns).unwrap();
-        
+
         // Allocate the only ID
         let id = db.allocate_id("remote-1").unwrap();
         assert_eq!(id, "cold-lamp");
-        
+
         // Try to allocate another - should fail
         let result = db.allocate_id("remote-2");
         assert!(matches!(result, Err(Error::IdPoolExhausted)));

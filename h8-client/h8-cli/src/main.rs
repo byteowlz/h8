@@ -10,16 +10,18 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{
+    DateTime, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime, TimeZone, Utc,
+};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use env_logger::fmt::WriteStyle;
+use h8_core::id::WordLists;
+use h8_core::maildir::{FOLDER_DRAFTS, FOLDER_TRASH, MessageFlags};
 use h8_core::{
     AppConfig, AppPaths, ComposeBuilder, ComposeDocument, Database, IdGenerator, Maildir,
     ServiceClient,
 };
-use h8_core::id::WordLists;
-use h8_core::maildir::{MessageFlags, FOLDER_DRAFTS, FOLDER_TRASH};
 
 use log::{LevelFilter, debug};
 use serde::{Deserialize, Serialize};
@@ -388,6 +390,9 @@ struct MailSyncArgs {
     /// Force full re-sync (ignore sync tokens)
     #[arg(long)]
     full: bool,
+    /// Only sync emails received in the last N days
+    #[arg(short = 'l', long = "limit", value_name = "DAYS")]
+    limit_days: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -482,12 +487,10 @@ struct RuntimeContext {
 
 impl RuntimeContext {
     fn new(common: CommonOpts) -> Result<Self> {
-        let paths = AppPaths::discover(common.config.clone())
-            .map_err(|e| anyhow!("{e}"))?;
-        AppConfig::ensure_default(&paths.global_config)
-            .map_err(|e| anyhow!("{e}"))?;
-        let config = AppConfig::load(&paths, common.account.as_deref())
-            .map_err(|e| anyhow!("{e}"))?;
+        let paths = AppPaths::discover(common.config.clone()).map_err(|e| anyhow!("{e}"))?;
+        AppConfig::ensure_default(&paths.global_config).map_err(|e| anyhow!("{e}"))?;
+        let config =
+            AppConfig::load(&paths, common.account.as_deref()).map_err(|e| anyhow!("{e}"))?;
         Ok(Self {
             common,
             paths,
@@ -550,8 +553,7 @@ impl RuntimeContext {
 
     fn service_client(&self) -> Result<ServiceClient> {
         let timeout = self.common.timeout.map(Duration::from_secs);
-        ServiceClient::new(&self.config.service_url, timeout)
-            .map_err(|e| anyhow!("{e}"))
+        ServiceClient::new(&self.config.service_url, timeout).map_err(|e| anyhow!("{e}"))
     }
 }
 
@@ -560,22 +562,26 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
     let client = ctx.service_client()?;
     match cmd {
         CalendarCommand::List(args) => {
-            let events = client.calendar_list(
-                &account,
-                args.days,
-                args.from_date.as_deref(),
-                args.to_date.as_deref(),
-            ).map_err(|e| anyhow!("{e}"))?;
+            let events = client
+                .calendar_list(
+                    &account,
+                    args.days,
+                    args.from_date.as_deref(),
+                    args.to_date.as_deref(),
+                )
+                .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &events)?;
         }
         CalendarCommand::Create(args) => {
             let payload = read_json_payload(args.file.as_ref())?;
-            let event = client.calendar_create(&account, payload)
+            let event = client
+                .calendar_create(&account, payload)
                 .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &event)?;
         }
         CalendarCommand::Delete(args) => {
-            let result = client.calendar_delete(&account, &args.id, args.change_key.as_deref())
+            let result = client
+                .calendar_delete(&account, &args.id, args.change_key.as_deref())
                 .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &result)?;
         }
@@ -586,7 +592,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
 fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
     let account = effective_account(ctx);
     let client = ctx.service_client()?;
-    
+
     match cmd {
         MailCommand::List(args) => handle_mail_list(ctx, &client, &account, args),
         MailCommand::Get(args) => handle_mail_get(ctx, &client, &account, args),
@@ -614,36 +620,38 @@ fn handle_mail_list(
 ) -> Result<()> {
     // Try to list from local Maildir first, fall back to server
     let mail_dir = get_mail_dir(ctx, account)?;
-    
+
     if mail_dir.base_path().exists() {
         // List from local storage
-        let messages = mail_dir.list(&args.folder)
-            .map_err(|e| anyhow!("{e}"))?;
-        
+        let messages = mail_dir.list(&args.folder).map_err(|e| anyhow!("{e}"))?;
+
         // Load database to get human-readable IDs
         let db_path = ctx.paths.sync_db_path(account);
         let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
-        
+
         let mut output: Vec<serde_json::Value> = Vec::new();
         for msg in messages.iter().take(args.limit) {
             // Try to get metadata from database
             let local_msg = db.get_message(&msg.id).map_err(|e| anyhow!("{e}"))?;
-            
-            let subject = local_msg.as_ref()
+
+            let subject = local_msg
+                .as_ref()
                 .and_then(|m| m.subject.clone())
                 .unwrap_or_else(|| "(no subject)".to_string());
-            let from = local_msg.as_ref()
+            let from = local_msg
+                .as_ref()
                 .and_then(|m| m.from_addr.clone())
                 .unwrap_or_else(|| "unknown".to_string());
-            let date = local_msg.as_ref()
+            let date = local_msg
+                .as_ref()
                 .and_then(|m| m.received_at.clone())
                 .unwrap_or_default();
-            
+
             // Filter unread if requested
             if args.unread && msg.flags.seen {
                 continue;
             }
-            
+
             output.push(serde_json::json!({
                 "id": msg.id,
                 "subject": subject,
@@ -654,15 +662,16 @@ fn handle_mail_list(
                 "folder": msg.folder,
             }));
         }
-        
+
         emit_output(&ctx.common, &output)?;
     } else {
         // Fall back to server
-        let messages = client.mail_list(account, &args.folder, args.limit, args.unread)
+        let messages = client
+            .mail_list(account, &args.folder, args.limit, args.unread)
             .map_err(|e| anyhow!("{e}"))?;
         emit_output(&ctx.common, &messages)?;
     }
-    
+
     Ok(())
 }
 
@@ -677,14 +686,16 @@ fn handle_mail_get(
     let remote_id = if db_path.exists() {
         let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
         let id_gen = IdGenerator::new(&db);
-        id_gen.resolve(&args.id)
+        id_gen
+            .resolve(&args.id)
             .map_err(|e| anyhow!("{e}"))?
             .unwrap_or_else(|| args.id.clone())
     } else {
         args.id.clone()
     };
-    
-    let message = client.mail_get(account, &args.folder, &remote_id)
+
+    let message = client
+        .mail_get(account, &args.folder, &remote_id)
         .map_err(|e| anyhow!("{e}"))?;
     emit_output(&ctx.common, &message)?;
     Ok(())
@@ -692,43 +703,46 @@ fn handle_mail_get(
 
 fn handle_mail_read(ctx: &RuntimeContext, account: &str, args: MailReadArgs) -> Result<()> {
     let mail_dir = get_mail_dir(ctx, account)?;
-    
+
     // Get the message
-    let msg = mail_dir.get(&args.folder, &args.id)
+    let msg = mail_dir
+        .get(&args.folder, &args.id)
         .map_err(|e| anyhow!("{e}"))?
         .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
-    
+
     let content = msg.read_content().map_err(|e| anyhow!("{e}"))?;
-    
+
     if args.raw || !io::stdout().is_terminal() {
         println!("{}", content);
     } else {
         // Use pager
         let pager = ctx.config.mail.pager.clone();
         let pager_parts: Vec<&str> = pager.split_whitespace().collect();
-        let (pager_cmd, pager_args) = pager_parts.split_first()
+        let (pager_cmd, pager_args) = pager_parts
+            .split_first()
             .ok_or_else(|| anyhow!("invalid pager command"))?;
-        
+
         let mut child = ProcCommand::new(pager_cmd)
             .args(pager_args.iter())
             .stdin(Stdio::piped())
             .spawn()
             .with_context(|| format!("starting pager: {}", pager))?;
-        
+
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(content.as_bytes())?;
         }
         child.wait()?;
     }
-    
+
     // Mark as read (unless already read)
     if !msg.flags.seen {
         let mut new_flags = msg.flags.clone();
         new_flags.mark_read();
-        mail_dir.update_flags(&args.folder, &args.id, &new_flags)
+        mail_dir
+            .update_flags(&args.folder, &args.id, &new_flags)
             .map_err(|e| anyhow!("{e}"))?;
     }
-    
+
     Ok(())
 }
 
@@ -738,13 +752,15 @@ fn handle_mail_fetch(
     account: &str,
     args: MailFetchArgs,
 ) -> Result<()> {
-    let result = client.mail_fetch(
-        account,
-        &args.folder,
-        &args.output,
-        args.format.into(),
-        args.limit,
-    ).map_err(|e| anyhow!("{e}"))?;
+    let result = client
+        .mail_fetch(
+            account,
+            &args.folder,
+            &args.output,
+            args.format.into(),
+            args.limit,
+        )
+        .map_err(|e| anyhow!("{e}"))?;
     emit_output(&ctx.common, &result)?;
     Ok(())
 }
@@ -759,13 +775,13 @@ fn handle_mail_send(
         // Send all drafts
         let mail_dir = get_mail_dir(ctx, account)?;
         let drafts = mail_dir.list(FOLDER_DRAFTS).map_err(|e| anyhow!("{e}"))?;
-        
+
         for draft in drafts {
             send_draft(ctx, client, account, &mail_dir, &draft.id)?;
         }
         return Ok(());
     }
-    
+
     if let Some(id) = args.id {
         // Send specific draft
         let mail_dir = get_mail_dir(ctx, account)?;
@@ -773,11 +789,12 @@ fn handle_mail_send(
     } else {
         // Read from file/stdin
         let payload = read_json_payload(args.file.as_ref())?;
-        let result = client.mail_send(account, payload)
+        let result = client
+            .mail_send(account, payload)
             .map_err(|e| anyhow!("{e}"))?;
         emit_output(&ctx.common, &result)?;
     }
-    
+
     Ok(())
 }
 
@@ -789,16 +806,17 @@ fn send_draft(
     draft_id: &str,
 ) -> Result<()> {
     // Load draft from local storage
-    let draft = mail_dir.get(FOLDER_DRAFTS, draft_id)
+    let draft = mail_dir
+        .get(FOLDER_DRAFTS, draft_id)
         .map_err(|e| anyhow!("{e}"))?
         .ok_or_else(|| anyhow!("draft not found: {}", draft_id))?;
-    
+
     let content = draft.read_content().map_err(|e| anyhow!("{e}"))?;
     let doc = ComposeDocument::parse(&content).map_err(|e| anyhow!("{e}"))?;
-    
+
     // Validate before sending
     doc.validate().map_err(|e| anyhow!("{e}"))?;
-    
+
     // Build send payload
     let payload = serde_json::json!({
         "to": doc.to,
@@ -808,33 +826,32 @@ fn send_draft(
         "body": doc.body,
         "html": false,
     });
-    
+
     // Send via service
-    let result = client.mail_send(account, payload)
+    let result = client
+        .mail_send(account, payload)
         .map_err(|e| anyhow!("{e}"))?;
-    
+
     // Delete local draft on success
-    mail_dir.delete(FOLDER_DRAFTS, draft_id)
+    mail_dir
+        .delete(FOLDER_DRAFTS, draft_id)
         .map_err(|e| anyhow!("{e}"))?;
-    
+
     println!("Sent: {}", draft_id);
     emit_output(&ctx.common, &result)?;
-    
+
     Ok(())
 }
 
 fn handle_mail_compose(ctx: &RuntimeContext, account: &str, args: MailComposeArgs) -> Result<()> {
-    let doc = ComposeBuilder::new()
-        .subject("")
-        .body("")
-        .build();
-    
+    let doc = ComposeBuilder::new().subject("").body("").build();
+
     // Add signature if configured
     let mut doc = doc;
     if ctx.config.mail.compose.include_signature && !ctx.config.mail.signature.is_empty() {
         doc.add_signature(&ctx.config.mail.signature);
     }
-    
+
     open_editor_and_save_draft(ctx, account, doc, !args.no_edit)
 }
 
@@ -845,33 +862,39 @@ fn handle_mail_reply(
     args: MailReplyArgs,
 ) -> Result<()> {
     // Get original message
-    let message = client.mail_get(account, &args.folder, &args.id)
+    let message = client
+        .mail_get(account, &args.folder, &args.id)
         .map_err(|e| anyhow!("{e}"))?;
-    
-    let original_from = message.get("from")
+
+    let original_from = message.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    let original_subject = message
+        .get("subject")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let original_subject = message.get("subject")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let original_body = message.get("body")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let original_message_id = message.get("message_id")
-        .and_then(|v| v.as_str());
-    let original_references = message.get("references")
-        .and_then(|v| v.as_str());
-    
+    let original_body = message.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    let original_message_id = message.get("message_id").and_then(|v| v.as_str());
+    let original_references = message.get("references").and_then(|v| v.as_str());
+
     let doc = if args.all {
-        let original_to: Vec<String> = message.get("to")
+        let original_to: Vec<String> = message
+            .get("to")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        let original_cc: Vec<String> = message.get("cc")
+        let original_cc: Vec<String> = message
+            .get("cc")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        
+
         ComposeDocument::reply_all(
             original_from,
             &original_to,
@@ -893,12 +916,12 @@ fn handle_mail_reply(
             &ctx.config.mail.compose,
         )
     };
-    
+
     let mut doc = doc;
     if ctx.config.mail.compose.include_signature && !ctx.config.mail.signature.is_empty() {
         doc.add_signature(&ctx.config.mail.signature);
     }
-    
+
     open_editor_and_save_draft(ctx, account, doc, true)
 }
 
@@ -909,25 +932,27 @@ fn handle_mail_forward(
     args: MailForwardArgs,
 ) -> Result<()> {
     // Get original message
-    let message = client.mail_get(account, &args.folder, &args.id)
+    let message = client
+        .mail_get(account, &args.folder, &args.id)
         .map_err(|e| anyhow!("{e}"))?;
-    
-    let original_from = message.get("from")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let original_to: Vec<String> = message.get("to")
+
+    let original_from = message.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    let original_to: Vec<String> = message
+        .get("to")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
-    let original_subject = message.get("subject")
+    let original_subject = message
+        .get("subject")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let original_body = message.get("body")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let original_date = message.get("datetime_received")
-        .and_then(|v| v.as_str());
-    
+    let original_body = message.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    let original_date = message.get("datetime_received").and_then(|v| v.as_str());
+
     let doc = ComposeDocument::forward(
         original_from,
         &original_to,
@@ -936,32 +961,34 @@ fn handle_mail_forward(
         original_body,
         &ctx.config.mail.compose,
     );
-    
+
     let mut doc = doc;
     if ctx.config.mail.compose.include_signature && !ctx.config.mail.signature.is_empty() {
         doc.add_signature(&ctx.config.mail.signature);
     }
-    
+
     open_editor_and_save_draft(ctx, account, doc, true)
 }
 
 fn handle_mail_move(ctx: &RuntimeContext, account: &str, args: MailMoveArgs) -> Result<()> {
     let mail_dir = get_mail_dir(ctx, account)?;
-    
-    mail_dir.move_to(&args.folder, &args.id, &args.dest)
+
+    mail_dir
+        .move_to(&args.folder, &args.id, &args.dest)
         .map_err(|e| anyhow!("{e}"))?
         .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
-    
+
     println!("Moved {} to {}", args.id, args.dest);
     Ok(())
 }
 
 fn handle_mail_delete(ctx: &RuntimeContext, account: &str, args: MailDeleteArgs) -> Result<()> {
     let mail_dir = get_mail_dir(ctx, account)?;
-    
+
     if args.force {
         // Permanently delete
-        let deleted = mail_dir.delete(&args.folder, &args.id)
+        let deleted = mail_dir
+            .delete(&args.folder, &args.id)
             .map_err(|e| anyhow!("{e}"))?;
         if deleted {
             println!("Deleted {}", args.id);
@@ -970,24 +997,26 @@ fn handle_mail_delete(ctx: &RuntimeContext, account: &str, args: MailDeleteArgs)
         }
     } else {
         // Move to trash
-        mail_dir.move_to(&args.folder, &args.id, FOLDER_TRASH)
+        mail_dir
+            .move_to(&args.folder, &args.id, FOLDER_TRASH)
             .map_err(|e| anyhow!("{e}"))?
             .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
         println!("Moved {} to trash", args.id);
     }
-    
+
     Ok(())
 }
 
 fn handle_mail_mark(ctx: &RuntimeContext, account: &str, args: MailMarkArgs) -> Result<()> {
     let mail_dir = get_mail_dir(ctx, account)?;
-    
-    let msg = mail_dir.get(&args.folder, &args.id)
+
+    let msg = mail_dir
+        .get(&args.folder, &args.id)
         .map_err(|e| anyhow!("{e}"))?
         .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
-    
+
     let mut flags = msg.flags.clone();
-    
+
     if args.read {
         flags.seen = true;
     }
@@ -1000,10 +1029,11 @@ fn handle_mail_mark(ctx: &RuntimeContext, account: &str, args: MailMarkArgs) -> 
     if args.unflag {
         flags.flagged = false;
     }
-    
-    mail_dir.update_flags(&args.folder, &args.id, &flags)
+
+    mail_dir
+        .update_flags(&args.folder, &args.id, &flags)
         .map_err(|e| anyhow!("{e}"))?;
-    
+
     println!("Updated flags for {}", args.id);
     Ok(())
 }
@@ -1011,38 +1041,41 @@ fn handle_mail_mark(ctx: &RuntimeContext, account: &str, args: MailMarkArgs) -> 
 fn handle_mail_drafts(ctx: &RuntimeContext, account: &str, args: MailDraftsArgs) -> Result<()> {
     let mail_dir = get_mail_dir(ctx, account)?;
     let drafts = mail_dir.list(FOLDER_DRAFTS).map_err(|e| anyhow!("{e}"))?;
-    
+
     let mut output: Vec<serde_json::Value> = Vec::new();
     for draft in drafts.iter().take(args.limit) {
         // Try to parse the draft to extract headers
         let content = draft.read_content().unwrap_or_default();
         let doc = ComposeDocument::parse(&content).ok();
-        
+
         output.push(serde_json::json!({
             "id": draft.id,
             "subject": doc.as_ref().map(|d| d.subject.clone()).unwrap_or_default(),
             "to": doc.as_ref().map(|d| d.to.clone()).unwrap_or_default(),
         }));
     }
-    
+
     emit_output(&ctx.common, &output)?;
     Ok(())
 }
 
 fn handle_mail_edit(ctx: &RuntimeContext, account: &str, args: MailEditArgs) -> Result<()> {
     let mail_dir = get_mail_dir(ctx, account)?;
-    
+
     // Load existing draft
-    let draft = mail_dir.get(FOLDER_DRAFTS, &args.id)
+    let draft = mail_dir
+        .get(FOLDER_DRAFTS, &args.id)
         .map_err(|e| anyhow!("{e}"))?
         .ok_or_else(|| anyhow!("draft not found: {}", args.id))?;
-    
+
     let content = draft.read_content().map_err(|e| anyhow!("{e}"))?;
     let doc = ComposeDocument::parse(&content).map_err(|e| anyhow!("{e}"))?;
-    
+
     // Delete old draft before creating new one
-    mail_dir.delete(FOLDER_DRAFTS, &args.id).map_err(|e| anyhow!("{e}"))?;
-    
+    mail_dir
+        .delete(FOLDER_DRAFTS, &args.id)
+        .map_err(|e| anyhow!("{e}"))?;
+
     open_editor_and_save_draft(ctx, account, doc, true)
 }
 
@@ -1054,10 +1087,12 @@ fn handle_mail_sync(
 ) -> Result<()> {
     let mail_dir = get_mail_dir(ctx, account)?;
     mail_dir.init().map_err(|e| anyhow!("{e}"))?;
-    
+
     let db_path = ctx.paths.sync_db_path(account);
     let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
-    
+    let limit_days = args.limit_days;
+    let cutoff_time = limit_days.map(|days| Utc::now() - ChronoDuration::days(days as i64));
+
     // Initialize ID pool if empty
     let id_gen = IdGenerator::new(&db);
     let stats = id_gen.stats().map_err(|e| anyhow!("{e}"))?;
@@ -1066,85 +1101,133 @@ fn handle_mail_sync(
         id_gen.init_pool(&words).map_err(|e| anyhow!("{e}"))?;
         println!("Initialized ID pool");
     }
-    
+
     // Determine folders to sync
     let folders: Vec<String> = if let Some(folder) = args.folder {
         vec![folder]
     } else {
         ctx.config.mail.sync_folders.clone()
     };
-    
+
     for folder in &folders {
         println!("Syncing {}...", folder);
-        
+
         // Fetch from server to local
-        let messages = client.mail_list(account, folder, 100, false)
+        let messages = client
+            .mail_list(account, folder, 100, false)
             .map_err(|e| anyhow!("{e}"))?;
-        
-        let messages_arr = messages.as_array()
+
+        let messages_arr = messages
+            .as_array()
             .ok_or_else(|| anyhow!("expected array from server"))?;
-        
-        let mut synced = 0;
+
+        // First pass: collect messages to sync (filter by cutoff, skip existing)
+        let mut to_sync: Vec<(&str, &Value)> = Vec::new();
         for msg_val in messages_arr {
-            let remote_id = msg_val.get("item_id")
+            if let Some(ref cutoff) = cutoff_time {
+                let email_ts = msg_val
+                    .get("datetime_received")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+                if let Some(ts) = email_ts {
+                    if ts < *cutoff {
+                        continue;
+                    }
+                }
+            }
+
+            let remote_id = msg_val
+                .get("item_id")
+                .or_else(|| msg_val.get("id"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("missing item_id"))?;
-            
+
             // Check if we already have this message
-            if db.get_message_by_remote_id(remote_id).map_err(|e| anyhow!("{e}"))?.is_some() {
+            if db
+                .get_message_by_remote_id(remote_id)
+                .map_err(|e| anyhow!("{e}"))?
+                .is_some()
+            {
                 continue;
             }
-            
+
+            to_sync.push((remote_id, msg_val));
+        }
+
+        let total = to_sync.len();
+        if total == 0 {
+            println!("  No new messages");
+            continue;
+        }
+
+        println!("  Fetching {} new messages...", total);
+
+        let mut synced = 0;
+        for (i, (remote_id, msg_val)) in to_sync.into_iter().enumerate() {
+            // Progress indicator
+            if (i + 1) % 10 == 0 || i + 1 == total {
+                print!("\r  [{}/{}] Syncing...", i + 1, total);
+                let _ = io::stdout().flush();
+            }
+
             // Allocate human-readable ID
-            let local_id = id_gen.allocate(remote_id)
+            let local_id = id_gen.allocate(remote_id).map_err(|e| anyhow!("{e}"))?;
+
+            // Fetch full message content (needed for body)
+            let full_msg = client
+                .mail_get(account, folder, remote_id)
                 .map_err(|e| anyhow!("{e}"))?;
-            
-            // Fetch full message content
-            let full_msg = client.mail_get(account, folder, remote_id)
-                .map_err(|e| anyhow!("{e}"))?;
-            
-            // Build email content
-            let subject = full_msg.get("subject")
+
+            // Build email content - use full_msg for body, msg_val for metadata
+            let subject = msg_val
+                .get("subject")
                 .and_then(|v| v.as_str())
                 .unwrap_or("(no subject)");
-            let from = full_msg.get("from")
+            let from = msg_val
+                .get("from")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let body = full_msg.get("body")
+            let body = full_msg.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let date = msg_val
+                .get("datetime_received")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let date = full_msg.get("datetime_received")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            
+
             let content = format!(
                 "From: {}\r\nSubject: {}\r\nDate: {}\r\n\r\n{}",
                 from, subject, date, body
             );
-            
-            // Determine flags
-            let is_read = full_msg.get("is_read")
+
+            // Determine flags from list response (faster than full_msg)
+            let is_read = msg_val
+                .get("is_read")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let mut flags = MessageFlags::default();
             if is_read {
                 flags.seen = true;
             }
-            
+
             // Store in Maildir
-            mail_dir.store_with_id(folder, content.as_bytes(), &flags, &local_id)
+            mail_dir
+                .store_with_id(folder, content.as_bytes(), &flags, &local_id)
                 .map_err(|e| anyhow!("{e}"))?;
-            
-            // Check for attachments
-            let has_attachments = full_msg.get("has_attachments")
+
+            // Check for attachments from list response
+            let has_attachments = msg_val
+                .get("has_attachments")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            
+
             // Store in database
             let msg_sync = h8_core::types::MessageSync {
                 local_id: local_id.clone(),
                 remote_id: remote_id.to_string(),
-                change_key: full_msg.get("changekey").and_then(|v| v.as_str()).map(String::from),
+                change_key: msg_val
+                    .get("changekey")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
                 folder: folder.clone(),
                 subject: Some(subject.to_string()),
                 from_addr: Some(from.to_string()),
@@ -1156,13 +1239,13 @@ fn handle_mail_sync(
                 local_hash: None,
             };
             db.upsert_message(&msg_sync).map_err(|e| anyhow!("{e}"))?;
-            
+
             synced += 1;
         }
-        
-        println!("  Synced {} new messages", synced);
+
+        println!("\r  Synced {} new messages        ", synced);
     }
-    
+
     println!("Sync complete");
     Ok(())
 }
@@ -1178,45 +1261,49 @@ fn handle_mail_attachments(
     let remote_id = if db_path.exists() {
         let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
         let id_gen = IdGenerator::new(&db);
-        id_gen.resolve(&args.id)
+        id_gen
+            .resolve(&args.id)
             .map_err(|e| anyhow!("{e}"))?
             .unwrap_or_else(|| args.id.clone())
     } else {
         args.id.clone()
     };
-    
+
     if let Some(index) = args.download {
         // Download specific attachment
         let output_path = args.output.unwrap_or_else(|| PathBuf::from("."));
-        let result = client.mail_attachment_download(
-            account,
-            &args.folder,
-            &remote_id,
-            index,
-            &output_path,
-        ).map_err(|e| anyhow!("{e}"))?;
-        
+        let result = client
+            .mail_attachment_download(account, &args.folder, &remote_id, index, &output_path)
+            .map_err(|e| anyhow!("{e}"))?;
+
         if let Some(path) = result.get("path").and_then(|v| v.as_str()) {
             println!("Downloaded: {}", path);
         }
         emit_output(&ctx.common, &result)?;
     } else {
         // List attachments
-        let attachments = client.mail_attachments_list(account, &args.folder, &remote_id)
+        let attachments = client
+            .mail_attachments_list(account, &args.folder, &remote_id)
             .map_err(|e| anyhow!("{e}"))?;
-        
+
         if let Some(arr) = attachments.as_array() {
             if arr.is_empty() {
                 println!("No attachments");
                 return Ok(());
             }
-            
+
             for att in arr {
                 let idx = att.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-                let name = att.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
+                let name = att
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unnamed");
                 let size = att.get("size").and_then(|v| v.as_u64());
-                let ctype = att.get("content_type").and_then(|v| v.as_str()).unwrap_or("unknown");
-                
+                let ctype = att
+                    .get("content_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+
                 if let Some(s) = size {
                     println!("[{}] {} ({} bytes, {})", idx, name, s, ctype);
                 } else {
@@ -1227,7 +1314,7 @@ fn handle_mail_attachments(
             emit_output(&ctx.common, &attachments)?;
         }
     }
-    
+
     Ok(())
 }
 
@@ -1239,7 +1326,7 @@ fn get_mail_dir(ctx: &RuntimeContext, account: &str) -> Result<Maildir> {
     } else {
         ctx.paths.mail_dir(account)
     };
-    
+
     Maildir::new(mail_path, account).map_err(|e| anyhow!("{e}"))
 }
 
@@ -1250,49 +1337,56 @@ fn open_editor_and_save_draft(
     open_editor: bool,
 ) -> Result<()> {
     let content = doc.to_string().map_err(|e| anyhow!("{e}"))?;
-    
+
     // Create temp file
     let temp_dir = std::env::temp_dir();
     let temp_path = temp_dir.join(format!("h8-compose-{}.eml", std::process::id()));
     fs::write(&temp_path, &content)?;
-    
+
     if open_editor {
         // Get editor command
-        let editor = ctx.config.mail.editor.clone()
+        let editor = ctx
+            .config
+            .mail
+            .editor
+            .clone()
             .or_else(|| env::var("EDITOR").ok())
             .unwrap_or_else(|| "vi".to_string());
-        
+
         // Open editor
         let status = ProcCommand::new(&editor)
             .arg(&temp_path)
             .status()
             .with_context(|| format!("starting editor: {}", editor))?;
-        
+
         if !status.success() {
             let _ = fs::remove_file(&temp_path);
             return Err(anyhow!("editor exited with non-zero status"));
         }
     }
-    
+
     // Read edited content
     let edited_content = fs::read_to_string(&temp_path)?;
     let _ = fs::remove_file(&temp_path);
-    
+
     // Parse to validate
-    let _edited_doc = ComposeDocument::parse(&edited_content)
-        .map_err(|e| anyhow!("{e}"))?;
-    
+    let _edited_doc = ComposeDocument::parse(&edited_content).map_err(|e| anyhow!("{e}"))?;
+
     // Save as draft
     let mail_dir = get_mail_dir(ctx, account)?;
     mail_dir.init().map_err(|e| anyhow!("{e}"))?;
-    
-    let flags = MessageFlags { draft: true, ..Default::default() };
-    
-    let draft = mail_dir.store(FOLDER_DRAFTS, edited_content.as_bytes(), &flags)
+
+    let flags = MessageFlags {
+        draft: true,
+        ..Default::default()
+    };
+
+    let draft = mail_dir
+        .store(FOLDER_DRAFTS, edited_content.as_bytes(), &flags)
         .map_err(|e| anyhow!("{e}"))?;
-    
+
     println!("Draft saved: {}", draft.id);
-    
+
     Ok(())
 }
 
@@ -1301,23 +1395,27 @@ fn handle_contacts(ctx: &RuntimeContext, cmd: ContactsCommand) -> Result<()> {
     let client = ctx.service_client()?;
     match cmd {
         ContactsCommand::List(args) => {
-            let contacts = client.contacts_list(&account, args.limit, args.search.as_deref())
+            let contacts = client
+                .contacts_list(&account, args.limit, args.search.as_deref())
                 .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &contacts)?;
         }
         ContactsCommand::Get(args) => {
-            let contact = client.contacts_get(&account, &args.id)
+            let contact = client
+                .contacts_get(&account, &args.id)
                 .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &contact)?;
         }
         ContactsCommand::Create(args) => {
             let payload = read_json_payload(args.file.as_ref())?;
-            let result = client.contacts_create(&account, payload)
+            let result = client
+                .contacts_create(&account, payload)
                 .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &result)?;
         }
         ContactsCommand::Delete(args) => {
-            let result = client.contacts_delete(&account, &args.id)
+            let result = client
+                .contacts_delete(&account, &args.id)
                 .map_err(|e| anyhow!("{e}"))?;
             emit_output(&ctx.common, &result)?;
         }
@@ -1339,12 +1437,14 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
     let start = today.and_hms_opt(0, 0, 0).unwrap();
     let end = today.and_hms_opt(23, 59, 59).unwrap();
 
-    let events_val = client.calendar_list(
-        &account,
-        1,
-        Some(&start.format("%Y-%m-%dT%H:%M:%S").to_string()),
-        Some(&end.format("%Y-%m-%dT%H:%M:%S").to_string()),
-    ).map_err(|e| anyhow!("{e}"))?;
+    let events_val = client
+        .calendar_list(
+            &account,
+            1,
+            Some(&start.format("%Y-%m-%dT%H:%M:%S").to_string()),
+            Some(&end.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        )
+        .map_err(|e| anyhow!("{e}"))?;
 
     if ctx.common.json || ctx.common.yaml || !io::stdout().is_terminal() {
         emit_output(&ctx.common, &events_val)?;
@@ -1360,7 +1460,8 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
 fn handle_free(ctx: &RuntimeContext, cmd: FreeCommand) -> Result<()> {
     let account = effective_account(ctx);
     let client = ctx.service_client()?;
-    let slots = client.free_slots(&account, cmd.weeks, cmd.duration, cmd.limit)
+    let slots = client
+        .free_slots(&account, cmd.weeks, cmd.duration, cmd.limit)
         .map_err(|e| anyhow!("{e}"))?;
     emit_output(&ctx.common, &slots)?;
     Ok(())
@@ -1374,8 +1475,7 @@ fn handle_config(ctx: &RuntimeContext, command: ConfigCommand) -> Result<()> {
             Ok(())
         }
         ConfigCommand::Reset => {
-            AppConfig::write_default(&ctx.paths.global_config)
-                .map_err(|e| anyhow!("{e}"))
+            AppConfig::write_default(&ctx.paths.global_config).map_err(|e| anyhow!("{e}"))
         }
     }
 }
@@ -1394,8 +1494,7 @@ fn handle_init(ctx: &RuntimeContext, cmd: InitCommand) -> Result<()> {
         );
         return Ok(());
     }
-    AppConfig::write_default(&ctx.paths.global_config)
-        .map_err(|e| anyhow!("{e}"))
+    AppConfig::write_default(&ctx.paths.global_config).map_err(|e| anyhow!("{e}"))
 }
 
 fn handle_completions(shell: Shell) -> Result<()> {
@@ -1738,7 +1837,9 @@ fn render_agenda(events: &[AgendaItem], tz: chrono_tz::Tz) -> Result<()> {
 
     for slot in slots {
         let start_tick = (slot.start_min / minutes_per_tick).min(width as u32 - 1);
-        let end_tick = slot.end_min.div_ceil(minutes_per_tick)
+        let end_tick = slot
+            .end_min
+            .div_ceil(minutes_per_tick)
             .clamp(start_tick + 1, width as u32);
         let mut bar = vec![' '; width];
         for idx in start_tick..end_tick {

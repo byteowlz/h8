@@ -4,15 +4,15 @@
 
 mod left_pane;
 mod middle_pane;
+mod overlays;
 mod right_pane;
 mod status_bar;
-mod overlays;
 
 pub use left_pane::draw_left_pane;
 pub use middle_pane::draw_middle_pane;
+pub use overlays::{draw_delete_confirm, draw_help, draw_sort_menu, draw_which_key};
 pub use right_pane::draw_right_pane;
 pub use status_bar::draw_status_bar;
-pub use overlays::{draw_help, draw_sort_menu, draw_delete_confirm, draw_which_key};
 
 use ratatui::{
     Frame,

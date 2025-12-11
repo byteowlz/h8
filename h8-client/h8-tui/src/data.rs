@@ -58,6 +58,8 @@ impl From<std::io::Error> for DataError {
 pub struct DataSource {
     /// Application paths.
     paths: AppPaths,
+    /// Optional override for the mail data directory root.
+    mail_root_override: Option<PathBuf>,
     /// Current account email address.
     account: Option<String>,
     /// Database handle (lazy initialized).
@@ -69,13 +71,19 @@ pub struct DataSource {
 impl DataSource {
     /// Create a new data source.
     pub fn new() -> Result<Self> {
-        let paths = AppPaths::discover(None)?;
-        Ok(Self {
+        let paths = AppPaths::discover(None).map_err(DataError::from)?;
+        Ok(Self::with_paths(paths))
+    }
+
+    /// Create a data source from pre-discovered paths.
+    pub fn with_paths(paths: AppPaths) -> Self {
+        Self {
             paths,
+            mail_root_override: None,
             account: None,
             db: None,
             maildir: None,
-        })
+        }
     }
 
     /// Set the current account.
@@ -86,6 +94,20 @@ impl DataSource {
         Ok(())
     }
 
+    /// Override the root directory used for mail data.
+    pub fn set_mail_data_dir(&mut self, dir: PathBuf) {
+        self.mail_root_override = Some(dir);
+        self.db = None;
+        self.maildir = None;
+    }
+
+    /// Get the root directory for mail storage.
+    fn mail_root(&self) -> PathBuf {
+        self.mail_root_override
+            .clone()
+            .unwrap_or_else(|| self.paths.data_dir.join("mail"))
+    }
+
     /// Get the current account, if any.
     #[allow(dead_code)]
     pub fn account(&self) -> Option<&str> {
@@ -94,7 +116,7 @@ impl DataSource {
 
     /// Detect available accounts from the mail directory.
     pub fn detect_accounts(&self) -> Result<Vec<String>> {
-        let mail_base = self.paths.data_dir.join("mail");
+        let mail_base = self.mail_root();
         if !mail_base.exists() {
             return Ok(Vec::new());
         }
@@ -119,12 +141,11 @@ impl DataSource {
     fn get_db(&mut self) -> Result<&Database> {
         if self.db.is_none() {
             let account = self.account.as_ref().ok_or(DataError::NoAccount)?;
-            let db_path = self.paths.sync_db_path(account);
+            let account_dir = self.mail_root().join(account);
 
-            // Create parent directories if needed
-            if let Some(parent) = db_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+            // Ensure account directory exists
+            std::fs::create_dir_all(&account_dir)?;
+            let db_path = account_dir.join(".sync.db");
 
             let db = Database::open(&db_path)?;
             self.db = Some(db);
@@ -136,8 +157,10 @@ impl DataSource {
     fn get_maildir(&mut self) -> Result<&Maildir> {
         if self.maildir.is_none() {
             let account = self.account.as_ref().ok_or(DataError::NoAccount)?;
-            let mail_dir = self.paths.mail_dir(account);
+            let mail_dir = self.mail_root().join(account);
 
+            // Ensure directory exists before initializing maildir
+            std::fs::create_dir_all(&mail_dir)?;
             let maildir = Maildir::new(mail_dir, account)?;
             // Initialize if needed
             maildir.init()?;
@@ -343,11 +366,9 @@ impl DataSource {
 
 impl Default for DataSource {
     fn default() -> Self {
-        Self::new().unwrap_or_else(|_| Self {
-            paths: AppPaths::discover(None).unwrap(),
-            account: None,
-            db: None,
-            maildir: None,
+        Self::new().unwrap_or_else(|_| {
+            let paths = AppPaths::discover(None).expect("AppPaths discovery failed");
+            Self::with_paths(paths)
         })
     }
 }
