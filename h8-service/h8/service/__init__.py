@@ -422,6 +422,27 @@ async def mail_get(item_id: str, folder: str = "inbox", account: Optional[str] =
     return await safe_call_with_retry(mail.get_message, email, acct, item_id, folder)
 
 
+class BatchGetRequest(BaseModel):
+    """Request model for batch fetching messages."""
+
+    ids: List[str]
+    folder: str = "inbox"
+
+
+@app.post("/mail/batch")
+async def mail_batch_get(payload: BatchGetRequest, account: Optional[str] = None):
+    """Fetch multiple messages by ID in a single request.
+
+    This is much more efficient than making individual GET requests
+    for each message when syncing.
+    """
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        mail.batch_get_messages, email, acct, payload.ids, payload.folder
+    )
+
+
 @app.post("/mail/send")
 async def mail_send(payload: SendEmail, account: Optional[str] = None):
     email = current_account_email(account)

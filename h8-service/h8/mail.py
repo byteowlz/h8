@@ -497,6 +497,78 @@ def list_attachments(
         return []
 
 
+def batch_get_messages(
+    account: Account,
+    item_ids: list[str],
+    folder: str = "inbox",
+) -> list[dict]:
+    """Fetch multiple messages by ID in a single batch request.
+
+    This is much more efficient than calling get_message() multiple times
+    as it uses a single EWS GetItem request to fetch all messages.
+
+    Args:
+        account: EWS account
+        item_ids: List of message IDs to fetch
+        folder: Folder containing the messages (unused, IDs are global in EWS)
+
+    Returns:
+        List of message dictionaries (in same order as item_ids, with None for not found)
+    """
+    from exchangelib import ItemId
+
+    if not item_ids:
+        return []
+
+    # Create ItemId objects for bulk fetch
+    # EWS item IDs are globally unique, so we don't need the folder
+    ids = [ItemId(id=item_id) for item_id in item_ids]
+
+    try:
+        # Use account.fetch() which sends a single GetItem request for all IDs
+        # This is the correct way to batch fetch items by ID in exchangelib
+        items_by_id = {}
+        for item in account.fetch(ids=ids):
+            # fetch() may return None for items that don't exist or are inaccessible
+            if item is not None and hasattr(item, "id"):
+                items_by_id[item.id] = item
+
+        # Return results in the same order as requested
+        results = []
+        for item_id in item_ids:
+            item = items_by_id.get(item_id)
+            if item is None:
+                results.append(None)
+            else:
+                results.append(
+                    {
+                        "id": item.id,
+                        "changekey": item.changekey,
+                        "subject": item.subject,
+                        "from": item.sender.email_address if item.sender else None,
+                        "to": [r.email_address for r in (item.to_recipients or [])],
+                        "cc": [r.email_address for r in (item.cc_recipients or [])],
+                        "datetime_received": item.datetime_received.isoformat()
+                        if item.datetime_received
+                        else None,
+                        "is_read": item.is_read,
+                        "has_attachments": item.has_attachments,
+                        "body": str(item.body) if item.body else "",
+                        "body_type": "html"
+                        if isinstance(item.body, HTMLBody)
+                        else "text",
+                    }
+                )
+        return results
+    except Exception as e:
+        # Fall back to individual fetches if batch fails
+        results = []
+        for item_id in item_ids:
+            msg = get_message(account, item_id, folder)
+            results.append(msg if "error" not in msg else None)
+        return results
+
+
 def download_attachment(
     account: Account,
     item_id: str,
