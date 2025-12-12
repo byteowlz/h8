@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "h8"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "h8-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "h8-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
