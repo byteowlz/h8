@@ -572,23 +572,132 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                     args.to_date.as_deref(),
                 )
                 .map_err(|e| anyhow!("{e}"))?;
-            emit_output(&ctx.common, &events)?;
+            
+            // Sync events to local DB and assign word IDs
+            let events_with_ids = sync_calendar_events(ctx, &account, &events)?;
+            emit_output(&ctx.common, &events_with_ids)?;
         }
         CalendarCommand::Create(args) => {
             let payload = read_json_payload(args.file.as_ref())?;
             let event = client
                 .calendar_create(&account, payload)
                 .map_err(|e| anyhow!("{e}"))?;
-            emit_output(&ctx.common, &event)?;
+            
+            // Sync newly created event
+            let events_with_ids = sync_calendar_events(ctx, &account, &serde_json::json!([event]))?;
+            if let Some(e) = events_with_ids.as_array().and_then(|a| a.first()) {
+                emit_output(&ctx.common, e)?;
+            } else {
+                emit_output(&ctx.common, &event)?;
+            }
         }
         CalendarCommand::Delete(args) => {
+            // Resolve word ID to remote ID if needed
+            let remote_id = resolve_calendar_id(ctx, &account, &args.id)?;
             let result = client
-                .calendar_delete(&account, &args.id, args.change_key.as_deref())
+                .calendar_delete(&account, &remote_id, args.change_key.as_deref())
                 .map_err(|e| anyhow!("{e}"))?;
+            
+            // Free the word ID
+            let db_path = ctx.paths.sync_db_path(&account);
+            if let Ok(db) = Database::open(&db_path) {
+                let _ = db.delete_calendar_event(&args.id);
+                let id_gen = IdGenerator::new(&db);
+                let _ = id_gen.free(&args.id);
+            }
+            
             emit_output(&ctx.common, &result)?;
         }
     }
     Ok(())
+}
+
+/// Sync calendar events to local DB and assign word IDs.
+fn sync_calendar_events(ctx: &RuntimeContext, account: &str, events: &Value) -> Result<Value> {
+    use h8_core::types::CalendarEventSync;
+    
+    let db_path = ctx.paths.sync_db_path(account);
+    let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+    let id_gen = IdGenerator::new(&db);
+    
+    // Ensure ID pool is seeded
+    let stats = id_gen.stats().map_err(|e| anyhow!("{e}"))?;
+    if stats.total() == 0 {
+        let words = h8_core::id::WordLists::embedded();
+        id_gen.init_pool(&words).map_err(|e| anyhow!("{e}"))?;
+    }
+    
+    let events_array = match events.as_array() {
+        Some(arr) => arr,
+        None => return Ok(events.clone()),
+    };
+    
+    let mut result = Vec::new();
+    let now = chrono::Utc::now().to_rfc3339();
+    
+    for event in events_array {
+        let remote_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if remote_id.is_empty() {
+            result.push(event.clone());
+            continue;
+        }
+        
+        // Check if we already have this event
+        let local_id = if let Ok(Some(existing)) = db.get_calendar_event_by_remote_id(remote_id) {
+            existing.local_id
+        } else if let Ok(Some(existing_id)) = id_gen.reverse_lookup(remote_id) {
+            existing_id
+        } else {
+            // Allocate new word ID
+            id_gen.allocate(remote_id).map_err(|e| anyhow!("{e}"))?
+        };
+        
+        // Determine if all-day event
+        let start = event.get("start").and_then(|v| v.as_str()).unwrap_or("");
+        let is_all_day = !start.contains('T');
+        
+        // Save to database
+        let event_sync = CalendarEventSync {
+            local_id: local_id.clone(),
+            remote_id: remote_id.to_string(),
+            change_key: event.get("changekey").and_then(|v| v.as_str()).map(String::from),
+            subject: event.get("subject").and_then(|v| v.as_str()).map(String::from),
+            location: event.get("location").and_then(|v| v.as_str()).map(String::from),
+            start: event.get("start").and_then(|v| v.as_str()).map(String::from),
+            end: event.get("end").and_then(|v| v.as_str()).map(String::from),
+            is_all_day,
+            synced_at: Some(now.clone()),
+        };
+        db.upsert_calendar_event(&event_sync).map_err(|e| anyhow!("{e}"))?;
+        
+        // Create output event with word ID
+        let mut out_event = event.clone();
+        if let Some(obj) = out_event.as_object_mut() {
+            obj.insert("id".to_string(), serde_json::json!(local_id));
+        }
+        result.push(out_event);
+    }
+    
+    Ok(serde_json::json!(result))
+}
+
+/// Resolve a calendar ID (word ID or remote ID) to a remote ID.
+fn resolve_calendar_id(ctx: &RuntimeContext, account: &str, id: &str) -> Result<String> {
+    // If it looks like a word ID (contains hyphen, short), try to resolve it
+    if id.contains('-') && id.len() < 30 {
+        let db_path = ctx.paths.sync_db_path(account);
+        if let Ok(db) = Database::open(&db_path) {
+            if let Ok(Some(event)) = db.get_calendar_event(id) {
+                return Ok(event.remote_id);
+            }
+            let id_gen = IdGenerator::new(&db);
+            if let Ok(Some(remote)) = id_gen.resolve(id) {
+                return Ok(remote);
+            }
+        }
+    }
+    // Assume it's already a remote ID
+    Ok(id.to_string())
 }
 
 fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
@@ -620,49 +729,48 @@ fn handle_mail_list(
     account: &str,
     args: MailListArgs,
 ) -> Result<()> {
-    // Try to list from local Maildir first, fall back to server
-    let mail_dir = get_mail_dir(ctx, account)?;
+    // Try to list from local database first (sorted by date), fall back to server
+    let db_path = ctx.paths.sync_db_path(account);
 
-    if mail_dir.base_path().exists() {
-        // List from local storage
-        let messages = mail_dir.list(&args.folder).map_err(|e| anyhow!("{e}"))?;
-
-        // Load database to get human-readable IDs
-        let db_path = ctx.paths.sync_db_path(account);
+    if db_path.exists() {
         let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+        let mail_dir = get_mail_dir(ctx, account)?;
+
+        // Get messages from database, already sorted by received_at DESC
+        // Request more than limit to account for filtering
+        let db_messages = db
+            .list_messages(&args.folder, args.limit * 2)
+            .map_err(|e| anyhow!("{e}"))?;
 
         let mut output: Vec<serde_json::Value> = Vec::new();
-        for msg in messages.iter().take(args.limit) {
-            // Try to get metadata from database
-            let local_msg = db.get_message(&msg.id).map_err(|e| anyhow!("{e}"))?;
-
-            let subject = local_msg
-                .as_ref()
-                .and_then(|m| m.subject.clone())
-                .unwrap_or_else(|| "(no subject)".to_string());
-            let from = local_msg
-                .as_ref()
-                .and_then(|m| m.from_addr.clone())
-                .unwrap_or_else(|| "unknown".to_string());
-            let date = local_msg
-                .as_ref()
-                .and_then(|m| m.received_at.clone())
-                .unwrap_or_default();
-
+        for db_msg in db_messages {
             // Filter unread if requested
-            if args.unread && msg.flags.seen {
+            if args.unread && db_msg.is_read {
                 continue;
             }
 
+            // Get flags from Maildir if available
+            let (is_read, is_flagged) = if let Ok(Some(maildir_msg)) =
+                mail_dir.get(&args.folder, &db_msg.local_id)
+            {
+                (maildir_msg.flags.seen, maildir_msg.flags.flagged)
+            } else {
+                (db_msg.is_read, false)
+            };
+
             output.push(serde_json::json!({
-                "id": msg.id,
-                "subject": subject,
-                "from": from,
-                "date": date,
-                "is_read": msg.flags.seen,
-                "is_flagged": msg.flags.flagged,
-                "folder": msg.folder,
+                "id": db_msg.local_id,
+                "subject": db_msg.subject.unwrap_or_else(|| "(no subject)".to_string()),
+                "from": db_msg.from_addr.unwrap_or_else(|| "unknown".to_string()),
+                "date": db_msg.received_at.unwrap_or_default(),
+                "is_read": is_read,
+                "is_flagged": is_flagged,
+                "folder": db_msg.folder,
             }));
+
+            if output.len() >= args.limit {
+                break;
+            }
         }
 
         emit_output(&ctx.common, &output)?;
@@ -712,7 +820,20 @@ fn handle_mail_read(ctx: &RuntimeContext, account: &str, args: MailReadArgs) -> 
         .map_err(|e| anyhow!("{e}"))?
         .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
 
-    let content = msg.read_content().map_err(|e| anyhow!("{e}"))?;
+    let raw_content = msg.read_content().map_err(|e| anyhow!("{e}"))?;
+    
+    // Parse headers and body
+    let (headers, body) = parse_email_content(&raw_content);
+    
+    // Convert HTML to plain text if needed (unless --raw is specified)
+    let display_body = if args.raw {
+        body.to_string()
+    } else {
+        convert_body_to_text(body)
+    };
+    
+    // Reconstruct the display content
+    let content = format!("{}\n{}", headers, display_body);
 
     if args.raw || !io::stdout().is_terminal() {
         println!("{}", content);
@@ -746,6 +867,43 @@ fn handle_mail_read(ctx: &RuntimeContext, account: &str, args: MailReadArgs) -> 
     }
 
     Ok(())
+}
+
+/// Parse email content into headers and body.
+fn parse_email_content(content: &str) -> (&str, &str) {
+    // Email headers and body are separated by a blank line (\r\n\r\n or \n\n)
+    if let Some(pos) = content.find("\r\n\r\n") {
+        let (headers, rest) = content.split_at(pos);
+        (headers, &rest[4..]) // Skip the \r\n\r\n
+    } else if let Some(pos) = content.find("\n\n") {
+        let (headers, rest) = content.split_at(pos);
+        (headers, &rest[2..]) // Skip the \n\n
+    } else {
+        // No body found, treat entire content as body
+        ("", content)
+    }
+}
+
+/// Convert email body to plain text, handling HTML if present.
+fn convert_body_to_text(body: &str) -> String {
+    let trimmed = body.trim();
+    
+    // Check if body looks like HTML
+    if trimmed.starts_with("<!DOCTYPE") 
+        || trimmed.starts_with("<html")
+        || trimmed.starts_with("<HTML")
+        || (trimmed.contains("<body") || trimmed.contains("<BODY"))
+    {
+        // Get terminal width for wrapping, default to 80
+        let width = terminal_size::terminal_size()
+            .map(|(w, _)| w.0 as usize)
+            .unwrap_or(80);
+        
+        h8_core::html_to_text(body, width)
+    } else {
+        // Already plain text
+        body.to_string()
+    }
 }
 
 fn handle_mail_fetch(
@@ -1673,23 +1831,29 @@ fn pretty_print_item(v: &Value) {
             println!();
         } else {
             // Calendar event format
-            println!("- {}", subject);
-            if let Some(start) = obj.get("start").and_then(|v| v.as_str()) {
-                println!("  Start: {}", start);
+            use owo_colors::OwoColorize;
+            let use_color = std::io::stdout().is_terminal();
+            
+            let start = obj.get("start").and_then(|v| v.as_str()).unwrap_or("");
+            let end = obj.get("end").and_then(|v| v.as_str()).unwrap_or("");
+            let location = obj.get("location").and_then(|v| v.as_str()).unwrap_or("");
+            let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            
+            // Format start/end times
+            let time_range = format_calendar_time_range(start, end);
+            
+            if use_color {
+                println!("{} {} [{}]", time_range.cyan(), subject.bold(), id.dimmed());
+            } else {
+                println!("{} {} [{}]", time_range, subject, id);
             }
-            if let Some(end) = obj.get("end").and_then(|v| v.as_str()) {
-                println!("  End: {}", end);
-            }
-            if let Some(loc) = obj.get("location").and_then(|v| v.as_str())
-                && !loc.is_empty()
-            {
-                println!("  Location: {}", loc);
-            }
-            if let Some(from) = obj.get("from").and_then(|v| v.as_str()) {
-                println!("  From: {}", from);
-            }
-            if let Some(dt) = obj.get("datetime_received").and_then(|v| v.as_str()) {
-                println!("  Date: {}", dt);
+            
+            if !location.is_empty() {
+                if use_color {
+                    println!("  {}", location.dimmed());
+                } else {
+                    println!("  {}", location);
+                }
             }
             println!();
         }
@@ -1766,6 +1930,67 @@ fn format_date_human(iso_date: &str) -> String {
     } else {
         // Different year
         dt.format("%b %-d %Y").to_string()
+    }
+}
+
+/// Format calendar start/end times as a human-readable range.
+/// Shows "Today 14:00-15:30" or "Mon Dec 11 14:00-15:30" or "Tomorrow (all day)"
+fn format_calendar_time_range(start: &str, end: &str) -> String {
+    use chrono::{DateTime, Datelike, Local, NaiveDate};
+    
+    let parse_dt = |s: &str| -> Option<DateTime<Local>> {
+        DateTime::parse_from_rfc3339(s)
+            .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%z"))
+            .map(|dt| dt.with_timezone(&Local))
+            .ok()
+    };
+    
+    let parse_date = |s: &str| -> Option<NaiveDate> {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+    };
+    
+    let now = Local::now();
+    let today = now.date_naive();
+    let yesterday = today.pred_opt().unwrap_or(today);
+    let tomorrow = today.succ_opt().unwrap_or(today);
+    
+    let format_date_prefix = |date: NaiveDate| -> String {
+        if date == today {
+            "Today".to_string()
+        } else if date == yesterday {
+            "Yesterday".to_string()
+        } else if date == tomorrow {
+            "Tomorrow".to_string()
+        } else if (date - today).num_days().abs() < 7 {
+            date.format("%a").to_string()
+        } else if date.year() == today.year() {
+            date.format("%a %b %-d").to_string()
+        } else {
+            date.format("%a %b %-d %Y").to_string()
+        }
+    };
+    
+    // Try parsing as datetime first
+    if let Some(start_dt) = parse_dt(start) {
+        let end_dt = parse_dt(end);
+        let start_date = start_dt.date_naive();
+        let date_prefix = format_date_prefix(start_date);
+        
+        let start_time = start_dt.format("%H:%M");
+        let end_time = end_dt.map(|dt| dt.format("%H:%M").to_string()).unwrap_or_default();
+        
+        if end_time.is_empty() {
+            format!("{} {}", date_prefix, start_time)
+        } else {
+            format!("{} {}-{}", date_prefix, start_time, end_time)
+        }
+    } else if let Some(start_date) = parse_date(start) {
+        // All-day event (date only, no time)
+        let date_prefix = format_date_prefix(start_date);
+        format!("{} (all day)", date_prefix)
+    } else {
+        // Fallback
+        format!("{} - {}", start, end)
     }
 }
 

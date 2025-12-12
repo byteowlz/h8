@@ -11,6 +11,7 @@ chrono-tz.workspace = true
 config.workspace = true
 dirs.workspace = true
 hostname.workspace = true
+html2text = "0.12"
 log.workspace = true
 rand.workspace = true
 reqwest.workspace = true
