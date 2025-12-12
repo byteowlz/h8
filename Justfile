@@ -16,3 +16,8 @@ service-status:
 
 cli *args:
     cargo run --manifest-path h8-client/Cargo.toml -- {{args}}
+
+# Bump version: just bump [major|minor|patch]
+bump level:
+    cd h8-client && cargo release {{level}} --no-publish --no-push --no-tag --execute --no-confirm
+    uv version --bump {{level}}
