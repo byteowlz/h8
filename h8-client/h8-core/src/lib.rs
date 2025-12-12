@@ -26,3 +26,10 @@ pub use id::IdGenerator;
 pub use maildir::Maildir;
 pub use paths::AppPaths;
 pub use service::ServiceClient;
+
+/// Convert HTML content to readable plain text.
+///
+/// This handles common HTML email formatting and produces clean, readable output.
+pub fn html_to_text(html: &str, width: usize) -> String {
+    html2text::from_read(html.as_bytes(), width)
+}

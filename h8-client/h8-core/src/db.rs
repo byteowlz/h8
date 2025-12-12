@@ -5,7 +5,7 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 
 use crate::error::{Error, Result};
-use crate::types::{FolderSync, MessageSync};
+use crate::types::{CalendarEventSync, FolderSync, MessageSync};
 
 /// Database handle for h8 sync state.
 pub struct Database {
@@ -64,9 +64,23 @@ impl Database {
                 message_remote_id TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS calendar_events (
+                local_id TEXT PRIMARY KEY,
+                remote_id TEXT UNIQUE NOT NULL,
+                change_key TEXT,
+                subject TEXT,
+                location TEXT,
+                start TEXT,
+                end TEXT,
+                is_all_day INTEGER DEFAULT 0,
+                synced_at TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_messages_remote_id ON messages(remote_id);
             CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder);
             CREATE INDEX IF NOT EXISTS idx_id_pool_status ON id_pool(status);
+            CREATE INDEX IF NOT EXISTS idx_calendar_remote_id ON calendar_events(remote_id);
+            CREATE INDEX IF NOT EXISTS idx_calendar_start ON calendar_events(start);
             "#,
         )?;
 
@@ -337,6 +351,134 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count as usize)
+    }
+
+    // Calendar event methods
+
+    /// Insert or update a calendar event sync record.
+    pub fn upsert_calendar_event(&self, event: &CalendarEventSync) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO calendar_events (local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(local_id) DO UPDATE SET
+                remote_id = excluded.remote_id,
+                change_key = excluded.change_key,
+                subject = excluded.subject,
+                location = excluded.location,
+                start = excluded.start,
+                end = excluded.end,
+                is_all_day = excluded.is_all_day,
+                synced_at = excluded.synced_at
+            "#,
+            params![
+                event.local_id,
+                event.remote_id,
+                event.change_key,
+                event.subject,
+                event.location,
+                event.start,
+                event.end,
+                event.is_all_day,
+                event.synced_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get a calendar event by local ID.
+    pub fn get_calendar_event(&self, local_id: &str) -> Result<Option<CalendarEventSync>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at FROM calendar_events WHERE local_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![local_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(CalendarEventSync {
+                local_id: row.get(0)?,
+                remote_id: row.get(1)?,
+                change_key: row.get(2)?,
+                subject: row.get(3)?,
+                location: row.get(4)?,
+                start: row.get(5)?,
+                end: row.get(6)?,
+                is_all_day: row.get(7)?,
+                synced_at: row.get(8)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get a calendar event by remote ID.
+    pub fn get_calendar_event_by_remote_id(&self, remote_id: &str) -> Result<Option<CalendarEventSync>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at FROM calendar_events WHERE remote_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![remote_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(CalendarEventSync {
+                local_id: row.get(0)?,
+                remote_id: row.get(1)?,
+                change_key: row.get(2)?,
+                subject: row.get(3)?,
+                location: row.get(4)?,
+                start: row.get(5)?,
+                end: row.get(6)?,
+                is_all_day: row.get(7)?,
+                synced_at: row.get(8)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List calendar events in a date range.
+    pub fn list_calendar_events(&self, start_after: Option<&str>, limit: usize) -> Result<Vec<CalendarEventSync>> {
+        let (query, use_param) = if start_after.is_some() {
+            (format!(
+                "SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at \
+                 FROM calendar_events WHERE start >= ?1 ORDER BY start ASC LIMIT {}",
+                limit
+            ), true)
+        } else {
+            (format!(
+                "SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at \
+                 FROM calendar_events ORDER BY start ASC LIMIT {}",
+                limit
+            ), false)
+        };
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let mut rows = if use_param {
+            stmt.query(params![start_after.unwrap()])?
+        } else {
+            stmt.query([])?
+        };
+
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
+            events.push(CalendarEventSync {
+                local_id: row.get(0)?,
+                remote_id: row.get(1)?,
+                change_key: row.get(2)?,
+                subject: row.get(3)?,
+                location: row.get(4)?,
+                start: row.get(5)?,
+                end: row.get(6)?,
+                is_all_day: row.get(7)?,
+                synced_at: row.get(8)?,
+            });
+        }
+        Ok(events)
+    }
+
+    /// Delete a calendar event by local ID.
+    pub fn delete_calendar_event(&self, local_id: &str) -> Result<bool> {
+        let count = self.conn.execute(
+            "DELETE FROM calendar_events WHERE local_id = ?1",
+            params![local_id],
+        )?;
+        Ok(count > 0)
     }
 }
 

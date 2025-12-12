@@ -135,6 +135,20 @@ pub struct FolderSync {
     pub sync_token: Option<String>,
 }
 
+/// Sync state for a calendar event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalendarEventSync {
+    pub local_id: String,
+    pub remote_id: String,
+    pub change_key: Option<String>,
+    pub subject: Option<String>,
+    pub location: Option<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub is_all_day: bool,
+    pub synced_at: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
