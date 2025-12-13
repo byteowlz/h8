@@ -6,7 +6,18 @@ Rust CLI for MS365 Exchange Web Services (EWS) covering calendar, mail, contacts
 
 - Rust stable toolchain
 - Python 3.12+ with `uv`
-- [oama](https://github.com/pstrahl/oama) to issue OAuth2 access tokens (`oama access <email>`)
+- [oama](https://github.com/pdobsan/oama) - OAuth credential manager for issuing access tokens
+
+### oama Setup
+
+h8 relies on oama to obtain OAuth2 access tokens for Microsoft 365. You must configure oama before using h8:
+
+1. Install oama (see [oama README](https://github.com/pdobsan/oama#installation))
+2. Configure your Microsoft 365 account in oama's config file
+3. Complete the initial OAuth2 authorization flow: `oama authorize <email>`
+4. Verify tokens work: `oama access <email>` should print an access token
+
+h8's Python service calls `oama access <email>` to get fresh tokens as needed.
 
 ## Architecture
 
