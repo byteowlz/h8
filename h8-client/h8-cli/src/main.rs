@@ -236,10 +236,12 @@ struct MailGetArgs {
 struct AgendaArgs {
     #[arg(short = 'a', long = "account")]
     account: Option<String>,
-    /// View mode: list (default), gantt, or both
     /// View mode: list (default) or gantt
     #[arg(short = 'V', long = "view", value_enum, default_value_t = AgendaView::List)]
     view: AgendaView,
+    /// Day offset or name: 0/today (default), 1/tomorrow, -1/yesterday, or any integer
+    #[arg(short = 'd', long = "day", default_value = "0")]
+    day: String,
 }
 
 /// Event status for visual indicators.
@@ -1706,15 +1708,23 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
     let account = args.account.unwrap_or_else(|| effective_account(ctx));
     let client = ctx.service_client()?;
 
-    // Today range in configured timezone
+    // Parse timezone
     let tz = ctx
         .config
         .timezone
         .parse::<chrono_tz::Tz>()
         .unwrap_or(chrono_tz::UTC);
-    let today = Local::now().with_timezone(&tz).date_naive();
-    let start = today.and_hms_opt(0, 0, 0).unwrap();
-    let end = today.and_hms_opt(23, 59, 59).unwrap();
+
+    // Parse day offset from argument
+    let day_offset = parse_day_offset(&args.day)?;
+    let target_date = Local::now()
+        .with_timezone(&tz)
+        .date_naive()
+        .checked_add_signed(ChronoDuration::days(day_offset))
+        .ok_or_else(|| anyhow!("invalid date offset"))?;
+
+    let start = target_date.and_hms_opt(0, 0, 0).unwrap();
+    let end = target_date.and_hms_opt(23, 59, 59).unwrap();
 
     let events_val = client
         .calendar_list(
@@ -1732,8 +1742,23 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
 
     let events: Vec<AgendaItem> =
         serde_json::from_value(events_val.clone()).context("parsing agenda items")?;
-    render_agenda(&events, tz, args.view)?;
+    render_agenda(&events, tz, args.view, target_date)?;
     Ok(())
+}
+
+/// Parse day offset from string: "today", "tomorrow", "yesterday", or integer offset.
+fn parse_day_offset(s: &str) -> Result<i64> {
+    match s.to_lowercase().as_str() {
+        "today" | "0" => Ok(0),
+        "tomorrow" | "1" => Ok(1),
+        "yesterday" | "-1" => Ok(-1),
+        other => other.parse::<i64>().map_err(|_| {
+            anyhow!(
+                "invalid day offset: '{}' (use integer, 'today', 'tomorrow', or 'yesterday')",
+                other
+            )
+        }),
+    }
 }
 
 fn handle_free(ctx: &RuntimeContext, cmd: FreeCommand) -> Result<()> {
@@ -2223,9 +2248,15 @@ struct AgendaSlot {
     status: EventStatus,
 }
 
-fn render_agenda(events: &[AgendaItem], tz: chrono_tz::Tz, view: AgendaView) -> Result<()> {
+fn render_agenda(
+    events: &[AgendaItem],
+    tz: chrono_tz::Tz,
+    view: AgendaView,
+    target_date: NaiveDate,
+) -> Result<()> {
     let today = Local::now().with_timezone(&tz).date_naive();
-    let start_naive = today.and_hms_opt(0, 0, 0).unwrap();
+    let is_today = target_date == today;
+    let start_naive = target_date.and_hms_opt(0, 0, 0).unwrap();
     let end_naive = today.and_hms_opt(23, 59, 59).unwrap();
     let day_start = tz
         .from_local_datetime(&start_naive)
@@ -2291,21 +2322,30 @@ fn render_agenda(events: &[AgendaItem], tz: chrono_tz::Tz, view: AgendaView) -> 
     }
 
     // Print header
-    let weekday = today.format("%a").to_string();
-    println!("{} {} \u{00b7} {}", weekday, today.format("%Y-%m-%d"), tz);
+    let weekday = target_date.format("%a").to_string();
+    println!(
+        "{} {} \u{00b7} {}",
+        weekday,
+        target_date.format("%Y-%m-%d"),
+        tz
+    );
     println!("{}", "\u{2500}".repeat(45));
 
     if slots.is_empty() && all_day_events.is_empty() {
-        println!("(no events today)");
+        println!("(no events)");
         return Ok(());
     }
 
     // Sort timed events by start time
     slots.sort_by_key(|s| s.start_min);
 
-    // Get current time in minutes from midnight for the time marker
-    let now = Local::now().with_timezone(&tz);
-    let now_min = (now.hour() * 60 + now.minute()) as u32;
+    // Get current time in minutes from midnight for the time marker (only for today)
+    let now_min = if is_today {
+        let now = Local::now().with_timezone(&tz);
+        Some((now.hour() * 60 + now.minute()) as u32)
+    } else {
+        None
+    };
 
     match view {
         AgendaView::List => render_list_view(&all_day_events, &slots),
@@ -2378,7 +2418,7 @@ fn render_list_view(all_day: &[AgendaSlot], timed: &[AgendaSlot]) {
 }
 
 /// Render the Gantt-style timeline view (Option 2).
-fn render_gantt_view(slots: &[AgendaSlot], now_min: u32) {
+fn render_gantt_view(slots: &[AgendaSlot], now_min: Option<u32>) {
     if slots.is_empty() {
         return;
     }
@@ -2408,12 +2448,14 @@ fn render_gantt_view(slots: &[AgendaSlot], now_min: u32) {
     let chars_per_hour = 4usize;
     let bar_width = hour_count * chars_per_hour;
 
-    // Calculate current time position
-    let now_pos = if now_min >= start_hour * 60 && now_min < end_hour * 60 {
-        Some(((now_min - start_hour * 60) as usize * chars_per_hour) / 60)
-    } else {
-        None
-    };
+    // Calculate current time position (only if now_min is provided, i.e., today)
+    let now_pos = now_min.and_then(|nm| {
+        if nm >= start_hour * 60 && nm < end_hour * 60 {
+            Some(((nm - start_hour * 60) as usize * chars_per_hour) / 60)
+        } else {
+            None
+        }
+    });
 
     // Print header with hour labels (spaced wider)
     print!("{} {:width$}", ICON_CLOCK, "Hours", width = label_width - 2);
@@ -2469,26 +2511,6 @@ fn render_gantt_view(slots: &[AgendaSlot], now_min: u32) {
         print!("{:<width$} ", slot.short_name, width = label_width);
         println!("{}", bar_str);
     }
-
-    // Print footer with current time marker
-    let mut footer: Vec<char> = vec![' '; label_width + 1 + bar_width];
-    if let Some(pos) = now_pos {
-        let marker_pos = label_width + 1 + pos;
-        if marker_pos < footer.len() {
-            footer[marker_pos] = '\u{2534}'; // Box drawing up and horizontal
-        }
-        // Add "now" label
-        let now_label = "now";
-        let label_start = marker_pos.saturating_sub(1);
-        if label_start + now_label.len() <= footer.len() {
-            for (i, c) in now_label.chars().enumerate() {
-                if label_start + i < footer.len() && label_start + i != marker_pos {
-                    footer[label_start + i] = c;
-                }
-            }
-        }
-    }
-    println!("{}", footer.into_iter().collect::<String>());
 }
 
 fn parse_datetime_local(raw: &str, tz: chrono_tz::Tz) -> Option<DateTime<chrono_tz::Tz>> {
