@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{
-    DateTime, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime, TimeZone, Utc,
+    DateTime, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc,
 };
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
@@ -236,6 +236,68 @@ struct MailGetArgs {
 struct AgendaArgs {
     #[arg(short = 'a', long = "account")]
     account: Option<String>,
+    /// View mode: list (default), gantt, or both
+    /// View mode: list (default) or gantt
+    #[arg(short = 'V', long = "view", value_enum, default_value_t = AgendaView::List)]
+    view: AgendaView,
+}
+
+/// Event status for visual indicators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum EventStatus {
+    #[default]
+    Normal,
+    Cancelled,
+    Blocker,
+}
+
+impl EventStatus {
+    /// Detect status from subject prefixes/keywords.
+    fn from_subject(subject: &str) -> Self {
+        let lower = subject.to_lowercase();
+        if lower.starts_with("cancelled:")
+            || lower.starts_with("abgesagt:")
+            || lower.contains("cancelled")
+            || lower.contains("abgesagt")
+        {
+            EventStatus::Cancelled
+        } else if lower.starts_with("blocker:")
+            || lower.contains("blocker")
+            || lower.starts_with("blocked:")
+        {
+            EventStatus::Blocker
+        } else {
+            EventStatus::Normal
+        }
+    }
+
+    /// Nerd Font icon prefix for list view.
+    fn icon(&self) -> &'static str {
+        match self {
+            EventStatus::Normal => "",
+            EventStatus::Cancelled => "\u{f00d} ", // nf-fa-times (X)
+            EventStatus::Blocker => "\u{f05e} ",   // nf-fa-ban (block icon)
+        }
+    }
+
+    /// Unicode block character for gantt bars.
+    fn bar_char(&self) -> char {
+        match self {
+            EventStatus::Normal => '\u{2588}',    // Full block
+            EventStatus::Cancelled => '\u{2592}', // Medium shade (strikethrough effect)
+            EventStatus::Blocker => '\u{2593}',   // Dark shade
+        }
+    }
+}
+
+/// Agenda view mode.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum AgendaView {
+    /// Detailed list view with times and locations
+    #[default]
+    List,
+    /// Gantt-style timeline chart
+    Gantt,
 }
 
 #[derive(Debug, Deserialize)]
@@ -572,7 +634,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                     args.to_date.as_deref(),
                 )
                 .map_err(|e| anyhow!("{e}"))?;
-            
+
             // Sync events to local DB and assign word IDs
             let events_with_ids = sync_calendar_events(ctx, &account, &events)?;
             emit_output(&ctx.common, &events_with_ids)?;
@@ -582,7 +644,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             let event = client
                 .calendar_create(&account, payload)
                 .map_err(|e| anyhow!("{e}"))?;
-            
+
             // Sync newly created event
             let events_with_ids = sync_calendar_events(ctx, &account, &serde_json::json!([event]))?;
             if let Some(e) = events_with_ids.as_array().and_then(|a| a.first()) {
@@ -597,7 +659,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             let result = client
                 .calendar_delete(&account, &remote_id, args.change_key.as_deref())
                 .map_err(|e| anyhow!("{e}"))?;
-            
+
             // Free the word ID
             let db_path = ctx.paths.sync_db_path(&account);
             if let Ok(db) = Database::open(&db_path) {
@@ -605,7 +667,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 let id_gen = IdGenerator::new(&db);
                 let _ = id_gen.free(&args.id);
             }
-            
+
             emit_output(&ctx.common, &result)?;
         }
     }
@@ -615,33 +677,33 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
 /// Sync calendar events to local DB and assign word IDs.
 fn sync_calendar_events(ctx: &RuntimeContext, account: &str, events: &Value) -> Result<Value> {
     use h8_core::types::CalendarEventSync;
-    
+
     let db_path = ctx.paths.sync_db_path(account);
     let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
     let id_gen = IdGenerator::new(&db);
-    
+
     // Ensure ID pool is seeded
     let stats = id_gen.stats().map_err(|e| anyhow!("{e}"))?;
     if stats.total() == 0 {
         let words = h8_core::id::WordLists::embedded();
         id_gen.init_pool(&words).map_err(|e| anyhow!("{e}"))?;
     }
-    
+
     let events_array = match events.as_array() {
         Some(arr) => arr,
         None => return Ok(events.clone()),
     };
-    
+
     let mut result = Vec::new();
     let now = chrono::Utc::now().to_rfc3339();
-    
+
     for event in events_array {
         let remote_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
         if remote_id.is_empty() {
             result.push(event.clone());
             continue;
         }
-        
+
         // Check if we already have this event
         let local_id = if let Ok(Some(existing)) = db.get_calendar_event_by_remote_id(remote_id) {
             existing.local_id
@@ -651,25 +713,38 @@ fn sync_calendar_events(ctx: &RuntimeContext, account: &str, events: &Value) -> 
             // Allocate new word ID
             id_gen.allocate(remote_id).map_err(|e| anyhow!("{e}"))?
         };
-        
+
         // Determine if all-day event
         let start = event.get("start").and_then(|v| v.as_str()).unwrap_or("");
         let is_all_day = !start.contains('T');
-        
+
         // Save to database
         let event_sync = CalendarEventSync {
             local_id: local_id.clone(),
             remote_id: remote_id.to_string(),
-            change_key: event.get("changekey").and_then(|v| v.as_str()).map(String::from),
-            subject: event.get("subject").and_then(|v| v.as_str()).map(String::from),
-            location: event.get("location").and_then(|v| v.as_str()).map(String::from),
-            start: event.get("start").and_then(|v| v.as_str()).map(String::from),
+            change_key: event
+                .get("changekey")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            subject: event
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            location: event
+                .get("location")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            start: event
+                .get("start")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             end: event.get("end").and_then(|v| v.as_str()).map(String::from),
             is_all_day,
             synced_at: Some(now.clone()),
         };
-        db.upsert_calendar_event(&event_sync).map_err(|e| anyhow!("{e}"))?;
-        
+        db.upsert_calendar_event(&event_sync)
+            .map_err(|e| anyhow!("{e}"))?;
+
         // Create output event with word ID
         let mut out_event = event.clone();
         if let Some(obj) = out_event.as_object_mut() {
@@ -677,7 +752,7 @@ fn sync_calendar_events(ctx: &RuntimeContext, account: &str, events: &Value) -> 
         }
         result.push(out_event);
     }
-    
+
     Ok(serde_json::json!(result))
 }
 
@@ -750,13 +825,12 @@ fn handle_mail_list(
             }
 
             // Get flags from Maildir if available
-            let (is_read, is_flagged) = if let Ok(Some(maildir_msg)) =
-                mail_dir.get(&args.folder, &db_msg.local_id)
-            {
-                (maildir_msg.flags.seen, maildir_msg.flags.flagged)
-            } else {
-                (db_msg.is_read, false)
-            };
+            let (is_read, is_flagged) =
+                if let Ok(Some(maildir_msg)) = mail_dir.get(&args.folder, &db_msg.local_id) {
+                    (maildir_msg.flags.seen, maildir_msg.flags.flagged)
+                } else {
+                    (db_msg.is_read, false)
+                };
 
             output.push(serde_json::json!({
                 "id": db_msg.local_id,
@@ -821,17 +895,17 @@ fn handle_mail_read(ctx: &RuntimeContext, account: &str, args: MailReadArgs) -> 
         .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
 
     let raw_content = msg.read_content().map_err(|e| anyhow!("{e}"))?;
-    
+
     // Parse headers and body
     let (headers, body) = parse_email_content(&raw_content);
-    
+
     // Convert HTML to plain text if needed (unless --raw is specified)
     let display_body = if args.raw {
         body.to_string()
     } else {
         convert_body_to_text(body)
     };
-    
+
     // Reconstruct the display content
     let content = format!("{}\n{}", headers, display_body);
 
@@ -887,9 +961,9 @@ fn parse_email_content(content: &str) -> (&str, &str) {
 /// Convert email body to plain text, handling HTML if present.
 fn convert_body_to_text(body: &str) -> String {
     let trimmed = body.trim();
-    
+
     // Check if body looks like HTML
-    if trimmed.starts_with("<!DOCTYPE") 
+    if trimmed.starts_with("<!DOCTYPE")
         || trimmed.starts_with("<html")
         || trimmed.starts_with("<HTML")
         || (trimmed.contains("<body") || trimmed.contains("<BODY"))
@@ -898,7 +972,7 @@ fn convert_body_to_text(body: &str) -> String {
         let width = terminal_size::terminal_size()
             .map(|(w, _)| w.0 as usize)
             .unwrap_or(80);
-        
+
         h8_core::html_to_text(body, width)
     } else {
         // Already plain text
@@ -1332,11 +1406,7 @@ fn handle_mail_sync(
             // Collect IDs for batch request
             let ids: Vec<&str> = chunk.iter().map(|(id, _)| *id).collect();
 
-            print!(
-                "\r  [{}/{}] Fetching batch...    ",
-                synced + 1,
-                total
-            );
+            print!("\r  [{}/{}] Fetching batch...    ", synced + 1, total);
             let _ = io::stdout().flush();
 
             // Batch fetch all messages in this chunk
@@ -1344,16 +1414,19 @@ fn handle_mail_sync(
             let batch_messages: Vec<Option<Value>> = match batch_result {
                 Ok(val) => {
                     if let Some(arr) = val.as_array() {
-                        arr.iter().map(|v| {
-                            if v.is_null() { None } else { Some(v.clone()) }
-                        }).collect()
+                        arr.iter()
+                            .map(|v| if v.is_null() { None } else { Some(v.clone()) })
+                            .collect()
                     } else {
                         // Fallback: treat as empty
                         vec![None; ids.len()]
                     }
                 }
                 Err(e) => {
-                    log::warn!("Batch fetch failed: {}, falling back to individual fetches", e);
+                    log::warn!(
+                        "Batch fetch failed: {}, falling back to individual fetches",
+                        e
+                    );
                     // Fall back to individual fetches
                     ids.iter()
                         .map(|id| client.mail_get(account, folder, id).ok())
@@ -1362,7 +1435,8 @@ fn handle_mail_sync(
             };
 
             // Process each message from the batch
-            for ((remote_id, msg_val), full_msg_opt) in chunk.iter().zip(batch_messages.into_iter()) {
+            for ((remote_id, msg_val), full_msg_opt) in chunk.iter().zip(batch_messages.into_iter())
+            {
                 // Progress indicator
                 print!("\r  [{}/{}] Syncing...    ", synced + 1, total);
                 let _ = io::stdout().flush();
@@ -1658,7 +1732,7 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
 
     let events: Vec<AgendaItem> =
         serde_json::from_value(events_val.clone()).context("parsing agenda items")?;
-    render_agenda(&events, tz)?;
+    render_agenda(&events, tz, args.view)?;
     Ok(())
 }
 
@@ -1792,24 +1866,25 @@ fn pretty_print_item(v: &Value) {
         if is_mail {
             // Mail message format
             let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("???");
-            let from = obj.get("from").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let is_read = obj
-                .get("is_read")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            
+            let from = obj
+                .get("from")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let is_read = obj.get("is_read").and_then(|v| v.as_bool()).unwrap_or(true);
+
             // Format date human-readably
-            let date_str = obj.get("date")
+            let date_str = obj
+                .get("date")
                 .or_else(|| obj.get("datetime_received"))
                 .and_then(|v| v.as_str())
                 .map(|dt| format_date_human(dt))
                 .unwrap_or_default();
-            
+
             // Use colors when outputting to TTY
             use owo_colors::OwoColorize;
-            
+
             let use_color = std::io::stdout().is_terminal();
-            
+
             if is_read {
                 if use_color {
                     println!("  {} - {} [{}]", subject, date_str.dimmed(), id.cyan());
@@ -1818,7 +1893,13 @@ fn pretty_print_item(v: &Value) {
                 }
             } else {
                 if use_color {
-                    println!("{} {} - {} [{}]", "*".yellow().bold(), subject.bold(), date_str.dimmed(), id.cyan());
+                    println!(
+                        "{} {} - {} [{}]",
+                        "*".yellow().bold(),
+                        subject.bold(),
+                        date_str.dimmed(),
+                        id.cyan()
+                    );
                 } else {
                     println!("* {} - {} [{}]", subject, date_str, id);
                 }
@@ -1833,21 +1914,21 @@ fn pretty_print_item(v: &Value) {
             // Calendar event format
             use owo_colors::OwoColorize;
             let use_color = std::io::stdout().is_terminal();
-            
+
             let start = obj.get("start").and_then(|v| v.as_str()).unwrap_or("");
             let end = obj.get("end").and_then(|v| v.as_str()).unwrap_or("");
             let location = obj.get("location").and_then(|v| v.as_str()).unwrap_or("");
             let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            
+
             // Format start/end times
             let time_range = format_calendar_time_range(start, end);
-            
+
             if use_color {
                 println!("{} {} [{}]", time_range.cyan(), subject.bold(), id.dimmed());
             } else {
                 println!("{} {} [{}]", time_range, subject, id);
             }
-            
+
             if !location.is_empty() {
                 if use_color {
                     println!("  {}", location.dimmed());
@@ -1902,21 +1983,21 @@ fn pretty_print_item(v: &Value) {
 /// Shows "Today 14:30", "Yesterday 09:15", "Mon 14:30", or "Dec 5" for older dates.
 fn format_date_human(iso_date: &str) -> String {
     use chrono::{DateTime, Datelike, Local};
-    
+
     let parsed = DateTime::parse_from_rfc3339(iso_date)
         .or_else(|_| DateTime::parse_from_str(iso_date, "%Y-%m-%dT%H:%M:%S%z"))
         .map(|dt| dt.with_timezone(&Local));
-    
+
     let dt = match parsed {
         Ok(dt) => dt,
         Err(_) => return iso_date.to_string(),
     };
-    
+
     let now = Local::now();
     let today = now.date_naive();
     let date = dt.date_naive();
     let yesterday = today.pred_opt().unwrap_or(today);
-    
+
     if date == today {
         format!("Today {}", dt.format("%H:%M"))
     } else if date == yesterday {
@@ -1937,23 +2018,22 @@ fn format_date_human(iso_date: &str) -> String {
 /// Shows "Today 14:00-15:30" or "Mon Dec 11 14:00-15:30" or "Tomorrow (all day)"
 fn format_calendar_time_range(start: &str, end: &str) -> String {
     use chrono::{DateTime, Datelike, Local, NaiveDate};
-    
+
     let parse_dt = |s: &str| -> Option<DateTime<Local>> {
         DateTime::parse_from_rfc3339(s)
             .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%z"))
             .map(|dt| dt.with_timezone(&Local))
             .ok()
     };
-    
-    let parse_date = |s: &str| -> Option<NaiveDate> {
-        NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
-    };
-    
+
+    let parse_date =
+        |s: &str| -> Option<NaiveDate> { NaiveDate::parse_from_str(s, "%Y-%m-%d").ok() };
+
     let now = Local::now();
     let today = now.date_naive();
     let yesterday = today.pred_opt().unwrap_or(today);
     let tomorrow = today.succ_opt().unwrap_or(today);
-    
+
     let format_date_prefix = |date: NaiveDate| -> String {
         if date == today {
             "Today".to_string()
@@ -1969,16 +2049,18 @@ fn format_calendar_time_range(start: &str, end: &str) -> String {
             date.format("%a %b %-d %Y").to_string()
         }
     };
-    
+
     // Try parsing as datetime first
     if let Some(start_dt) = parse_dt(start) {
         let end_dt = parse_dt(end);
         let start_date = start_dt.date_naive();
         let date_prefix = format_date_prefix(start_date);
-        
+
         let start_time = start_dt.format("%H:%M");
-        let end_time = end_dt.map(|dt| dt.format("%H:%M").to_string()).unwrap_or_default();
-        
+        let end_time = end_dt
+            .map(|dt| dt.format("%H:%M").to_string())
+            .unwrap_or_default();
+
         if end_time.is_empty() {
             format!("{} {}", date_prefix, start_time)
         } else {
@@ -2128,7 +2210,20 @@ fn terminate_pid(pid: u32) -> Result<()> {
         })
 }
 
-fn render_agenda(events: &[AgendaItem], tz: chrono_tz::Tz) -> Result<()> {
+/// Internal slot representation for agenda rendering.
+struct AgendaSlot {
+    subject: String,
+    short_name: String,
+    location: Option<String>,
+    start_label: String,
+    end_label: String,
+    start_min: u32,
+    end_min: u32,
+    all_day: bool,
+    status: EventStatus,
+}
+
+fn render_agenda(events: &[AgendaItem], tz: chrono_tz::Tz, view: AgendaView) -> Result<()> {
     let today = Local::now().with_timezone(&tz).date_naive();
     let start_naive = today.and_hms_opt(0, 0, 0).unwrap();
     let end_naive = today.and_hms_opt(23, 59, 59).unwrap();
@@ -2141,22 +2236,20 @@ fn render_agenda(events: &[AgendaItem], tz: chrono_tz::Tz) -> Result<()> {
         .single()
         .unwrap_or_else(|| tz.from_utc_datetime(&end_naive));
 
-    struct AgendaSlot {
-        subject: String,
-        location: Option<String>,
-        start_label: String,
-        end_label: String,
-        start_min: u32,
-        end_min: u32,
-        all_day: bool,
-    }
-
     let mut slots = Vec::new();
+    let mut all_day_events = Vec::new();
+
     for ev in events {
-        let subject = ev
+        let raw_subject = ev
             .subject
             .clone()
             .unwrap_or_else(|| "(no subject)".to_string());
+        let status = EventStatus::from_subject(&raw_subject);
+
+        // Clean subject: remove status prefixes
+        let subject = clean_subject(&raw_subject);
+        let short_name = truncate_str(&subject, 12);
+
         let is_all_day = ev.is_all_day.unwrap_or(false)
             || ev.start.as_deref().map(|s| s.len() == 10).unwrap_or(false);
 
@@ -2178,52 +2271,224 @@ fn render_agenda(events: &[AgendaItem], tz: chrono_tz::Tz) -> Result<()> {
             end_min = start_min + 1;
         }
 
-        slots.push(AgendaSlot {
-            subject,
+        let slot = AgendaSlot {
+            subject: subject.clone(),
+            short_name,
             location: ev.location.clone(),
             start_label: start_dt.format("%H:%M").to_string(),
             end_label: end_dt.format("%H:%M").to_string(),
             start_min,
             end_min,
             all_day: is_all_day,
-        });
+            status,
+        };
+
+        if is_all_day {
+            all_day_events.push(slot);
+        } else {
+            slots.push(slot);
+        }
     }
 
-    println!("Agenda for {} ({})", today.format("%Y-%m-%d (%A)"), tz);
-    println!("Times in {}", tz);
+    // Print header
+    let weekday = today.format("%a").to_string();
+    println!("{} {} \u{00b7} {}", weekday, today.format("%Y-%m-%d"), tz);
+    println!("{}", "\u{2500}".repeat(45));
 
-    if slots.is_empty() {
+    if slots.is_empty() && all_day_events.is_empty() {
         println!("(no events today)");
         return Ok(());
     }
 
+    // Sort timed events by start time
     slots.sort_by_key(|s| s.start_min);
 
-    let width = 48usize;
-    let minutes_per_tick = (24 * 60) / width as u32;
+    // Get current time in minutes from midnight for the time marker
+    let now = Local::now().with_timezone(&tz);
+    let now_min = (now.hour() * 60 + now.minute()) as u32;
 
-    for slot in slots {
-        let start_tick = (slot.start_min / minutes_per_tick).min(width as u32 - 1);
-        let end_tick = slot
-            .end_min
-            .div_ceil(minutes_per_tick)
-            .clamp(start_tick + 1, width as u32);
-        let mut bar = vec![' '; width];
-        for idx in start_tick..end_tick {
-            bar[idx as usize] = '=';
-        }
-        let bar: String = bar.into_iter().collect();
-        let label = format!("{:>5}-{:>5}", slot.start_label, slot.end_label);
-        println!("{label} | {bar} | {}", slot.subject);
-        if let Some(loc) = slot.location.as_ref().filter(|s| !s.is_empty()) {
-            println!("             {}", loc);
-        }
-        if slot.all_day {
-            println!("             (all day)");
-        }
+    match view {
+        AgendaView::List => render_list_view(&all_day_events, &slots),
+        AgendaView::Gantt => render_gantt_view(&slots, now_min),
     }
 
     Ok(())
+}
+
+/// Clean subject by removing status prefixes.
+fn clean_subject(subject: &str) -> String {
+    let prefixes = [
+        "Cancelled: ",
+        "Abgesagt: ",
+        "Blocker: ",
+        "Blocked: ",
+        "cancelled: ",
+        "abgesagt: ",
+        "blocker: ",
+        "blocked: ",
+    ];
+    let mut s = subject.to_string();
+    for prefix in &prefixes {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.to_string();
+            break;
+        }
+    }
+    s
+}
+
+/// Truncate string to max length, adding ellipsis if needed.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
+        format!("{}..", truncated)
+    }
+}
+
+// Nerd Font icons
+const ICON_CLOCK: &str = "\u{f017}"; // nf-fa-clock_o
+const ICON_CALENDAR: &str = "\u{f073}"; // nf-fa-calendar
+const ICON_LOCATION: &str = "\u{f041}"; // nf-fa-map_marker
+
+/// Render the detailed list view (Option 1).
+fn render_list_view(all_day: &[AgendaSlot], timed: &[AgendaSlot]) {
+    // All-day events section
+    if !all_day.is_empty() {
+        println!();
+        println!("{} ALL DAY", ICON_CALENDAR);
+        for slot in all_day {
+            let icon = slot.status.icon();
+            println!("  \u{2022} {}{}", icon, slot.subject);
+        }
+        println!();
+    }
+
+    // Timed events
+    for slot in timed {
+        let time_range = format!("{}\u{2013}{}", slot.start_label, slot.end_label);
+        let icon = slot.status.icon();
+        println!("{:<14} {}{}", time_range, icon, slot.subject);
+
+        if let Some(loc) = slot.location.as_ref().filter(|s| !s.is_empty()) {
+            println!("{:14} {} {}", "", ICON_LOCATION, loc);
+        }
+    }
+}
+
+/// Render the Gantt-style timeline view (Option 2).
+fn render_gantt_view(slots: &[AgendaSlot], now_min: u32) {
+    if slots.is_empty() {
+        return;
+    }
+
+    // Find the hour range to display
+    let min_hour = slots.iter().map(|s| s.start_min / 60).min().unwrap_or(8);
+    let max_hour = slots
+        .iter()
+        .map(|s| (s.end_min + 59) / 60)
+        .max()
+        .unwrap_or(18);
+
+    // Clamp to reasonable range
+    let start_hour = min_hour.min(8).max(0);
+    let end_hour = max_hour.max(18).min(24);
+    let hour_count = (end_hour - start_hour) as usize;
+
+    // Calculate column width for labels (max short name + margin)
+    let label_width = slots
+        .iter()
+        .map(|s| s.short_name.chars().count())
+        .max()
+        .unwrap_or(12)
+        .max(12);
+
+    // Characters per hour (4 chars = 15 min resolution for wider spacing)
+    let chars_per_hour = 4usize;
+    let bar_width = hour_count * chars_per_hour;
+
+    // Calculate current time position
+    let now_pos = if now_min >= start_hour * 60 && now_min < end_hour * 60 {
+        Some(((now_min - start_hour * 60) as usize * chars_per_hour) / 60)
+    } else {
+        None
+    };
+
+    // Print header with hour labels (spaced wider)
+    print!("{} {:width$}", ICON_CLOCK, "Hours", width = label_width - 2);
+    for h in start_hour..end_hour {
+        print!("{:<4}", h);
+    }
+    println!();
+
+    // Print separator using box drawing, with current time marker
+    let mut sep: Vec<char> = "\u{2500}"
+        .repeat(label_width + 1 + bar_width)
+        .chars()
+        .collect();
+    if let Some(pos) = now_pos {
+        let marker_pos = label_width + 1 + pos;
+        if marker_pos < sep.len() {
+            sep[marker_pos] = '\u{253c}'; // Box drawing cross
+        }
+    }
+    println!("{}", sep.into_iter().collect::<String>());
+
+    // Print each event as a row
+    for slot in slots {
+        if slot.all_day {
+            continue; // Skip all-day events in gantt view
+        }
+
+        // Calculate bar positions
+        let start_pos =
+            ((slot.start_min.saturating_sub(start_hour * 60)) as usize * chars_per_hour) / 60;
+        let end_pos =
+            ((slot.end_min.saturating_sub(start_hour * 60)) as usize * chars_per_hour) / 60;
+
+        let start_pos = start_pos.min(bar_width);
+        let end_pos = end_pos.clamp(start_pos + 1, bar_width);
+
+        // Build the bar using Unicode block characters
+        let mut bar: Vec<char> = vec![' '; bar_width];
+        let bar_char = slot.status.bar_char();
+        for idx in start_pos..end_pos {
+            bar[idx] = bar_char;
+        }
+
+        // Add current time marker if it falls within this row
+        if let Some(pos) = now_pos {
+            if pos < bar_width && bar[pos] == ' ' {
+                bar[pos] = '\u{2502}'; // Vertical line
+            }
+        }
+
+        let bar_str: String = bar.into_iter().collect();
+
+        print!("{:<width$} ", slot.short_name, width = label_width);
+        println!("{}", bar_str);
+    }
+
+    // Print footer with current time marker
+    let mut footer: Vec<char> = vec![' '; label_width + 1 + bar_width];
+    if let Some(pos) = now_pos {
+        let marker_pos = label_width + 1 + pos;
+        if marker_pos < footer.len() {
+            footer[marker_pos] = '\u{2534}'; // Box drawing up and horizontal
+        }
+        // Add "now" label
+        let now_label = "now";
+        let label_start = marker_pos.saturating_sub(1);
+        if label_start + now_label.len() <= footer.len() {
+            for (i, c) in now_label.chars().enumerate() {
+                if label_start + i < footer.len() && label_start + i != marker_pos {
+                    footer[label_start + i] = c;
+                }
+            }
+        }
+    }
+    println!("{}", footer.into_iter().collect::<String>());
 }
 
 fn parse_datetime_local(raw: &str, tz: chrono_tz::Tz) -> Option<DateTime<chrono_tz::Tz>> {

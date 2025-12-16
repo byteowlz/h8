@@ -410,7 +410,10 @@ impl Database {
     }
 
     /// Get a calendar event by remote ID.
-    pub fn get_calendar_event_by_remote_id(&self, remote_id: &str) -> Result<Option<CalendarEventSync>> {
+    pub fn get_calendar_event_by_remote_id(
+        &self,
+        remote_id: &str,
+    ) -> Result<Option<CalendarEventSync>> {
         let mut stmt = self.conn.prepare(
             "SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at FROM calendar_events WHERE remote_id = ?1",
         )?;
@@ -433,19 +436,29 @@ impl Database {
     }
 
     /// List calendar events in a date range.
-    pub fn list_calendar_events(&self, start_after: Option<&str>, limit: usize) -> Result<Vec<CalendarEventSync>> {
+    pub fn list_calendar_events(
+        &self,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CalendarEventSync>> {
         let (query, use_param) = if start_after.is_some() {
-            (format!(
-                "SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at \
+            (
+                format!(
+                    "SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at \
                  FROM calendar_events WHERE start >= ?1 ORDER BY start ASC LIMIT {}",
-                limit
-            ), true)
+                    limit
+                ),
+                true,
+            )
         } else {
-            (format!(
-                "SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at \
+            (
+                format!(
+                    "SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at \
                  FROM calendar_events ORDER BY start ASC LIMIT {}",
-                limit
-            ), false)
+                    limit
+                ),
+                false,
+            )
         };
 
         let mut stmt = self.conn.prepare(&query)?;
