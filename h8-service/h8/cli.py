@@ -31,6 +31,17 @@ def output(data: Any, as_json: bool = True):
             print(data)
 
 
+def format_duration(minutes: int) -> str:
+    """Format duration in minutes to human-readable string."""
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    mins = minutes % 60
+    if mins == 0:
+        return f"{hours}h"
+    return f"{hours}h {mins}m"
+
+
 def print_item(item: dict):
     """Print a single item in human-readable format."""
     if "error" in item:
@@ -62,9 +73,8 @@ def print_item(item: dict):
             item["start"].split("T")[1][:5] if "T" in item["start"] else item["start"]
         )
         end = item["end"].split("T")[1][:5] if "T" in item["end"] else item["end"]
-        print(
-            f"- {item['day']} {item['date']}: {start} - {end} ({item['duration_minutes']} min)"
-        )
+        duration = format_duration(item["duration_minutes"])
+        print(f"  {item['day'][:3]} {item['date']}: {start} - {end} ({duration})")
     elif "success" in item:
         if item["success"]:
             print("Success")
