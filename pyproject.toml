@@ -1,6 +1,6 @@
 [project]
 name = "h8"
-version = "0.1.1"
+version = "0.1.2"
 description = "EWS CLI for calendar, mail, and contacts"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,6 +29,11 @@ package = true
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["h8-service/h8"]

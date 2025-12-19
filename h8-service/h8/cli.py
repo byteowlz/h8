@@ -11,6 +11,8 @@ from . import calendar
 from . import mail
 from . import contacts
 from . import free
+from . import people
+from .config import resolve_person_alias
 
 
 DEFAULT_ACCOUNT = "tommy.falkowski@iem.fraunhofer.de"
@@ -215,6 +217,48 @@ def cmd_free(args):
     output(slots, args.json)
 
 
+def cmd_ppl_agenda(args):
+    """View another person's calendar events."""
+    account = get_account(args.account)
+    email = resolve_person_alias(args.person)
+    events = people.get_person_agenda(
+        account,
+        email,
+        days=args.days,
+        from_date=args.from_date,
+        to_date=args.to_date,
+    )
+    output(events, args.json)
+
+
+def cmd_ppl_free(args):
+    """Find free slots in another person's calendar."""
+    account = get_account(args.account)
+    email = resolve_person_alias(args.person)
+    slots = people.get_person_free_slots(
+        account,
+        email,
+        weeks=args.weeks,
+        duration_minutes=args.duration,
+        limit=args.limit,
+    )
+    output(slots, args.json)
+
+
+def cmd_ppl_common(args):
+    """Find common free slots between multiple people."""
+    account = get_account(args.account)
+    emails = [resolve_person_alias(p) for p in args.people]
+    slots = people.find_common_free_slots(
+        account,
+        emails,
+        weeks=args.weeks,
+        duration_minutes=args.duration,
+        limit=args.limit,
+    )
+    output(slots, args.json)
+
+
 def add_common_args(parser):
     """Add common arguments to a parser."""
     parser.add_argument("--json", "-j", action="store_true", help="Output as JSON")
@@ -385,6 +429,78 @@ def main():
         "--limit", "-l", type=int, help="Maximum number of slots to return"
     )
     free_parser.set_defaults(func=cmd_free)
+
+    # People commands (view other people's calendars)
+    ppl_parser = subparsers.add_parser(
+        "ppl", aliases=["people"], help="Other people's calendar operations"
+    )
+    add_common_args(ppl_parser)
+    ppl_subparsers = ppl_parser.add_subparsers(dest="subcommand", required=True)
+
+    # ppl agenda - view another person's calendar events
+    ppl_agenda = ppl_subparsers.add_parser(
+        "agenda", help="View another person's calendar events"
+    )
+    add_common_args(ppl_agenda)
+    ppl_agenda.add_argument("person", help="Person alias or email address")
+    ppl_agenda.add_argument(
+        "--days", "-d", type=int, default=7, help="Number of days to show"
+    )
+    ppl_agenda.add_argument("--from", dest="from_date", help="Start date (ISO format)")
+    ppl_agenda.add_argument("--to", dest="to_date", help="End date (ISO format)")
+    ppl_agenda.set_defaults(func=cmd_ppl_agenda)
+
+    # ppl free - find free slots in another person's calendar
+    ppl_free = ppl_subparsers.add_parser(
+        "free", help="Find free slots in another person's calendar"
+    )
+    add_common_args(ppl_free)
+    ppl_free.add_argument("person", help="Person alias or email address")
+    ppl_free.add_argument(
+        "--weeks",
+        "-w",
+        type=int,
+        default=1,
+        help="Number of weeks to look at (1 = current week)",
+    )
+    ppl_free.add_argument(
+        "--duration",
+        "-d",
+        type=int,
+        default=30,
+        help="Minimum slot duration in minutes",
+    )
+    ppl_free.add_argument(
+        "--limit", "-l", type=int, help="Maximum number of slots to return"
+    )
+    ppl_free.set_defaults(func=cmd_ppl_free)
+
+    # ppl common - find common free slots between multiple people
+    ppl_common = ppl_subparsers.add_parser(
+        "common", help="Find common free slots between multiple people"
+    )
+    add_common_args(ppl_common)
+    ppl_common.add_argument(
+        "people", nargs="+", help="Person aliases or email addresses (2 or more)"
+    )
+    ppl_common.add_argument(
+        "--weeks",
+        "-w",
+        type=int,
+        default=1,
+        help="Number of weeks to look at (1 = current week)",
+    )
+    ppl_common.add_argument(
+        "--duration",
+        "-d",
+        type=int,
+        default=30,
+        help="Minimum slot duration in minutes",
+    )
+    ppl_common.add_argument(
+        "--limit", "-l", type=int, help="Maximum number of slots to return"
+    )
+    ppl_common.set_defaults(func=cmd_ppl_common)
 
     args = parser.parse_args()
 

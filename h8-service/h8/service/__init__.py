@@ -24,8 +24,8 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 
-from h8 import auth, calendar, contacts, free, mail
-from h8.config import get_config
+from h8 import auth, calendar, contacts, free, mail, people
+from h8.config import get_config, resolve_person_alias
 from exchangelib.errors import UnauthorizedError
 
 log = logging.getLogger(__name__)
@@ -604,6 +604,94 @@ async def free_slots(
             limit,
         ),
         email,
+    )
+
+
+# People endpoints (view other people's calendars)
+
+
+@app.get("/ppl/agenda")
+async def ppl_agenda(
+    person: str,
+    days: int = 7,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    account: Optional[str] = None,
+):
+    """Get another person's calendar events (free/busy info)."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    try:
+        target_email = resolve_person_alias(person)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await safe_call_with_retry(
+        people.get_person_agenda,
+        email,
+        acct,
+        target_email,
+        days,
+        from_date,
+        to_date,
+    )
+
+
+@app.get("/ppl/free")
+async def ppl_free(
+    person: str,
+    weeks: int = 1,
+    duration: int = 30,
+    limit: Optional[int] = None,
+    account: Optional[str] = None,
+):
+    """Find free slots in another person's calendar."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    try:
+        target_email = resolve_person_alias(person)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await safe_call_with_retry(
+        people.get_person_free_slots,
+        email,
+        acct,
+        target_email,
+        weeks,
+        duration,
+        limit,
+    )
+
+
+class CommonFreeRequest(BaseModel):
+    """Request model for finding common free slots."""
+
+    people: List[str]
+    weeks: int = 1
+    duration: int = 30
+    limit: Optional[int] = None
+
+
+@app.post("/ppl/common")
+async def ppl_common(payload: CommonFreeRequest, account: Optional[str] = None):
+    """Find common free slots between multiple people."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    try:
+        target_emails = [resolve_person_alias(p) for p in payload.people]
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if len(target_emails) < 2:
+        raise HTTPException(
+            status_code=400, detail="At least 2 people are required for common slots"
+        )
+    return await safe_call_with_retry(
+        people.find_common_free_slots,
+        email,
+        acct,
+        target_emails,
+        payload.weeks,
+        payload.duration,
+        payload.limit,
     )
 
 

@@ -1,3 +1,5 @@
+"$schema" = "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/h8/h8.config.schema.json"
+
 # h8 configuration (Rust CLI)
 # Place this at ~/.config/h8/config.toml or $XDG_CONFIG_HOME/h8/config.toml
 
@@ -9,6 +11,12 @@ timezone = "Europe/Berlin"
 
 # Service endpoint
 service_url = "http://127.0.0.1:8787"
+
+# Calendar display settings
+[calendar]
+# Default view for agenda/free/ppl commands
+# Options: "list" (detailed), "gantt" (timeline), "compact" (grouped by date)
+default_view = "list"
 
 # Free slots configuration
 [free_slots]
@@ -48,3 +56,11 @@ quote_style = "> "
 
 # Include signature in new messages
 include_signature = true
+
+# People aliases for calendar commands
+# Map short names to full email addresses for use with 'h8 ppl' commands
+# Example: h8 ppl free Roman -> looks up Roman's free slots
+[people]
+# Roman = "roman.kowalski@example.com"
+# Alice = "alice.smith@example.com"
+# Bob = "bob.jones@example.com"

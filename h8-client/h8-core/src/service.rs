@@ -238,6 +238,78 @@ impl ServiceClient {
         self.get("/free", &params)
     }
 
+    /// Get another person's calendar events (free/busy info).
+    pub fn ppl_agenda(
+        &self,
+        account: &str,
+        person: &str,
+        days: i64,
+        from_date: Option<&str>,
+        to_date: Option<&str>,
+    ) -> Result<Value> {
+        let days_str = days.to_string();
+        let from_date_owned = from_date.map(|s| s.to_string());
+        let to_date_owned = to_date.map(|s| s.to_string());
+
+        let mut params: Vec<(&str, &str)> = vec![
+            ("account", account),
+            ("person", person),
+            ("days", &days_str),
+        ];
+
+        if let Some(ref f) = from_date_owned {
+            params.push(("from_date", f));
+        }
+        if let Some(ref t) = to_date_owned {
+            params.push(("to_date", t));
+        }
+
+        self.get("/ppl/agenda", &params)
+    }
+
+    /// Find free slots in another person's calendar.
+    pub fn ppl_free(
+        &self,
+        account: &str,
+        person: &str,
+        weeks: u8,
+        duration: u32,
+        limit: Option<usize>,
+    ) -> Result<Value> {
+        let weeks_str = weeks.to_string();
+        let duration_str = duration.to_string();
+        let mut params = vec![
+            ("account", account),
+            ("person", person),
+            ("weeks", &weeks_str),
+            ("duration", &duration_str),
+        ];
+        let limit_str;
+        if let Some(l) = limit {
+            limit_str = l.to_string();
+            params.push(("limit", &limit_str));
+        }
+        self.get("/ppl/free", &params)
+    }
+
+    /// Find common free slots between multiple people.
+    pub fn ppl_common(
+        &self,
+        account: &str,
+        people: &[&str],
+        weeks: u8,
+        duration: u32,
+        limit: Option<usize>,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "people": people,
+            "weeks": weeks,
+            "duration": duration,
+            "limit": limit,
+        });
+        self.post_json(&format!("/ppl/common?account={}", account), payload)
+    }
+
     // Internal HTTP methods
 
     fn get(&self, path: &str, params: &[(&str, &str)]) -> Result<Value> {

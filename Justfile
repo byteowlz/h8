@@ -2,6 +2,7 @@ set shell := ["bash", "-cu"]
 
 install:
     uv sync
+    uv tool install -e . --force
     cargo install --path h8-client/h8-cli --locked
     cargo install --path h8-client/h8-tui --locked
 

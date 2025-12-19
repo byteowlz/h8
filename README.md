@@ -1,3 +1,5 @@
+![banner](banner.png)
+
 # h8
 
 Rust CLI for MS365 Exchange Web Services (EWS) covering calendar, mail, contacts, and free-slot search. Works when Graph or IMAP are blocked but EWS is available.
@@ -27,18 +29,20 @@ h8's Python service calls `oama access <email>` to get fresh tokens as needed.
 ## Setup
 
 ```bash
-# Install deps
+# Install Rust CLI and Python deps
 just install
 
-# Start the Python service (in another shell)
-just service-start  # defaults to 127.0.0.1:8787 (logs to state dir)
+# Install the Python service globally (enables `h8 service start` from anywhere)
+cd ~/path/to/h8
+uv tool install -e .
 
-# Stop / status
-just service-stop
-just service-status
+# Start the Python service
+h8 service start   # runs in background, logs to ~/.local/state/h8/service.log
 
-# Build/run CLI
-cargo build --manifest-path h8/Cargo.toml
+# Check status / stop
+h8 service status
+h8 service stop
+h8 service restart
 ```
 
 ## Configuration
@@ -50,10 +54,17 @@ account = "your.email@example.com"
 timezone = "Europe/Berlin"
 service_url = "http://127.0.0.1:8787"
 
+[calendar]
+default_view = "list"  # list, gantt, or compact
+
 [free_slots]
 start_hour = 9
 end_hour = 17
 exclude_weekends = true
+
+[people]
+Roman = "roman.kowalski@example.com"
+Alice = "alice.smith@example.com"
 ```
 
 See `examples/config.toml` for a fuller template.
@@ -86,6 +97,11 @@ echo '{"display_name":"John Doe","email":"john@example.com"}' | h8 contacts crea
 
 # Free slots
 h8 free --weeks 2 --duration 60
+
+# Other people's calendars (requires [people] aliases in config or full email)
+h8 ppl agenda Roman --days 7          # View Roman's calendar
+h8 ppl free Roman --weeks 2           # Find Roman's free slots
+h8 ppl common Roman Alice --weeks 2   # Find common free slots between Roman and Alice
 ```
 
 Add `--json` for machine-readable output. Use `--account` to target another mailbox. Ensure the Python service is running first.

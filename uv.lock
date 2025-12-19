@@ -322,7 +322,7 @@ wheels = [
 
 [[package]]
 name = "h8"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "exchangelib" },
@@ -339,6 +339,11 @@ test = [
     { name = "pytest-asyncio" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "exchangelib", specifier = ">=5.6.0" },
@@ -351,6 +356,9 @@ requires-dist = [
     { name = "wordfreq", specifier = ">=3.1.1" },
 ]
 provides-extras = ["test"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.2" }]
 
 [[package]]
 name = "httpcore"
