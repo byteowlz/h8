@@ -19,7 +19,7 @@ pub mod service;
 pub mod types;
 
 pub use compose::{ComposeBuilder, ComposeDocument};
-pub use config::AppConfig;
+pub use config::{AppConfig, CalendarConfig, CalendarView};
 pub use db::Database;
 pub use error::{Error, Result};
 pub use id::IdGenerator;

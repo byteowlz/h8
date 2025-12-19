@@ -48,6 +48,7 @@ fn try_main() -> Result<()> {
         Command::Agenda(args) => handle_agenda(&ctx, args),
         Command::Contacts { command } => handle_contacts(&ctx, command),
         Command::Free(cmd) => handle_free(&ctx, cmd),
+        Command::Ppl { command } => handle_ppl(&ctx, command),
         Command::Config { command } => handle_config(&ctx, command),
         Command::Init(cmd) => handle_init(&ctx, cmd),
         Command::Completions { shell } => handle_completions(shell),
@@ -128,6 +129,12 @@ enum Command {
         command: ContactsCommand,
     },
     Free(FreeCommand),
+    /// Other people's calendar operations
+    #[command(alias = "people")]
+    Ppl {
+        #[command(subcommand)]
+        command: PplCommand,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -236,9 +243,9 @@ struct MailGetArgs {
 struct AgendaArgs {
     #[arg(short = 'a', long = "account")]
     account: Option<String>,
-    /// View mode: list (default) or gantt
-    #[arg(short = 'V', long = "view", value_enum, default_value_t = AgendaView::List)]
-    view: AgendaView,
+    /// View mode: list, gantt, or compact (default from config)
+    #[arg(short = 'V', long = "view", value_enum)]
+    view: Option<AgendaView>,
     /// Day offset or name: 0/today (default), 1/tomorrow, -1/yesterday, or any integer
     #[arg(short = 'd', long = "day", default_value = "0")]
     day: String,
@@ -300,6 +307,18 @@ enum AgendaView {
     List,
     /// Gantt-style timeline chart
     Gantt,
+    /// Compact view grouped by date
+    Compact,
+}
+
+impl From<h8_core::CalendarView> for AgendaView {
+    fn from(v: h8_core::CalendarView) -> Self {
+        match v {
+            h8_core::CalendarView::List => AgendaView::List,
+            h8_core::CalendarView::Gantt => AgendaView::Gantt,
+            h8_core::CalendarView::Compact => AgendaView::Compact,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,6 +328,16 @@ struct AgendaItem {
     end: Option<String>,
     location: Option<String>,
     is_all_day: Option<bool>,
+}
+
+/// Free/busy item from ppl agenda (other people's calendar)
+#[derive(Debug, Deserialize)]
+struct PplAgendaItem {
+    start: Option<String>,
+    end: Option<String>,
+    status: Option<String>,
+    subject: Option<String>,
+    location: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -517,6 +546,65 @@ struct FreeCommand {
     duration: u32,
     #[arg(short = 'l', long)]
     limit: Option<usize>,
+    /// View mode: list, gantt, or compact (default from config)
+    #[arg(short = 'V', long = "view", value_enum)]
+    view: Option<AgendaView>,
+}
+
+#[derive(Debug, Subcommand)]
+enum PplCommand {
+    /// View another person's calendar events
+    Agenda(PplAgendaArgs),
+    /// Find free slots in another person's calendar
+    Free(PplFreeArgs),
+    /// Find common free slots between multiple people
+    Common(PplCommonArgs),
+}
+
+#[derive(Debug, Args)]
+struct PplAgendaArgs {
+    /// Person alias or email address
+    person: String,
+    #[arg(short = 'd', long, default_value_t = 7)]
+    days: i64,
+    #[arg(long = "from")]
+    from_date: Option<String>,
+    #[arg(long = "to")]
+    to_date: Option<String>,
+    /// View mode: list, gantt, or compact (default from config)
+    #[arg(short = 'V', long = "view", value_enum)]
+    view: Option<AgendaView>,
+}
+
+#[derive(Debug, Args)]
+struct PplFreeArgs {
+    /// Person alias or email address
+    person: String,
+    #[arg(short = 'w', long, default_value_t = 1)]
+    weeks: u8,
+    #[arg(short = 'd', long, default_value_t = 30)]
+    duration: u32,
+    #[arg(short = 'l', long)]
+    limit: Option<usize>,
+    /// View mode: list, gantt, or compact (default from config)
+    #[arg(short = 'V', long = "view", value_enum)]
+    view: Option<AgendaView>,
+}
+
+#[derive(Debug, Args)]
+struct PplCommonArgs {
+    /// Person aliases or email addresses (2 or more)
+    #[arg(required = true, num_args = 2..)]
+    people: Vec<String>,
+    #[arg(short = 'w', long, default_value_t = 1)]
+    weeks: u8,
+    #[arg(short = 'd', long, default_value_t = 30)]
+    duration: u32,
+    #[arg(short = 'l', long)]
+    limit: Option<usize>,
+    /// View mode: list, gantt, or compact (default from config)
+    #[arg(short = 'V', long = "view", value_enum)]
+    view: Option<AgendaView>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1708,6 +1796,11 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
     let account = args.account.unwrap_or_else(|| effective_account(ctx));
     let client = ctx.service_client()?;
 
+    // Get view from args or config default
+    let view = args
+        .view
+        .unwrap_or_else(|| ctx.config.calendar.default_view.into());
+
     // Parse timezone
     let tz = ctx
         .config
@@ -1742,7 +1835,7 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
 
     let events: Vec<AgendaItem> =
         serde_json::from_value(events_val.clone()).context("parsing agenda items")?;
-    render_agenda(&events, tz, args.view, target_date)?;
+    render_agenda(&events, tz, view, target_date)?;
     Ok(())
 }
 
@@ -1767,8 +1860,467 @@ fn handle_free(ctx: &RuntimeContext, cmd: FreeCommand) -> Result<()> {
     let slots = client
         .free_slots(&account, cmd.weeks, cmd.duration, cmd.limit)
         .map_err(|e| anyhow!("{e}"))?;
-    emit_output(&ctx.common, &slots)?;
+
+    // Use JSON/YAML output if requested, otherwise render nicely
+    if ctx.common.json || ctx.common.yaml || !io::stdout().is_terminal() {
+        emit_output(&ctx.common, &slots)?;
+    } else {
+        let view = cmd
+            .view
+            .unwrap_or_else(|| ctx.config.calendar.default_view.into());
+        render_free_slots(&slots, ctx, view)?;
+    }
     Ok(())
+}
+
+fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
+    let account = effective_account(ctx);
+    let client = ctx.service_client()?;
+
+    match cmd {
+        PplCommand::Agenda(args) => {
+            let view = args
+                .view
+                .unwrap_or_else(|| ctx.config.calendar.default_view.into());
+            // Resolve alias to email
+            let person_email = ctx
+                .config
+                .resolve_person(&args.person)
+                .map_err(|e| anyhow!("{e}"))?;
+            let result = client
+                .ppl_agenda(
+                    &account,
+                    &person_email,
+                    args.days,
+                    args.from_date.as_deref(),
+                    args.to_date.as_deref(),
+                )
+                .map_err(|e| anyhow!("{e}"))?;
+
+            // Use JSON/YAML output if requested, otherwise render nicely
+            if ctx.common.json || ctx.common.yaml || !io::stdout().is_terminal() {
+                emit_output(&ctx.common, &result)?;
+            } else {
+                let items: Vec<PplAgendaItem> =
+                    serde_json::from_value(result).context("parsing ppl agenda items")?;
+                // Use original alias for display, but email was used for lookup
+                let display_name = if args.person != person_email {
+                    format!("{} ({})", args.person, person_email)
+                } else {
+                    person_email
+                };
+                render_ppl_agenda(&display_name, &items, ctx, view)?;
+            }
+        }
+        PplCommand::Free(args) => {
+            let view = args
+                .view
+                .unwrap_or_else(|| ctx.config.calendar.default_view.into());
+            // Resolve alias to email
+            let person_email = ctx
+                .config
+                .resolve_person(&args.person)
+                .map_err(|e| anyhow!("{e}"))?;
+            let result = client
+                .ppl_free(
+                    &account,
+                    &person_email,
+                    args.weeks,
+                    args.duration,
+                    args.limit,
+                )
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if ctx.common.json || ctx.common.yaml || !io::stdout().is_terminal() {
+                emit_output(&ctx.common, &result)?;
+            } else {
+                let display_name = if args.person != person_email {
+                    format!("{} ({})", args.person, person_email)
+                } else {
+                    person_email
+                };
+                render_free_slots_for_person(&display_name, &result, ctx, view)?;
+            }
+        }
+        PplCommand::Common(args) => {
+            let view = args
+                .view
+                .unwrap_or_else(|| ctx.config.calendar.default_view.into());
+            // Resolve all aliases to emails
+            let mut resolved_emails: Vec<String> = Vec::new();
+            let mut display_names: Vec<String> = Vec::new();
+            for person in &args.people {
+                let email = ctx
+                    .config
+                    .resolve_person(person)
+                    .map_err(|e| anyhow!("{e}"))?;
+                if person != &email {
+                    display_names.push(person.clone());
+                } else {
+                    display_names.push(email.clone());
+                }
+                resolved_emails.push(email);
+            }
+            let email_refs: Vec<&str> = resolved_emails.iter().map(|s| s.as_str()).collect();
+            let result = client
+                .ppl_common(&account, &email_refs, args.weeks, args.duration, args.limit)
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if ctx.common.json || ctx.common.yaml || !io::stdout().is_terminal() {
+                emit_output(&ctx.common, &result)?;
+            } else {
+                let label = display_names.join(", ");
+                render_free_slots_for_person(&label, &result, ctx, view)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Render another person's agenda in a human-readable format.
+fn render_ppl_agenda(
+    person: &str,
+    items: &[PplAgendaItem],
+    ctx: &RuntimeContext,
+    _view: AgendaView,
+) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    let tz = ctx
+        .config
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .unwrap_or(chrono_tz::UTC);
+
+    // Print header
+    println!("Calendar for: {}", person.bold());
+    println!("{}", "\u{2500}".repeat(50));
+
+    if items.is_empty() {
+        println!("(no events)");
+        return Ok(());
+    }
+
+    // Group events by date
+    let mut events_by_date: std::collections::BTreeMap<String, Vec<&PplAgendaItem>> =
+        std::collections::BTreeMap::new();
+
+    for item in items {
+        let date_str = item
+            .start
+            .as_deref()
+            .map(|s| {
+                // Extract date part (YYYY-MM-DD)
+                if s.len() >= 10 {
+                    s[..10].to_string()
+                } else {
+                    s.to_string()
+                }
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+        events_by_date.entry(date_str).or_default().push(item);
+    }
+
+    let today = Local::now().with_timezone(&tz).date_naive();
+
+    for (date_str, day_items) in &events_by_date {
+        // Parse date for nice formatting
+        let date_label = if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+            let weekday = date.format("%a").to_string();
+            if date == today {
+                format!("{} {} (Today)", weekday, date_str)
+            } else if date == today.succ_opt().unwrap_or(today) {
+                format!("{} {} (Tomorrow)", weekday, date_str)
+            } else {
+                format!("{} {}", weekday, date_str)
+            }
+        } else {
+            date_str.clone()
+        };
+
+        println!();
+        println!("{}", date_label.cyan().bold());
+
+        // Sort items by start time
+        let mut sorted_items: Vec<_> = day_items.iter().collect();
+        sorted_items.sort_by(|a, b| a.start.cmp(&b.start));
+
+        for item in sorted_items {
+            let start_time = item
+                .start
+                .as_deref()
+                .and_then(|s| extract_time(s))
+                .unwrap_or_else(|| "??:??".to_string());
+            let end_time = item
+                .end
+                .as_deref()
+                .and_then(|s| extract_time(s))
+                .unwrap_or_else(|| "??:??".to_string());
+
+            let time_range = format!("{}-{}", start_time, end_time);
+
+            // Check if it's an all-day event (times are 00:00)
+            let is_all_day = start_time == "00:00"
+                && (end_time == "00:00" || end_time == "23:59" || end_time == "24:00");
+
+            let status = item.status.as_deref().unwrap_or("Busy");
+            let status_icon = match status {
+                "Free" => "\u{2610}",                  // Empty checkbox
+                "Tentative" => "\u{25cb}",             // Circle
+                "Busy" => "\u{2588}",                  // Full block
+                "OOF" | "OutOfOffice" => "\u{2708}",   // Airplane
+                "WorkingElsewhere" => "\u{1f3e0}",     // House (fallback to text)
+                _ => "\u{2588}",                       // Default to busy block
+            };
+
+            // Subject or status as label
+            let label = item
+                .subject
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(status);
+
+            if is_all_day {
+                println!("  {} (all day)  {}", status_icon, label.dimmed());
+            } else {
+                println!("  {} {:<13} {}", status_icon, time_range, label);
+            }
+
+            // Show location if available
+            if let Some(loc) = item.location.as_deref().filter(|s| !s.is_empty()) {
+                println!("    {} {}", ICON_LOCATION, loc.dimmed());
+            }
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Free slot item from the service.
+#[derive(Debug, Deserialize)]
+struct FreeSlotItem {
+    start: Option<String>,
+    end: Option<String>,
+    date: Option<String>,
+    #[allow(dead_code)]
+    day: Option<String>,
+    duration_minutes: Option<i64>,
+}
+
+/// Render free slots in a human-readable format.
+fn render_free_slots(slots: &Value, ctx: &RuntimeContext, _view: AgendaView) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    let tz = ctx
+        .config
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .unwrap_or(chrono_tz::UTC);
+
+    let items: Vec<FreeSlotItem> =
+        serde_json::from_value(slots.clone()).context("parsing free slots")?;
+
+    println!("{}", "Free Slots".bold());
+    println!("{}", "\u{2500}".repeat(50));
+
+    if items.is_empty() {
+        println!("(no free slots found)");
+        return Ok(());
+    }
+
+    // Group by date
+    let mut slots_by_date: std::collections::BTreeMap<String, Vec<&FreeSlotItem>> =
+        std::collections::BTreeMap::new();
+
+    for item in &items {
+        let date_str = item.date.clone().unwrap_or_else(|| {
+            item.start
+                .as_deref()
+                .map(|s| {
+                    if s.len() >= 10 {
+                        s[..10].to_string()
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "Unknown".to_string())
+        });
+        slots_by_date.entry(date_str).or_default().push(item);
+    }
+
+    let today = Local::now().with_timezone(&tz).date_naive();
+
+    for (date_str, day_slots) in &slots_by_date {
+        let date_label = if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+            let weekday = date.format("%a").to_string();
+            if date == today {
+                format!("{} {} (Today)", weekday, date_str)
+            } else if date == today.succ_opt().unwrap_or(today) {
+                format!("{} {} (Tomorrow)", weekday, date_str)
+            } else {
+                format!("{} {}", weekday, date_str)
+            }
+        } else {
+            date_str.clone()
+        };
+
+        println!();
+        println!("{}", date_label.cyan().bold());
+
+        for slot in day_slots {
+            let start_time = slot
+                .start
+                .as_deref()
+                .and_then(|s| extract_time(s))
+                .unwrap_or_else(|| "??:??".to_string());
+            let end_time = slot
+                .end
+                .as_deref()
+                .and_then(|s| extract_time(s))
+                .unwrap_or_else(|| "??:??".to_string());
+
+            let duration = slot.duration_minutes.unwrap_or(0);
+            let duration_str = if duration >= 60 {
+                let hours = duration / 60;
+                let mins = duration % 60;
+                if mins > 0 {
+                    format!("{}h {}m", hours, mins)
+                } else {
+                    format!("{}h", hours)
+                }
+            } else {
+                format!("{}m", duration)
+            };
+
+            println!(
+                "  {} {}-{}  {}",
+                "\u{2610}".green(), // Empty checkbox in green
+                start_time,
+                end_time,
+                duration_str.dimmed()
+            );
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Render free slots for a person (ppl free / ppl common).
+fn render_free_slots_for_person(
+    label: &str,
+    slots: &Value,
+    ctx: &RuntimeContext,
+    _view: AgendaView,
+) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    let tz = ctx
+        .config
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .unwrap_or(chrono_tz::UTC);
+
+    let items: Vec<FreeSlotItem> =
+        serde_json::from_value(slots.clone()).context("parsing free slots")?;
+
+    println!("Free slots for: {}", label.bold());
+    println!("{}", "\u{2500}".repeat(50));
+
+    if items.is_empty() {
+        println!("(no free slots found)");
+        return Ok(());
+    }
+
+    // Group by date
+    let mut slots_by_date: std::collections::BTreeMap<String, Vec<&FreeSlotItem>> =
+        std::collections::BTreeMap::new();
+
+    for item in &items {
+        let date_str = item.date.clone().unwrap_or_else(|| {
+            item.start
+                .as_deref()
+                .map(|s| {
+                    if s.len() >= 10 {
+                        s[..10].to_string()
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "Unknown".to_string())
+        });
+        slots_by_date.entry(date_str).or_default().push(item);
+    }
+
+    let today = Local::now().with_timezone(&tz).date_naive();
+
+    for (date_str, day_slots) in &slots_by_date {
+        let date_label = if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+            let weekday = date.format("%a").to_string();
+            if date == today {
+                format!("{} {} (Today)", weekday, date_str)
+            } else if date == today.succ_opt().unwrap_or(today) {
+                format!("{} {} (Tomorrow)", weekday, date_str)
+            } else {
+                format!("{} {}", weekday, date_str)
+            }
+        } else {
+            date_str.clone()
+        };
+
+        println!();
+        println!("{}", date_label.cyan().bold());
+
+        for slot in day_slots {
+            let start_time = slot
+                .start
+                .as_deref()
+                .and_then(|s| extract_time(s))
+                .unwrap_or_else(|| "??:??".to_string());
+            let end_time = slot
+                .end
+                .as_deref()
+                .and_then(|s| extract_time(s))
+                .unwrap_or_else(|| "??:??".to_string());
+
+            let duration = slot.duration_minutes.unwrap_or(0);
+            let duration_str = if duration >= 60 {
+                let hours = duration / 60;
+                let mins = duration % 60;
+                if mins > 0 {
+                    format!("{}h {}m", hours, mins)
+                } else {
+                    format!("{}h", hours)
+                }
+            } else {
+                format!("{}m", duration)
+            };
+
+            println!(
+                "  {} {}-{}  {}",
+                "\u{2610}".green(), // Empty checkbox in green
+                start_time,
+                end_time,
+                duration_str.dimmed()
+            );
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Extract time (HH:MM) from an ISO datetime string.
+fn extract_time(dt_str: &str) -> Option<String> {
+    // Format: 2025-12-19T15:00:00+01:00 or 2025-12-19T15:00:00
+    if let Some(t_pos) = dt_str.find('T') {
+        let time_part = &dt_str[t_pos + 1..];
+        if time_part.len() >= 5 {
+            return Some(time_part[..5].to_string());
+        }
+    }
+    None
 }
 
 fn handle_config(ctx: &RuntimeContext, command: ConfigCommand) -> Result<()> {
@@ -2350,6 +2902,7 @@ fn render_agenda(
     match view {
         AgendaView::List => render_list_view(&all_day_events, &slots),
         AgendaView::Gantt => render_gantt_view(&slots, now_min),
+        AgendaView::Compact => render_compact_view(&all_day_events, &slots),
     }
 
     Ok(())
@@ -2510,6 +3063,34 @@ fn render_gantt_view(slots: &[AgendaSlot], now_min: Option<u32>) {
 
         print!("{:<width$} ", slot.short_name, width = label_width);
         println!("{}", bar_str);
+    }
+}
+
+/// Render the compact view (similar to ppl agenda style).
+fn render_compact_view(all_day: &[AgendaSlot], timed: &[AgendaSlot]) {
+    use owo_colors::OwoColorize;
+
+    // All-day events
+    for slot in all_day {
+        let icon = slot.status.icon();
+        println!(
+            "  {} (all day)  {}{}",
+            "\u{2588}",
+            icon,
+            slot.subject.dimmed()
+        );
+    }
+
+    // Timed events
+    for slot in timed {
+        let time_range = format!("{}-{}", slot.start_label, slot.end_label);
+        let icon = slot.status.icon();
+
+        println!("  \u{2588} {:<13} {}{}", time_range, icon, slot.subject);
+
+        if let Some(loc) = slot.location.as_ref().filter(|s| !s.is_empty()) {
+            println!("    {} {}", ICON_LOCATION, loc.dimmed());
+        }
     }
 }
 

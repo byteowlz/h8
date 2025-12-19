@@ -11,6 +11,58 @@ use crate::paths::AppPaths;
 
 const APP_NAME: &str = "h8";
 
+/// Calendar view mode.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CalendarView {
+    /// Detailed list view with times and locations
+    #[default]
+    List,
+    /// Gantt-style timeline chart
+    Gantt,
+    /// Compact view grouped by date
+    Compact,
+}
+
+impl std::fmt::Display for CalendarView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CalendarView::List => write!(f, "list"),
+            CalendarView::Gantt => write!(f, "gantt"),
+            CalendarView::Compact => write!(f, "compact"),
+        }
+    }
+}
+
+impl std::str::FromStr for CalendarView {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "list" => Ok(CalendarView::List),
+            "gantt" => Ok(CalendarView::Gantt),
+            "compact" => Ok(CalendarView::Compact),
+            _ => Err(format!("unknown view: {} (valid: list, gantt, compact)", s)),
+        }
+    }
+}
+
+/// Calendar display configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CalendarConfig {
+    /// Default view mode for calendar displays.
+    pub default_view: CalendarView,
+}
+
+impl Default for CalendarConfig {
+    fn default() -> Self {
+        Self {
+            default_view: CalendarView::List,
+        }
+    }
+}
+
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -26,6 +78,12 @@ pub struct AppConfig {
     /// Mail configuration.
     #[serde(default)]
     pub mail: MailConfig,
+    /// Calendar display configuration.
+    #[serde(default)]
+    pub calendar: CalendarConfig,
+    /// People aliases (name -> email).
+    #[serde(default)]
+    pub people: std::collections::HashMap<String, String>,
 }
 
 impl Default for AppConfig {
@@ -36,6 +94,8 @@ impl Default for AppConfig {
             service_url: "http://127.0.0.1:8787".to_string(),
             free_slots: FreeSlotsConfig::default(),
             mail: MailConfig::default(),
+            calendar: CalendarConfig::default(),
+            people: std::collections::HashMap::new(),
         }
     }
 }
@@ -121,6 +181,40 @@ impl Default for ComposeConfig {
 }
 
 impl AppConfig {
+    /// Resolve a person alias to email address.
+    ///
+    /// If the alias is found in config, returns the mapped email.
+    /// If the alias contains '@', returns it as-is (assumed to be an email).
+    /// Otherwise, returns an error.
+    pub fn resolve_person(&self, alias: &str) -> std::result::Result<String, String> {
+        // Case-insensitive lookup
+        for (name, email) in &self.people {
+            if name.eq_ignore_ascii_case(alias) {
+                return Ok(email.clone());
+            }
+        }
+
+        // If it looks like an email, use it directly
+        if alias.contains('@') {
+            return Ok(alias.to_string());
+        }
+
+        // Not found
+        let available: Vec<&str> = self.people.keys().map(|s| s.as_str()).collect();
+        if available.is_empty() {
+            Err(format!(
+                "unknown person '{}' (no aliases configured in [people])",
+                alias
+            ))
+        } else {
+            Err(format!(
+                "unknown person '{}' (available: {})",
+                alias,
+                available.join(", ")
+            ))
+        }
+    }
+
     /// Load configuration from paths with environment overlay.
     pub fn load(paths: &AppPaths, account_override: Option<&str>) -> Result<Self> {
         let env_prefix = env_prefix();
