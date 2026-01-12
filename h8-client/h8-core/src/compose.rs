@@ -101,28 +101,41 @@ impl ComposeDocument {
 
     /// Serialize the document to compose format.
     pub fn to_string(&self) -> Result<String> {
+        self.to_string_impl(false)
+    }
+
+    /// Serialize the document as a template with all fields shown.
+    ///
+    /// Unlike `to_string()`, this always includes to, cc, bcc fields
+    /// even when empty, making it suitable for new compose templates.
+    pub fn to_template(&self) -> Result<String> {
+        self.to_string_impl(true)
+    }
+
+    /// Internal serialization implementation.
+    fn to_string_impl(&self, show_empty_fields: bool) -> Result<String> {
         let mut output = String::new();
 
         // Build frontmatter
         output.push_str(FRONTMATTER_DELIM);
         output.push('\n');
 
-        // To
-        if !self.to.is_empty() {
+        // To - always show in template mode
+        if show_empty_fields || !self.to.is_empty() {
             output.push_str("to: ");
             output.push_str(&self.to.join(", "));
             output.push('\n');
         }
 
-        // CC
-        if !self.cc.is_empty() {
+        // CC - always show in template mode
+        if show_empty_fields || !self.cc.is_empty() {
             output.push_str("cc: ");
             output.push_str(&self.cc.join(", "));
             output.push('\n');
         }
 
-        // BCC
-        if !self.bcc.is_empty() {
+        // BCC - always show in template mode
+        if show_empty_fields || !self.bcc.is_empty() {
             output.push_str("bcc: ");
             output.push_str(&self.bcc.join(", "));
             output.push('\n');
@@ -604,6 +617,24 @@ Thanks!"#;
         assert!(text.contains("cc: bob@example.com"));
         assert!(text.contains("subject: Test"));
         assert!(text.contains("Hello!"));
+    }
+
+    #[test]
+    fn test_to_template_shows_empty_fields() {
+        let doc = ComposeBuilder::new().subject("Test").body("Hello!").build();
+
+        // to_string() should NOT include empty to/cc/bcc
+        let text = doc.to_string().unwrap();
+        assert!(!text.contains("to:"));
+        assert!(!text.contains("cc:"));
+        assert!(!text.contains("bcc:"));
+
+        // to_template() SHOULD include empty to/cc/bcc
+        let template = doc.to_template().unwrap();
+        assert!(template.contains("to:"));
+        assert!(template.contains("cc:"));
+        assert!(template.contains("bcc:"));
+        assert!(template.contains("subject: Test"));
     }
 
     #[test]
