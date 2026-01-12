@@ -1176,7 +1176,7 @@ fn handle_mail_compose(ctx: &RuntimeContext, account: &str, args: MailComposeArg
         doc.add_signature(&ctx.config.mail.signature);
     }
 
-    open_editor_and_save_draft(ctx, account, doc, !args.no_edit)
+    open_editor_and_save_draft(ctx, account, doc, !args.no_edit, true)
 }
 
 fn handle_mail_reply(
@@ -1246,7 +1246,7 @@ fn handle_mail_reply(
         doc.add_signature(&ctx.config.mail.signature);
     }
 
-    open_editor_and_save_draft(ctx, account, doc, true)
+    open_editor_and_save_draft(ctx, account, doc, true, false)
 }
 
 fn handle_mail_forward(
@@ -1291,7 +1291,8 @@ fn handle_mail_forward(
         doc.add_signature(&ctx.config.mail.signature);
     }
 
-    open_editor_and_save_draft(ctx, account, doc, true)
+    // Forward needs to show empty to/cc/bcc since recipient is not yet specified
+    open_editor_and_save_draft(ctx, account, doc, true, true)
 }
 
 fn handle_mail_move(ctx: &RuntimeContext, account: &str, args: MailMoveArgs) -> Result<()> {
@@ -1400,7 +1401,7 @@ fn handle_mail_edit(ctx: &RuntimeContext, account: &str, args: MailEditArgs) -> 
         .delete(FOLDER_DRAFTS, &args.id)
         .map_err(|e| anyhow!("{e}"))?;
 
-    open_editor_and_save_draft(ctx, account, doc, true)
+    open_editor_and_save_draft(ctx, account, doc, true, false)
 }
 
 fn handle_mail_sync(
@@ -1704,8 +1705,14 @@ fn open_editor_and_save_draft(
     account: &str,
     doc: ComposeDocument,
     open_editor: bool,
+    is_new_compose: bool,
 ) -> Result<()> {
-    let content = doc.to_string().map_err(|e| anyhow!("{e}"))?;
+    // Use template format for new compose to show empty to/cc/bcc fields
+    let content = if is_new_compose {
+        doc.to_template().map_err(|e| anyhow!("{e}"))?
+    } else {
+        doc.to_string().map_err(|e| anyhow!("{e}"))?
+    };
 
     // Create temp file
     let temp_dir = std::env::temp_dir();
@@ -2668,7 +2675,142 @@ fn read_pid(path: &std::path::Path) -> Result<Option<u32>> {
     Ok(Some(pid))
 }
 
+/// Check if oama is installed and optionally install it.
+fn ensure_oama() -> Result<()> {
+    // Check if oama is already in PATH
+    if which::which("oama").is_ok() {
+        return Ok(());
+    }
+
+    eprintln!("oama not found in PATH, attempting to install...");
+
+    let install_dir = dirs::home_dir()
+        .ok_or_else(|| anyhow!("could not determine home directory"))?
+        .join(".local")
+        .join("bin");
+
+    // Get latest version from GitHub
+    let client = reqwest::blocking::Client::new();
+    let release: Value = client
+        .get("https://api.github.com/repos/pdobsan/oama/releases/latest")
+        .header("User-Agent", "h8-cli")
+        .send()
+        .context("fetching oama release info")?
+        .json()
+        .context("parsing oama release info")?;
+
+    let version = release["tag_name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing tag_name in release"))?;
+
+    // Determine platform
+    let (os, arch) = match (env::consts::OS, env::consts::ARCH) {
+        ("macos", "aarch64") => ("Darwin", "arm64"),
+        ("macos", "x86_64") => ("Darwin", "x86_64"),
+        ("linux", "aarch64") => ("Linux", "aarch64"),
+        ("linux", "x86_64") => ("Linux", "x86_64"),
+        (os, arch) => return Err(anyhow!("unsupported platform: {}-{}", os, arch)),
+    };
+
+    let tarball_name = format!("oama-{}-{}-{}.tar.gz", version, os, arch);
+    let download_url = format!(
+        "https://github.com/pdobsan/oama/releases/download/{}/{}",
+        version, tarball_name
+    );
+
+    eprintln!("Downloading oama {} from {}...", version, download_url);
+
+    // Download tarball
+    let response = client
+        .get(&download_url)
+        .send()
+        .context("downloading oama tarball")?;
+
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "failed to download oama: HTTP {}",
+            response.status()
+        ));
+    }
+
+    let tarball_bytes = response.bytes().context("reading oama tarball")?;
+
+    // Extract to temp dir
+    let temp_dir = tempfile::tempdir().context("creating temp directory")?;
+    let tarball_path = temp_dir.path().join(&tarball_name);
+    fs::write(&tarball_path, &tarball_bytes).context("writing tarball")?;
+
+    // Extract using tar command (simpler than using a tar crate)
+    let status = ProcCommand::new("tar")
+        .arg("-xzf")
+        .arg(&tarball_path)
+        .arg("-C")
+        .arg(temp_dir.path())
+        .status()
+        .context("extracting oama tarball")?;
+
+    if !status.success() {
+        return Err(anyhow!("failed to extract oama tarball"));
+    }
+
+    // Find the oama binary in the extracted files
+    let mut oama_binary = None;
+    for entry in walkdir::WalkDir::new(temp_dir.path())
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_name() == "oama" && entry.file_type().is_file() {
+            oama_binary = Some(entry.path().to_path_buf());
+            break;
+        }
+    }
+
+    let oama_binary =
+        oama_binary.ok_or_else(|| anyhow!("oama binary not found in extracted tarball"))?;
+
+    // Create install directory and copy binary
+    fs::create_dir_all(&install_dir)
+        .with_context(|| format!("creating install directory {}", install_dir.display()))?;
+
+    let install_path = install_dir.join("oama");
+    fs::copy(&oama_binary, &install_path)
+        .with_context(|| format!("copying oama to {}", install_path.display()))?;
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&install_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&install_path, perms)?;
+    }
+
+    eprintln!("Installed oama to {}", install_path.display());
+
+    // Verify it's now in PATH or warn user
+    if which::which("oama").is_err() {
+        eprintln!(
+            "Warning: oama installed but {} is not in PATH. Add it to your PATH:",
+            install_dir.display()
+        );
+        eprintln!("  export PATH=\"{}:$PATH\"", install_dir.display());
+        // Update PATH for current process
+        let path = env::var("PATH").unwrap_or_default();
+        // SAFETY: We're only modifying PATH for the current process, which is safe
+        // as long as no other threads are reading env vars simultaneously.
+        // This runs early in service startup before any concurrent access.
+        unsafe {
+            env::set_var("PATH", format!("{}:{}", install_dir.display(), path));
+        }
+    }
+
+    Ok(())
+}
+
 fn start_service(ctx: &RuntimeContext) -> Result<()> {
+    // Ensure oama is installed before starting service
+    ensure_oama()?;
+
     let pid_path = service_pid_path(ctx)?;
     if let Some(pid) = read_pid(&pid_path)?
         && pid_running(pid)

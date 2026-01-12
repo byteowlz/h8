@@ -165,17 +165,17 @@ async def safe_call_with_retry(func, account_email: str, *args, **kwargs):
     """
     Execute a function with automatic retry on UnauthorizedError.
 
-    If an UnauthorizedError occurs, refreshes the token and retries once.
+    If an UnauthorizedError occurs, renews token via oama and retries once.
     """
     try:
         return await run_in_threadpool(func, *args, **kwargs)
     except UnauthorizedError as exc:
         log.warning(
-            "UnauthorizedError for %s, refreshing token and retrying...", account_email
+            "UnauthorizedError for %s, renewing token and retrying...", account_email
         )
         try:
-            # Refresh the account token
-            new_account = auth.refresh_account(account_email)
+            # Renew via oama and refresh the account token
+            new_account = auth.renew_and_refresh_account(account_email)
             # Replace the account argument if it's the first positional arg
             if args and hasattr(args[0], "primary_smtp_address"):
                 args = (new_account,) + args[1:]
@@ -224,10 +224,10 @@ async def get_or_set(key: str, producer, account_email: Optional[str] = None):
     except UnauthorizedError as exc:
         if account_email:
             log.warning(
-                "UnauthorizedError during cache fill for %s, refreshing...",
+                "UnauthorizedError during cache fill for %s, renewing token...",
                 account_email,
             )
-            auth.refresh_account(account_email)
+            auth.renew_and_refresh_account(account_email)
         raise HTTPException(status_code=401, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
