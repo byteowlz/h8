@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import sys
 from typing import Any
 
@@ -12,7 +13,9 @@ from . import mail
 from . import contacts
 from . import free
 from . import people
-from .config import resolve_person_alias
+from .config import resolve_person_alias, get_config
+from .dateparser import parse_datetime, parse_attendees
+from .schemas import extracted_event_to_h8, extracted_contact_to_h8
 
 
 DEFAULT_ACCOUNT = "tommy.falkowski@iem.fraunhofer.de"
@@ -104,8 +107,101 @@ def cmd_calendar_create(args):
     """Create a calendar event."""
     account = get_account(args.account)
     event_data = json.load(sys.stdin)
+
+    # Convert from extraction schema if --extracted flag is set
+    if getattr(args, "extracted", False):
+        event_data = extracted_event_to_h8(event_data)
+
     result = calendar.create_event(account, event_data)
     output(result, args.json)
+
+
+def cmd_calendar_add(args):
+    """Add a calendar event with natural language input."""
+    config = get_config()
+    timezone = config.get("timezone", "Europe/Berlin")
+
+    # Combine all positional args into the input text
+    input_text = " ".join(args.input)
+
+    # Parse attendees from the text (separated by "with")
+    remaining_text, attendee_aliases = parse_attendees(input_text)
+
+    # Resolve attendee aliases to email addresses
+    attendees = []
+    for alias in attendee_aliases:
+        try:
+            email = resolve_person_alias(alias)
+            attendees.append(email)
+        except ValueError:
+            # If not found as alias and not an email, report error
+            print(f"Warning: Unknown attendee '{alias}', skipping", file=sys.stderr)
+
+    # The title is everything between the datetime and "with"
+    # Parse datetime from the beginning
+    parsed = parse_datetime(
+        remaining_text,
+        default_duration_minutes=args.duration,
+        timezone=timezone,
+    )
+
+    # Extract the title - everything that's not a date/time indicator
+    # Simple heuristic: look for quoted string first, otherwise use remaining text
+    title_match = re.search(r'"([^"]+)"', remaining_text)
+    if title_match:
+        title = title_match.group(1)
+    else:
+        # Remove date/time related words and use the rest as title
+        title_text = remaining_text
+        # Remove common datetime keywords
+        for pattern in [
+            r"\b(today|tomorrow|yesterday|morgen|heute|gestern)\b",
+            r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            r"\b(montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag)\b",
+            r"\b(mon|tue|wed|thu|fri|sat|sun|mo|di|mi|do|fr|sa|so)\b",
+            r"\b(next|nächste[rn]?)\b",
+            r"\b(at|on|um|am|für|for)\b",
+            r"\d{1,2}:\d{2}",
+            r"\d{1,2}\s*(am|pm|uhr)",
+            r"\d{1,2}\s*[-–]\s*\d{1,2}",
+            r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b",
+        ]:
+            title_text = re.sub(pattern, "", title_text, flags=re.IGNORECASE)
+        title = " ".join(title_text.split()).strip()
+
+    if not title:
+        title = "Meeting"
+
+    # Build event data
+    event_data = {
+        "subject": title,
+        "start": parsed.start.isoformat(),
+        "end": parsed.end.isoformat(),
+    }
+
+    if args.location:
+        event_data["location"] = args.location
+
+    # Note: EWS attendees require additional handling in calendar.py
+    # For now, we just create the event without attendees
+    # TODO: Add attendee support to create_event
+
+    account = get_account(args.account)
+    result = calendar.create_event(account, event_data)
+
+    # Print human-friendly confirmation
+    if not args.json:
+        print(f"Created: {title}")
+        print(
+            f"  When: {parsed.start.strftime('%A, %B %d, %Y at %H:%M')} - {parsed.end.strftime('%H:%M')}"
+        )
+        if attendees:
+            print(f"  With: {', '.join(attendees)}")
+        if args.location:
+            print(f"  Where: {args.location}")
+    else:
+        result["attendees"] = attendees
+        output(result, args.json)
 
 
 def cmd_calendar_delete(args):
@@ -194,6 +290,11 @@ def cmd_contacts_create(args):
     """Create a contact."""
     account = get_account(args.account)
     contact_data = json.load(sys.stdin)
+
+    # Convert from extraction schema if --extracted flag is set
+    if getattr(args, "extracted", False):
+        contact_data = extracted_contact_to_h8(contact_data)
+
     result = contacts.create_contact(account, contact_data)
     output(result, args.json)
 
@@ -306,7 +407,38 @@ def main():
         "create", aliases=["new"], help="Create event (JSON from stdin)"
     )
     add_common_args(cal_create)
+    cal_create.add_argument(
+        "--extracted",
+        "-e",
+        action="store_true",
+        help="Input is in extraction/event.json schema format (from xtr)",
+    )
     cal_create.set_defaults(func=cmd_calendar_create)
+
+    # calendar add (human-friendly)
+    cal_add = cal_subparsers.add_parser(
+        "add",
+        help="Add event with natural language (e.g., 'friday 2pm \"Meeting\" with alice')",
+    )
+    add_common_args(cal_add)
+    cal_add.add_argument(
+        "input",
+        nargs="+",
+        help='Natural language event description (e.g., friday 2pm "Team Sync" with roman)',
+    )
+    cal_add.add_argument(
+        "--duration",
+        "-d",
+        type=int,
+        default=60,
+        help="Default duration in minutes if not specified (default: 60)",
+    )
+    cal_add.add_argument(
+        "--location",
+        "-l",
+        help="Event location",
+    )
+    cal_add.set_defaults(func=cmd_calendar_add)
 
     # calendar delete
     cal_delete = cal_subparsers.add_parser(
@@ -398,6 +530,12 @@ def main():
         "create", aliases=["new"], help="Create contact (JSON from stdin)"
     )
     add_common_args(contacts_create)
+    contacts_create.add_argument(
+        "--extracted",
+        "-e",
+        action="store_true",
+        help="Input is in extraction/contact_details.json schema format (from xtr)",
+    )
     contacts_create.set_defaults(func=cmd_contacts_create)
 
     # contacts delete
