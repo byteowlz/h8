@@ -310,6 +310,22 @@ impl ServiceClient {
         self.post_json(&format!("/ppl/common?account={}", account), payload)
     }
 
+    /// Parse natural language event description and create event payload.
+    pub fn calendar_parse_natural(
+        &self,
+        account: &str,
+        input: &str,
+        duration: u32,
+        location: Option<&str>,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "input": input,
+            "duration": duration,
+            "location": location,
+        });
+        self.post_json(&format!("/calendar/parse?account={}", account), payload)
+    }
+
     // Internal HTTP methods
 
     fn get(&self, path: &str, params: &[(&str, &str)]) -> Result<Value> {
