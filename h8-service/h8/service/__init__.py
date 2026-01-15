@@ -387,6 +387,83 @@ async def calendar_create(payload: CalendarCreate, account: Optional[str] = None
     )
 
 
+class CalendarParse(BaseModel):
+    """Request model for parsing natural language event descriptions."""
+
+    input: str
+    duration: int = 60
+    location: Optional[str] = None
+
+
+@app.post("/calendar/parse")
+async def calendar_parse(payload: CalendarParse, account: Optional[str] = None):
+    """Parse natural language event description into a calendar create payload.
+
+    Parses inputs like:
+    - "friday 2pm Team meeting with roman"
+    - "tomorrow 10:30 for 2h Standup"
+    - "jan 16 2pm-4pm Review"
+    """
+    from h8 import dateparser
+
+    _ = current_account_email(account)  # Validate account exists
+
+    # Parse attendees first
+    remaining, attendee_aliases = dateparser.parse_attendees(payload.input)
+
+    # Resolve aliases to emails
+    attendees = []
+    for alias in attendee_aliases:
+        try:
+            email = resolve_person_alias(alias)
+            attendees.append(email)
+        except ValueError:
+            # Keep as-is if not a known alias (might be an email)
+            attendees.append(alias)
+
+    # Parse datetime from remaining text
+    parsed = dateparser.parse_datetime(
+        remaining,
+        default_duration_minutes=payload.duration,
+    )
+
+    # Extract subject: whatever isn't date/time keywords
+    # For now, look for quoted strings or capitalized phrases
+    import re
+
+    subject_match = re.search(r'"([^"]+)"', remaining)
+    if subject_match:
+        subject = subject_match.group(1)
+    else:
+        # Remove time/date keywords and use what's left
+        cleaned = re.sub(
+            r"\b(at|on|um|am|für|for|next|nächste[rn]?|today|tomorrow|morgen|"
+            r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+            r"montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag|"
+            r"\d{1,2}:\d{2}|\d{1,2}(am|pm|uhr)?)\b",
+            "",
+            remaining,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        subject = cleaned if cleaned else "Event"
+
+    # Build calendar create payload
+    result = {
+        "subject": subject,
+        "start": parsed.start.isoformat(),
+        "end": parsed.end.isoformat(),
+    }
+
+    if payload.location:
+        result["location"] = payload.location
+
+    if attendees:
+        result["attendees"] = attendees
+
+    return result
+
+
 @app.delete("/calendar/{item_id}")
 async def calendar_delete(
     item_id: str, changekey: Optional[str] = None, account: Optional[str] = None

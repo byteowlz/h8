@@ -344,6 +344,217 @@ def parse_datetime(
     )
 
 
+@dataclass
+class ParsedDateRange:
+    """Result of parsing a date range expression."""
+
+    start: datetime
+    end: datetime
+    description: str  # Human-readable description like "next week", "Friday"
+
+
+# Month names (English and German)
+MONTH_MAP = {
+    # English
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+    # German
+    "januar": 1,
+    "februar": 2,
+    "märz": 3,
+    "maerz": 3,
+    "mai": 5,
+    "juni": 6,
+    "juli": 7,
+    "oktober": 10,
+    "dezember": 12,
+    # Abbreviations
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "sept": 9,
+    "oct": 10,
+    "okt": 10,
+    "nov": 11,
+    "dec": 12,
+    "dez": 12,
+}
+
+
+def parse_date_range(
+    text: str,
+    timezone: str = "Europe/Berlin",
+) -> ParsedDateRange:
+    """Parse a natural language date range expression for calendar viewing.
+
+    Args:
+        text: Natural language date expression like "next week", "friday", "kw30"
+        timezone: Timezone for the resulting datetime (default: Europe/Berlin)
+
+    Returns:
+        ParsedDateRange with start, end, and human-readable description
+
+    Examples:
+        >>> parse_date_range("today")           # Today only
+        >>> parse_date_range("tomorrow")        # Tomorrow only
+        >>> parse_date_range("friday")          # Next Friday
+        >>> parse_date_range("next week")       # Monday-Sunday of next week
+        >>> parse_date_range("this week")       # Rest of current week
+        >>> parse_date_range("kw30")            # Calendar week 30
+        >>> parse_date_range("week 30")         # Calendar week 30
+        >>> parse_date_range("11 dezember")     # December 11
+        >>> parse_date_range("december")        # All of December
+    """
+    tz = ZoneInfo(timezone)
+    now = datetime.now(tz)
+    text_lower = text.lower().strip()
+
+    # 1. Check for week number: "kw30", "kw 30", "week 30", "woche 30"
+    week_match = re.search(
+        r"\b(?:kw|week|woche)\s*(\d{1,2})\b", text_lower, re.IGNORECASE
+    )
+    if week_match:
+        week_num = int(week_match.group(1))
+        year = now.year
+        # ISO week: Monday is day 1
+        # Find the Monday of the given week
+        jan4 = datetime(year, 1, 4, tzinfo=tz)  # Jan 4 is always in week 1
+        week1_monday = jan4 - timedelta(days=jan4.weekday())
+        start = week1_monday + timedelta(weeks=week_num - 1)
+        end = start + timedelta(days=6, hours=23, minutes=59, seconds=59)
+        return ParsedDateRange(
+            start=start,
+            end=end,
+            description=f"KW{week_num} {year}",
+        )
+
+    # 2. Check for "next week" / "nächste woche"
+    if re.search(r"\b(next\s+week|nächste\s+woche)\b", text_lower):
+        # Start from next Monday
+        days_until_monday = (7 - now.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 7  # If today is Monday, go to next Monday
+        next_monday = now + timedelta(days=days_until_monday)
+        start = datetime(
+            next_monday.year, next_monday.month, next_monday.day, 0, 0, 0, tzinfo=tz
+        )
+        end = start + timedelta(days=6, hours=23, minutes=59, seconds=59)
+        return ParsedDateRange(start=start, end=end, description="next week")
+
+    # 3. Check for "this week" / "diese woche"
+    if re.search(r"\b(this\s+week|diese\s+woche)\b", text_lower):
+        # Start from today, end on Sunday
+        days_until_sunday = 6 - now.weekday()
+        start = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=tz)
+        end_date = now + timedelta(days=days_until_sunday)
+        end = datetime(
+            end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=tz
+        )
+        return ParsedDateRange(start=start, end=end, description="this week")
+
+    # 4. Check for relative days (today, tomorrow, etc.)
+    relative = _find_relative_day(text)
+    if relative:
+        keyword, offset = relative
+        target_date = now + timedelta(days=offset)
+        start = datetime(
+            target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=tz
+        )
+        end = datetime(
+            target_date.year, target_date.month, target_date.day, 23, 59, 59, tzinfo=tz
+        )
+        return ParsedDateRange(start=start, end=end, description=keyword)
+
+    # 5. Check for weekday (friday, montag, etc.)
+    weekday_result = _find_weekday(text)
+    if weekday_result:
+        match_str, dateutil_weekday = weekday_result
+        next_day = now + relativedelta(weekday=dateutil_weekday)
+        start = datetime(
+            next_day.year, next_day.month, next_day.day, 0, 0, 0, tzinfo=tz
+        )
+        end = datetime(
+            next_day.year, next_day.month, next_day.day, 23, 59, 59, tzinfo=tz
+        )
+        return ParsedDateRange(start=start, end=end, description=match_str)
+
+    # 6. Check for month name only (e.g., "december", "dezember")
+    for month_name, month_num in MONTH_MAP.items():
+        if re.search(rf"\b{re.escape(month_name)}\b", text_lower):
+            # Check if there's also a day number
+            day_match = re.search(r"\b(\d{1,2})\b", text_lower)
+            if day_match:
+                day = int(day_match.group(1))
+                if 1 <= day <= 31:
+                    year = now.year
+                    # If the month is in the past, assume next year
+                    if month_num < now.month or (
+                        month_num == now.month and day < now.day
+                    ):
+                        year += 1
+                    try:
+                        start = datetime(year, month_num, day, 0, 0, 0, tzinfo=tz)
+                        end = datetime(year, month_num, day, 23, 59, 59, tzinfo=tz)
+                        return ParsedDateRange(
+                            start=start,
+                            end=end,
+                            description=f"{day}. {month_name.capitalize()} {year}",
+                        )
+                    except ValueError:
+                        pass  # Invalid date, continue
+            else:
+                # Just the month - show entire month
+                year = now.year
+                if month_num < now.month:
+                    year += 1
+                start = datetime(year, month_num, 1, 0, 0, 0, tzinfo=tz)
+                # End of month
+                if month_num == 12:
+                    end = datetime(year + 1, 1, 1, tzinfo=tz) - timedelta(seconds=1)
+                else:
+                    end = datetime(year, month_num + 1, 1, tzinfo=tz) - timedelta(
+                        seconds=1
+                    )
+                return ParsedDateRange(
+                    start=start,
+                    end=end,
+                    description=f"{month_name.capitalize()} {year}",
+                )
+
+    # 7. Try dateutil for other formats (e.g., "11 december", "2026-01-16")
+    try:
+        parsed = dateutil_parser.parse(text, fuzzy=True, dayfirst=True)
+        start = datetime(parsed.year, parsed.month, parsed.day, 0, 0, 0, tzinfo=tz)
+        end = datetime(parsed.year, parsed.month, parsed.day, 23, 59, 59, tzinfo=tz)
+        return ParsedDateRange(
+            start=start,
+            end=end,
+            description=start.strftime("%A, %B %d, %Y"),
+        )
+    except (ValueError, TypeError):
+        pass
+
+    # 8. Default: show today
+    start = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=tz)
+    end = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=tz)
+    return ParsedDateRange(start=start, end=end, description="today")
+
+
 def parse_attendees(text: str, separator: str = "with") -> tuple[str, list[str]]:
     """Extract attendee list from text.
 

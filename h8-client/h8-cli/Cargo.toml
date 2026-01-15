@@ -20,6 +20,7 @@ env_logger = "0.11.5"
 libc = "0.2.169"
 log.workspace = true
 owo-colors = { version = "4", features = ["supports-colors"] }
+regex = "1"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

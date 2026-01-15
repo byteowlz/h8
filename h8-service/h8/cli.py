@@ -14,7 +14,7 @@ from . import contacts
 from . import free
 from . import people
 from .config import resolve_person_alias, get_config
-from .dateparser import parse_datetime, parse_attendees
+from .dateparser import parse_datetime, parse_attendees, parse_date_range
 from .schemas import extracted_event_to_h8, extracted_contact_to_h8
 
 
@@ -100,6 +100,35 @@ def cmd_calendar_list(args):
         from_date=args.from_date,
         to_date=args.to_date,
     )
+    output(events, args.json)
+
+
+def cmd_calendar_show(args):
+    """Show calendar events with natural language date expressions."""
+    config = get_config()
+    timezone = config.get("timezone", "Europe/Berlin")
+
+    # Combine all positional args into the input text
+    input_text = " ".join(args.when) if args.when else "today"
+
+    # Parse the date range
+    date_range = parse_date_range(input_text, timezone=timezone)
+
+    account = get_account(args.account)
+    events = calendar.list_events(
+        account,
+        from_date=date_range.start.strftime("%Y-%m-%d"),
+        to_date=date_range.end.strftime("%Y-%m-%d"),
+    )
+
+    if not args.json:
+        # Print header with date range description
+        print(f"Events for {date_range.description}:")
+        print(
+            f"({date_range.start.strftime('%Y-%m-%d')} to {date_range.end.strftime('%Y-%m-%d')})"
+        )
+        print()
+
     output(events, args.json)
 
 
@@ -439,6 +468,19 @@ def main():
         help="Event location",
     )
     cal_add.set_defaults(func=cmd_calendar_add)
+
+    # calendar show (human-friendly date expressions)
+    cal_show = cal_subparsers.add_parser(
+        "show",
+        help="Show events with natural language dates (e.g., 'next week', 'friday', 'kw30')",
+    )
+    add_common_args(cal_show)
+    cal_show.add_argument(
+        "when",
+        nargs="*",
+        help="Date expression (e.g., today, tomorrow, friday, next week, kw30, 11 dezember)",
+    )
+    cal_show.set_defaults(func=cmd_calendar_show)
 
     # calendar delete
     cal_delete = cal_subparsers.add_parser(
