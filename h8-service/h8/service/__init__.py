@@ -473,6 +473,23 @@ async def calendar_delete(
     return await safe_call_with_retry(calendar.delete_event, email, acct, item_id)
 
 
+@app.get("/calendar/search")
+async def calendar_search(
+    q: str,
+    days: int = 90,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    limit: int = 50,
+    account: Optional[str] = None,
+):
+    """Search calendar events by subject, location, or body content."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        calendar.search_events, email, acct, q, days, from_date, to_date, limit
+    )
+
+
 @app.get("/mail")
 async def mail_list(
     folder: str = "inbox",
@@ -489,6 +506,27 @@ async def mail_list(
             safe_call_with_retry, mail.list_messages, email, acct, folder, limit, unread
         ),
         email,
+    )
+
+
+@app.get("/mail/search")
+async def mail_search(
+    q: str,
+    folder: str = "inbox",
+    limit: int = 50,
+    account: Optional[str] = None,
+):
+    """Search messages by subject, sender, or body content.
+
+    Supports:
+    - Simple text: "meeting notes"
+    - Field-specific: "subject:meeting" or "from:john@example.com"
+    - Boolean: "meeting AND notes"
+    """
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        mail.search_messages, email, acct, q, folder, limit
     )
 
 

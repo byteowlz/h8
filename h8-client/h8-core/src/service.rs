@@ -76,6 +76,38 @@ impl ServiceClient {
         self.delete(&url)
     }
 
+    /// Search calendar events.
+    pub fn calendar_search(
+        &self,
+        account: &str,
+        query: &str,
+        days: i64,
+        from_date: Option<&str>,
+        to_date: Option<&str>,
+        limit: i64,
+    ) -> Result<Value> {
+        let days_str = days.to_string();
+        let limit_str = limit.to_string();
+        let from_date_owned = from_date.map(|s| s.to_string());
+        let to_date_owned = to_date.map(|s| s.to_string());
+
+        let mut params: Vec<(&str, &str)> = vec![
+            ("account", account),
+            ("q", query),
+            ("days", &days_str),
+            ("limit", &limit_str),
+        ];
+
+        if let Some(ref f) = from_date_owned {
+            params.push(("from_date", f));
+        }
+        if let Some(ref t) = to_date_owned {
+            params.push(("to_date", t));
+        }
+
+        self.get("/calendar/search", &params)
+    }
+
     /// List mail messages.
     pub fn mail_list(
         &self,
@@ -99,6 +131,24 @@ impl ServiceClient {
     pub fn mail_get(&self, account: &str, folder: &str, id: &str) -> Result<Value> {
         let params = [("account", account), ("folder", folder)];
         self.get(&format!("/mail/{}", id), &params)
+    }
+
+    /// Search mail messages.
+    pub fn mail_search(
+        &self,
+        account: &str,
+        query: &str,
+        folder: &str,
+        limit: i64,
+    ) -> Result<Value> {
+        let limit_str = limit.to_string();
+        let params = [
+            ("account", account),
+            ("q", query),
+            ("folder", folder),
+            ("limit", &limit_str),
+        ];
+        self.get("/mail/search", &params)
     }
 
     /// Batch fetch multiple messages by ID.

@@ -569,6 +569,76 @@ def batch_get_messages(
         return results
 
 
+def search_messages(
+    account: Account,
+    query: str,
+    folder: str = "inbox",
+    limit: int = 50,
+) -> list[dict]:
+    """Search messages by subject, sender, or body content.
+
+    Uses EWS QueryString search which supports:
+    - Simple text search: "meeting notes"
+    - Field-specific: "subject:meeting" or "from:john@example.com"
+    - Boolean: "meeting AND notes"
+
+    Args:
+        account: EWS account
+        query: Search query string
+        folder: Folder to search in (default: inbox)
+        limit: Maximum number of results to return
+
+    Returns:
+        List of matching message dictionaries
+    """
+    from exchangelib.queryset import QuerySet
+
+    mail_folder = get_folder(account, folder)
+
+    # Use EWS QueryString search - this searches subject, body, sender, etc.
+    # QueryString is the most flexible search option in EWS
+    try:
+        search_query = mail_folder.filter(query_string=query)
+    except Exception:
+        # Fall back to subject-only search if QueryString fails
+        search_query = mail_folder.filter(subject__icontains=query)
+
+    results = search_query.order_by("-datetime_received").only(
+        "id",
+        "changekey",
+        "subject",
+        "sender",
+        "to_recipients",
+        "cc_recipients",
+        "datetime_received",
+        "is_read",
+        "has_attachments",
+    )[:limit]
+
+    messages = []
+    for item in results:
+        if not hasattr(item, "subject"):
+            continue
+
+        messages.append(
+            {
+                "id": item.id,
+                "changekey": item.changekey,
+                "subject": item.subject,
+                "from": item.sender.email_address if item.sender else None,
+                "to": [r.email_address for r in (item.to_recipients or [])],
+                "cc": [r.email_address for r in (item.cc_recipients or [])],
+                "datetime_received": item.datetime_received.isoformat()
+                if item.datetime_received
+                else None,
+                "is_read": item.is_read,
+                "has_attachments": item.has_attachments,
+            }
+        )
+
+    return messages
+
+
 def download_attachment(
     account: Account,
     item_id: str,

@@ -159,6 +159,8 @@ enum CalendarCommand {
     Show(CalendarShowArgs),
     /// Add event with natural language (e.g., 'friday 2pm "Meeting" with alice')
     Add(CalendarAddArgs),
+    /// Search events by subject, location, or body
+    Search(CalendarSearchArgs),
     Create(CalendarCreateArgs),
     Delete(CalendarDeleteArgs),
 }
@@ -203,6 +205,25 @@ struct CalendarCreateArgs {
 }
 
 #[derive(Debug, Args)]
+struct CalendarSearchArgs {
+    /// Search query (matches subject, location, body)
+    #[arg(required = true)]
+    query: String,
+    /// Number of days to search (default: 90)
+    #[arg(short = 'd', long, default_value_t = 90)]
+    days: i64,
+    /// Start date (ISO format, e.g., 2026-01-01)
+    #[arg(long = "from")]
+    from_date: Option<String>,
+    /// End date (ISO format)
+    #[arg(long = "to")]
+    to_date: Option<String>,
+    /// Maximum results to return
+    #[arg(short = 'n', long, default_value_t = 50)]
+    limit: i64,
+}
+
+#[derive(Debug, Args)]
 struct CalendarDeleteArgs {
     #[arg(long)]
     id: String,
@@ -215,6 +236,8 @@ enum MailCommand {
     /// List messages in a folder
     #[command(alias = "ls")]
     List(MailListArgs),
+    /// Search messages by subject, sender, or body
+    Search(MailSearchArgs),
     /// Get a message by ID
     Get(MailGetArgs),
     /// Read a message (view in pager)
@@ -250,12 +273,28 @@ enum MailCommand {
 
 #[derive(Debug, Args)]
 struct MailListArgs {
+    /// Date filter (e.g., today, yesterday, 2025/02/01, feb 11, dec 8 2024)
+    #[arg(num_args = 0..)]
+    when: Vec<String>,
     #[arg(short = 'f', long, default_value = "inbox")]
     folder: String,
     #[arg(short = 'l', long, default_value_t = 20)]
     limit: usize,
     #[arg(short = 'u', long)]
     unread: bool,
+}
+
+#[derive(Debug, Args)]
+struct MailSearchArgs {
+    /// Search query (subject, sender, body)
+    #[arg(required = true)]
+    query: String,
+    /// Folder to search in
+    #[arg(short = 'f', long, default_value = "inbox")]
+    folder: String,
+    /// Maximum results to return
+    #[arg(short = 'n', long, default_value_t = 50)]
+    limit: i64,
 }
 
 #[derive(Debug, Args)]
@@ -459,9 +498,10 @@ struct MailMoveArgs {
 
 #[derive(Debug, Args)]
 struct MailDeleteArgs {
-    /// Message ID to delete
-    id: String,
-    /// Folder containing the message
+    /// Message ID(s) to delete
+    #[arg(required = true, num_args = 1..)]
+    ids: Vec<String>,
+    /// Folder containing the message(s)
     #[arg(short = 'f', long, default_value = "inbox")]
     folder: String,
     /// Permanently delete (skip trash)
@@ -786,6 +826,28 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             }
 
             emit_output(&ctx.common, &result)?;
+        }
+        CalendarCommand::Search(args) => {
+            let events = client
+                .calendar_search(
+                    &account,
+                    &args.query,
+                    args.days,
+                    args.from_date.as_deref(),
+                    args.to_date.as_deref(),
+                    args.limit,
+                )
+                .map_err(|e| anyhow!("{e}"))?;
+
+            // Sync events to local DB and assign word IDs
+            let events_with_ids = sync_calendar_events(ctx, &account, &events)?;
+
+            if !ctx.common.json && !ctx.common.yaml {
+                let count = events_with_ids.as_array().map(|a| a.len()).unwrap_or(0);
+                println!("Found {} event(s) matching \"{}\":\n", count, args.query);
+            }
+
+            emit_output(&ctx.common, &events_with_ids)?;
         }
         CalendarCommand::Show(args) => {
             let when_text = if args.when.is_empty() {
@@ -1177,6 +1239,7 @@ fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
 
     match cmd {
         MailCommand::List(args) => handle_mail_list(ctx, &client, &account, args),
+        MailCommand::Search(args) => handle_mail_search(ctx, &client, &account, args),
         MailCommand::Get(args) => handle_mail_get(ctx, &client, &account, args),
         MailCommand::Read(args) => handle_mail_read(ctx, &account, args),
         MailCommand::Fetch(args) => handle_mail_fetch(ctx, &client, &account, args),
@@ -1252,6 +1315,28 @@ fn handle_mail_list(
         emit_output(&ctx.common, &messages)?;
     }
 
+    Ok(())
+}
+
+fn handle_mail_search(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    args: MailSearchArgs,
+) -> Result<()> {
+    let messages = client
+        .mail_search(account, &args.query, &args.folder, args.limit)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    if !ctx.common.json && !ctx.common.yaml {
+        let count = messages.as_array().map(|a| a.len()).unwrap_or(0);
+        println!(
+            "Found {} message(s) matching \"{}\" in {}:\n",
+            count, args.query, args.folder
+        );
+    }
+
+    emit_output(&ctx.common, &messages)?;
     Ok(())
 }
 
@@ -1616,23 +1701,59 @@ fn handle_mail_move(ctx: &RuntimeContext, account: &str, args: MailMoveArgs) -> 
 fn handle_mail_delete(ctx: &RuntimeContext, account: &str, args: MailDeleteArgs) -> Result<()> {
     let mail_dir = get_mail_dir(ctx, account)?;
 
-    if args.force {
-        // Permanently delete
-        let deleted = mail_dir
-            .delete(&args.folder, &args.id)
-            .map_err(|e| anyhow!("{e}"))?;
-        if deleted {
-            println!("Deleted {}", args.id);
+    let mut deleted_count = 0;
+    let mut errors: Vec<String> = Vec::new();
+
+    for id in &args.ids {
+        if args.force {
+            // Permanently delete
+            match mail_dir.delete(&args.folder, id) {
+                Ok(true) => {
+                    if !ctx.common.quiet {
+                        println!("Deleted {}", id);
+                    }
+                    deleted_count += 1;
+                }
+                Ok(false) => {
+                    errors.push(format!("message not found: {}", id));
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", id, e));
+                }
+            }
         } else {
-            return Err(anyhow!("message not found: {}", args.id));
+            // Move to trash
+            match mail_dir.move_to(&args.folder, id, FOLDER_TRASH) {
+                Ok(Some(_)) => {
+                    if !ctx.common.quiet {
+                        println!("Moved {} to trash", id);
+                    }
+                    deleted_count += 1;
+                }
+                Ok(None) => {
+                    errors.push(format!("message not found: {}", id));
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", id, e));
+                }
+            }
         }
-    } else {
-        // Move to trash
-        mail_dir
-            .move_to(&args.folder, &args.id, FOLDER_TRASH)
-            .map_err(|e| anyhow!("{e}"))?
-            .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
-        println!("Moved {} to trash", args.id);
+    }
+
+    // Summary for multiple deletions
+    if args.ids.len() > 1 && !ctx.common.quiet {
+        let action = if args.force { "deleted" } else { "moved to trash" };
+        println!("\n{} of {} messages {}", deleted_count, args.ids.len(), action);
+    }
+
+    // Report errors
+    if !errors.is_empty() {
+        for err in &errors {
+            eprintln!("Error: {}", err);
+        }
+        if deleted_count == 0 {
+            return Err(anyhow!("no messages were deleted"));
+        }
     }
 
     Ok(())
