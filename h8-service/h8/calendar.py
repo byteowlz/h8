@@ -166,3 +166,114 @@ def delete_event(account: Account, item_id: str) -> dict:
 
     items[0].delete()
     return {"success": True, "id": item_id}
+
+
+def search_events(
+    account: Account,
+    query: str,
+    days: int = 90,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Search calendar events by subject, location, or body.
+
+    Args:
+        account: EWS account
+        query: Search string (case-insensitive substring match)
+        days: Number of days to search (default 90)
+        from_date: Optional start date (ISO format)
+        to_date: Optional end date (ISO format)
+        limit: Maximum number of results to return
+
+    Returns:
+        List of matching event dictionaries
+    """
+    tz = ZoneInfo("Europe/Berlin")
+
+    if from_date:
+        start_dt = datetime.fromisoformat(from_date).replace(tzinfo=tz)
+    else:
+        # Search from 30 days in the past by default
+        start_dt = datetime.now(tz=tz) - timedelta(days=30)
+
+    if to_date:
+        end_dt = datetime.fromisoformat(to_date).replace(tzinfo=tz)
+    else:
+        end_dt = start_dt + timedelta(days=days + 30)
+
+    start = EWSDateTime.from_datetime(start_dt)
+    end = EWSDateTime.from_datetime(end_dt)
+
+    # Use calendar view to get events in the date range
+    calendar: Any = account.calendar
+    view = calendar.view(start=start, end=end).only(
+        "id",
+        "changekey",
+        "subject",
+        "start",
+        "end",
+        "location",
+        "organizer",
+        "is_all_day",
+        "is_cancelled",
+        "is_online_meeting",
+        "body",
+    )
+
+    query_lower = query.lower()
+    events = []
+
+    for item in view:
+        if not hasattr(item, "start"):
+            continue
+
+        # Check if query matches subject, location, or body
+        subject = (item.subject or "").lower()
+        location = (item.location or "").lower()
+        body = (str(item.body) if item.body else "").lower()
+
+        if (
+            query_lower not in subject
+            and query_lower not in location
+            and query_lower not in body
+        ):
+            continue
+
+        # Handle all-day events (date vs datetime)
+        start_str = (
+            item.start.isoformat()
+            if hasattr(item.start, "isoformat")
+            else str(item.start)
+        )
+        end_str = (
+            item.end.isoformat() if hasattr(item.end, "isoformat") else str(item.end)
+        )
+
+        # Extract meeting URL if it's an online meeting
+        meeting_url = None
+        is_online = getattr(item, "is_online_meeting", False)
+        if is_online and item.body:
+            meeting_url = _extract_meeting_url(str(item.body))
+
+        event = {
+            "id": item.id,
+            "changekey": item.changekey,
+            "subject": item.subject,
+            "start": start_str,
+            "end": end_str,
+            "location": item.location,
+            "organizer": item.organizer.email_address if item.organizer else None,
+            "is_all_day": item.is_all_day,
+            "is_cancelled": item.is_cancelled,
+        }
+
+        if meeting_url:
+            event["meeting_url"] = meeting_url
+
+        events.append(event)
+
+        if len(events) >= limit:
+            break
+
+    return events
