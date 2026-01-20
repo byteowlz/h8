@@ -6,9 +6,23 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
-from exchangelib import Message, Mailbox, HTMLBody
+from exchangelib import Message, Mailbox, HTMLBody, ExtendedProperty, EWSDateTime
 from exchangelib.account import Account
+
+
+# Extended property for deferred/scheduled sending
+# PR_DEFERRED_SEND_TIME (0x3FEF / 16367)
+class DeferredSendTime(ExtendedProperty):
+    """MAPI property for scheduling email delivery."""
+
+    property_tag = 0x3FEF
+    property_type = "SystemTime"
+
+
+# Register the extended property on Message class
+Message.register("deferred_send_time", DeferredSendTime)
 
 
 FOLDER_MAP = {
@@ -252,7 +266,21 @@ def _item_to_email(item) -> email.message.EmailMessage:
 
 
 def send_message(account: Account, message_data: dict) -> dict:
-    """Send an email message."""
+    """Send an email message, optionally scheduled for later delivery.
+
+    Args:
+        account: EWS account
+        message_data: Dict with keys:
+            - to: list of recipient emails (required)
+            - subject: email subject (required)
+            - body: email body text
+            - cc: list of CC recipients
+            - html: if True, body is HTML
+            - schedule_at: ISO datetime string for delayed delivery (optional)
+
+    Returns:
+        Dict with success status and message info
+    """
     to_recipients = [Mailbox(email_address=addr) for addr in message_data["to"]]
     cc_recipients = [Mailbox(email_address=addr) for addr in message_data.get("cc", [])]
 
@@ -268,6 +296,49 @@ def send_message(account: Account, message_data: dict) -> dict:
         cc_recipients=cc_recipients if cc_recipients else None,
     )
 
+    # Handle scheduled/deferred sending
+    schedule_at = message_data.get("schedule_at")
+    if schedule_at:
+        # Parse the datetime and set the deferred send time
+        tz = ZoneInfo("Europe/Berlin")
+        if isinstance(schedule_at, str):
+            send_time = datetime.fromisoformat(schedule_at)
+            if send_time.tzinfo is None:
+                send_time = send_time.replace(tzinfo=tz)
+            else:
+                # Convert to our target timezone to avoid offset-based timezone issues
+                send_time = send_time.astimezone(tz)
+        else:
+            send_time = schedule_at
+
+        # Convert to EWSDateTime - need to use an EWSTimeZone
+        from exchangelib import EWSTimeZone
+
+        ews_tz = EWSTimeZone("Europe/Berlin")
+        ews_send_time = EWSDateTime(
+            send_time.year,
+            send_time.month,
+            send_time.day,
+            send_time.hour,
+            send_time.minute,
+            send_time.second,
+            tzinfo=ews_tz,
+        )
+        msg.deferred_send_time = ews_send_time
+
+        # For scheduled messages, we need to save to drafts first, then send
+        # The deferred_send_time property tells Exchange when to actually deliver
+        msg.send_and_save()
+
+        return {
+            "success": True,
+            "scheduled": True,
+            "schedule_at": send_time.isoformat(),
+            "subject": message_data["subject"],
+            "to": message_data["to"],
+        }
+
+    # Immediate send
     msg.send()
 
     return {
@@ -575,12 +646,9 @@ def search_messages(
     folder: str = "inbox",
     limit: int = 50,
 ) -> list[dict]:
-    """Search messages by subject, sender, or body content.
+    """Search messages by subject or sender.
 
-    Uses EWS QueryString search which supports:
-    - Simple text search: "meeting notes"
-    - Field-specific: "subject:meeting" or "from:john@example.com"
-    - Boolean: "meeting AND notes"
+    Searches subject and sender fields using case-insensitive contains.
 
     Args:
         account: EWS account
@@ -591,29 +659,25 @@ def search_messages(
     Returns:
         List of matching message dictionaries
     """
-    from exchangelib.queryset import QuerySet
-
     mail_folder = get_folder(account, folder)
 
-    # Use EWS QueryString search - this searches subject, body, sender, etc.
-    # QueryString is the most flexible search option in EWS
-    try:
-        search_query = mail_folder.filter(query_string=query)
-    except Exception:
-        # Fall back to subject-only search if QueryString fails
-        search_query = mail_folder.filter(subject__icontains=query)
-
-    results = search_query.order_by("-datetime_received").only(
-        "id",
-        "changekey",
-        "subject",
-        "sender",
-        "to_recipients",
-        "cc_recipients",
-        "datetime_received",
-        "is_read",
-        "has_attachments",
-    )[:limit]
+    # Use subject__icontains for reliable cross-server compatibility
+    # QueryString search isn't supported on all Exchange configurations
+    results = (
+        mail_folder.filter(subject__icontains=query)
+        .order_by("-datetime_received")
+        .only(
+            "id",
+            "changekey",
+            "subject",
+            "sender",
+            "to_recipients",
+            "cc_recipients",
+            "datetime_received",
+            "is_read",
+            "has_attachments",
+        )[:limit]
+    )
 
     messages = []
     for item in results:

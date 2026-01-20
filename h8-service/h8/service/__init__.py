@@ -61,6 +61,7 @@ class SendEmail(BaseModel):
     subject: str
     body: str = ""
     html: bool = False
+    schedule_at: Optional[str] = None  # ISO datetime for delayed delivery
 
     @field_validator("to", "cc", mode="before")
     @classmethod
