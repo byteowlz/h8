@@ -273,7 +273,7 @@ enum MailCommand {
 
 #[derive(Debug, Args)]
 struct MailListArgs {
-    /// Date filter (e.g., today, yesterday, 2025/02/01, feb 11, dec 8 2024)
+    /// Date filter (e.g., today, yesterday, monday, 2025/01/15, jan 15, dec 8 2024)
     #[arg(num_args = 0..)]
     when: Vec<String>,
     #[arg(short = 'f', long, default_value = "inbox")]
@@ -443,6 +443,9 @@ struct MailSendArgs {
     /// Send all drafts
     #[arg(long)]
     all: bool,
+    /// Schedule delivery (e.g., "tomorrow 9am", "friday 14:00", "2026-01-20 10:30")
+    #[arg(long, short = 's')]
+    schedule: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1233,6 +1236,303 @@ fn parse_date_range_expr(text: &str) -> (String, String, String) {
     )
 }
 
+/// Parse a natural language date expression and return a single date.
+///
+/// Supports formats like:
+/// - "today", "yesterday", "tomorrow"
+/// - "2025/02/01", "2025-02-01"
+/// - "feb 11", "dec 8 2024", "11 feb", "8 dec 2024"
+/// - Weekday names: "monday", "friday"
+///
+/// Returns (date_string, description) where date_string is YYYY-MM-DD format.
+fn parse_date_expr(text: &str) -> Option<(NaiveDate, String)> {
+    use chrono::{Datelike, Weekday};
+    use regex::Regex;
+
+    let now = Local::now();
+    let text_lower = text.to_lowercase().trim().to_string();
+
+    if text_lower.is_empty() {
+        return None;
+    }
+
+    // 1. Relative days
+    let relative_days: &[(&str, i64)] = &[
+        ("today", 0),
+        ("heute", 0),
+        ("yesterday", -1),
+        ("gestern", -1),
+    ];
+    for (keyword, offset) in relative_days {
+        if text_lower == *keyword {
+            let target = now.date_naive() + ChronoDuration::days(*offset);
+            return Some((target, (*keyword).to_string()));
+        }
+    }
+
+    // 2. Weekday names (returns next occurrence, or today if it matches)
+    let weekdays: &[(&str, Weekday)] = &[
+        ("monday", Weekday::Mon),
+        ("mon", Weekday::Mon),
+        ("montag", Weekday::Mon),
+        ("tuesday", Weekday::Tue),
+        ("tue", Weekday::Tue),
+        ("dienstag", Weekday::Tue),
+        ("wednesday", Weekday::Wed),
+        ("wed", Weekday::Wed),
+        ("mittwoch", Weekday::Wed),
+        ("thursday", Weekday::Thu),
+        ("thu", Weekday::Thu),
+        ("donnerstag", Weekday::Thu),
+        ("friday", Weekday::Fri),
+        ("fri", Weekday::Fri),
+        ("freitag", Weekday::Fri),
+        ("saturday", Weekday::Sat),
+        ("sat", Weekday::Sat),
+        ("samstag", Weekday::Sat),
+        ("sunday", Weekday::Sun),
+        ("sun", Weekday::Sun),
+        ("sonntag", Weekday::Sun),
+    ];
+    for (name, weekday) in weekdays {
+        if text_lower == *name {
+            let today = now.date_naive();
+            let today_weekday = today.weekday();
+            // Find the most recent occurrence (today or earlier this week, or last week)
+            let days_back = (today_weekday.num_days_from_monday() as i64
+                - weekday.num_days_from_monday() as i64
+                + 7)
+                % 7;
+            let target = today - ChronoDuration::days(days_back);
+            return Some((target, (*name).to_string()));
+        }
+    }
+
+    // 3. Slash date format: 2025/02/01
+    let slash_re = Regex::new(r"^(\d{4})/(\d{1,2})/(\d{1,2})$").unwrap();
+    if let Some(caps) = slash_re.captures(&text_lower) {
+        let year: i32 = caps.get(1).unwrap().as_str().parse().ok()?;
+        let month: u32 = caps.get(2).unwrap().as_str().parse().ok()?;
+        let day: u32 = caps.get(3).unwrap().as_str().parse().ok()?;
+        if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+            return Some((date, date.format("%B %d, %Y").to_string()));
+        }
+    }
+
+    // 4. ISO date format: 2025-02-01
+    if let Ok(date) = NaiveDate::parse_from_str(&text_lower, "%Y-%m-%d") {
+        return Some((date, date.format("%B %d, %Y").to_string()));
+    }
+
+    // 5. Month and day with optional year: "feb 11", "dec 8 2024", "11 feb", "8 dec 2024"
+    let months: &[(&str, u32)] = &[
+        ("january", 1), ("jan", 1), ("januar", 1),
+        ("february", 2), ("feb", 2), ("februar", 2),
+        ("march", 3), ("mar", 3), ("märz", 3), ("maerz", 3),
+        ("april", 4), ("apr", 4),
+        ("may", 5), ("mai", 5),
+        ("june", 6), ("jun", 6), ("juni", 6),
+        ("july", 7), ("jul", 7), ("juli", 7),
+        ("august", 8), ("aug", 8),
+        ("september", 9), ("sep", 9), ("sept", 9),
+        ("october", 10), ("oct", 10), ("okt", 10), ("oktober", 10),
+        ("november", 11), ("nov", 11),
+        ("december", 12), ("dec", 12), ("dez", 12), ("dezember", 12),
+    ];
+
+    for (month_name, month_num) in months {
+        if text_lower.contains(month_name) {
+            // Extract day and optional year
+            let day_year_re = Regex::new(r"(\d{1,2})(?:\s+(\d{4}))?").unwrap();
+            if let Some(caps) = day_year_re.captures(&text_lower) {
+                let day: u32 = caps.get(1).unwrap().as_str().parse().ok()?;
+                let year: i32 = if let Some(y) = caps.get(2) {
+                    y.as_str().parse().ok()?
+                } else {
+                    // Use current year, or previous year if the date is in the future
+                    let current_year = now.year();
+                    if *month_num > now.month()
+                        || (*month_num == now.month() && day > now.day())
+                    {
+                        current_year - 1
+                    } else {
+                        current_year
+                    }
+                };
+
+                if let Some(date) = NaiveDate::from_ymd_opt(year, *month_num, day) {
+                    return Some((date, date.format("%B %d, %Y").to_string()));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse a natural language datetime expression for scheduling.
+///
+/// Supports formats like:
+/// - "tomorrow 9am", "friday 14:00"
+/// - "2026-01-20 10:30", "2026/01/20 10:30"
+/// - "jan 20 9am", "20 jan 14:00"
+/// - Relative: "in 2 hours", "in 30 minutes"
+///
+/// Returns an ISO datetime string suitable for the schedule_at parameter.
+fn parse_schedule_datetime(text: &str) -> Result<String> {
+    use chrono::{Datelike, Weekday};
+    use chrono_tz::Europe::Berlin;
+    use regex::Regex;
+
+    let now = Local::now();
+    let text_lower = text.to_lowercase().trim().to_string();
+
+    // Default time if not specified
+    let mut hour = 9;
+    let mut minute = 0;
+    let mut date = now.date_naive();
+
+    // Extract time patterns first
+    // Pattern: "14:00", "9:30", "9am", "2pm", "14 uhr"
+    let time_24h_re = Regex::new(r"(\d{1,2}):(\d{2})").unwrap();
+    let time_ampm_re = Regex::new(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)").unwrap();
+    let time_uhr_re = Regex::new(r"(\d{1,2})\s*uhr").unwrap();
+
+    let mut remaining = text_lower.clone();
+
+    if let Some(caps) = time_24h_re.captures(&text_lower) {
+        hour = caps.get(1).unwrap().as_str().parse().unwrap_or(9);
+        minute = caps.get(2).unwrap().as_str().parse().unwrap_or(0);
+        remaining = time_24h_re.replace(&remaining, "").to_string();
+    } else if let Some(caps) = time_ampm_re.captures(&text_lower) {
+        hour = caps.get(1).unwrap().as_str().parse().unwrap_or(9);
+        minute = caps.get(2).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
+        let ampm = caps.get(3).unwrap().as_str();
+        if ampm == "pm" && hour != 12 {
+            hour += 12;
+        } else if ampm == "am" && hour == 12 {
+            hour = 0;
+        }
+        remaining = time_ampm_re.replace(&remaining, "").to_string();
+    } else if let Some(caps) = time_uhr_re.captures(&text_lower) {
+        hour = caps.get(1).unwrap().as_str().parse().unwrap_or(9);
+        remaining = time_uhr_re.replace(&remaining, "").to_string();
+    }
+
+    let remaining = remaining.trim();
+
+    // Check for "in X hours/minutes" pattern
+    let in_duration_re = Regex::new(r"in\s+(\d+)\s*(h|hr|hrs|hours?|m|min|mins|minutes?)").unwrap();
+    if let Some(caps) = in_duration_re.captures(remaining) {
+        let value: i64 = caps.get(1).unwrap().as_str().parse().unwrap_or(1);
+        let unit = caps.get(2).unwrap().as_str();
+        let duration = if unit.starts_with('h') {
+            ChronoDuration::hours(value)
+        } else {
+            ChronoDuration::minutes(value)
+        };
+        let scheduled = now + duration;
+        return Ok(scheduled.with_timezone(&Berlin).to_rfc3339());
+    }
+
+    // Relative days
+    let relative_days: &[(&str, i64)] = &[
+        ("today", 0),
+        ("heute", 0),
+        ("tomorrow", 1),
+        ("morgen", 1),
+    ];
+    for (keyword, offset) in relative_days {
+        if remaining.contains(keyword) {
+            date = now.date_naive() + ChronoDuration::days(*offset);
+            break;
+        }
+    }
+
+    // Weekday names (next occurrence)
+    let weekdays: &[(&str, Weekday)] = &[
+        ("monday", Weekday::Mon), ("mon", Weekday::Mon), ("montag", Weekday::Mon),
+        ("tuesday", Weekday::Tue), ("tue", Weekday::Tue), ("dienstag", Weekday::Tue),
+        ("wednesday", Weekday::Wed), ("wed", Weekday::Wed), ("mittwoch", Weekday::Wed),
+        ("thursday", Weekday::Thu), ("thu", Weekday::Thu), ("donnerstag", Weekday::Thu),
+        ("friday", Weekday::Fri), ("fri", Weekday::Fri), ("freitag", Weekday::Fri),
+        ("saturday", Weekday::Sat), ("sat", Weekday::Sat), ("samstag", Weekday::Sat),
+        ("sunday", Weekday::Sun), ("sun", Weekday::Sun), ("sonntag", Weekday::Sun),
+    ];
+    for (name, weekday) in weekdays {
+        if remaining.contains(name) {
+            let today = now.date_naive();
+            let today_weekday = today.weekday();
+            let mut days_ahead = (*weekday as i64 - today_weekday as i64 + 7) % 7;
+            if days_ahead == 0 {
+                days_ahead = 7; // Next week if today
+            }
+            date = today + ChronoDuration::days(days_ahead);
+            break;
+        }
+    }
+
+    // ISO date: 2026-01-20 or 2026/01/20
+    let iso_date_re = Regex::new(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})").unwrap();
+    if let Some(caps) = iso_date_re.captures(remaining) {
+        let year: i32 = caps.get(1).unwrap().as_str().parse().unwrap_or(now.year());
+        let month: u32 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
+        let day: u32 = caps.get(3).unwrap().as_str().parse().unwrap_or(1);
+        if let Some(d) = NaiveDate::from_ymd_opt(year, month, day) {
+            date = d;
+        }
+    }
+
+    // Month names: "jan 20", "20 jan", "jan 20 2026"
+    let months: &[(&str, u32)] = &[
+        ("january", 1), ("jan", 1), ("februar", 2), ("feb", 2),
+        ("march", 3), ("mar", 3), ("april", 4), ("apr", 4),
+        ("may", 5), ("mai", 5), ("june", 6), ("jun", 6),
+        ("july", 7), ("jul", 7), ("august", 8), ("aug", 8),
+        ("september", 9), ("sep", 9), ("october", 10), ("oct", 10),
+        ("november", 11), ("nov", 11), ("december", 12), ("dec", 12),
+    ];
+    for (month_name, month_num) in months {
+        if remaining.contains(month_name) {
+            let day_re = Regex::new(r"(\d{1,2})").unwrap();
+            let year_re = Regex::new(r"(\d{4})").unwrap();
+            let day: u32 = day_re.captures(remaining)
+                .and_then(|c| c.get(1).map(|m| m.as_str().parse().unwrap_or(1)))
+                .unwrap_or(1);
+            let year: i32 = year_re.captures(remaining)
+                .and_then(|c| c.get(1).map(|m| m.as_str().parse().unwrap_or(now.year())))
+                .unwrap_or_else(|| {
+                    // Use current or next year
+                    if *month_num < now.month() || (*month_num == now.month() && day < now.day()) {
+                        now.year() + 1
+                    } else {
+                        now.year()
+                    }
+                });
+            if let Some(d) = NaiveDate::from_ymd_opt(year, *month_num, day) {
+                date = d;
+            }
+            break;
+        }
+    }
+
+    // Build the final datetime
+    let scheduled = date.and_hms_opt(hour, minute, 0)
+        .ok_or_else(|| anyhow!("invalid time: {}:{}", hour, minute))?;
+
+    // Convert to timezone-aware
+    let scheduled_tz = Berlin.from_local_datetime(&scheduled)
+        .single()
+        .ok_or_else(|| anyhow!("ambiguous or invalid datetime"))?;
+
+    // Validate it's in the future
+    if scheduled_tz <= now.with_timezone(&Berlin) {
+        return Err(anyhow!("scheduled time must be in the future"));
+    }
+
+    Ok(scheduled_tz.to_rfc3339())
+}
+
 fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
     let account = effective_account(ctx);
     let client = ctx.service_client()?;
@@ -1263,6 +1563,23 @@ fn handle_mail_list(
     account: &str,
     args: MailListArgs,
 ) -> Result<()> {
+    // Parse date filter if provided
+    let date_filter = if !args.when.is_empty() {
+        let when_text = args.when.join(" ");
+        parse_date_expr(&when_text)
+    } else {
+        None
+    };
+
+    // Print date header if filtering
+    if let Some((filter_date, ref description)) = date_filter {
+        if !ctx.common.json && !ctx.common.yaml && !ctx.common.quiet {
+            println!("Messages from {}:\n", description);
+        }
+        // Use filter_date below
+        let _ = filter_date;
+    }
+
     // Try to list from local database first (sorted by date), fall back to server
     let db_path = ctx.paths.sync_db_path(account);
 
@@ -1271,9 +1588,14 @@ fn handle_mail_list(
         let mail_dir = get_mail_dir(ctx, account)?;
 
         // Get messages from database, already sorted by received_at DESC
-        // Request more than limit to account for filtering
+        // Request more than limit to account for filtering (more if date filtering)
+        let fetch_limit = if date_filter.is_some() {
+            args.limit * 10 // Fetch more when filtering by date
+        } else {
+            args.limit * 2
+        };
         let db_messages = db
-            .list_messages(&args.folder, args.limit * 2)
+            .list_messages(&args.folder, fetch_limit)
             .map_err(|e| anyhow!("{e}"))?;
 
         let mut output: Vec<serde_json::Value> = Vec::new();
@@ -1281,6 +1603,29 @@ fn handle_mail_list(
             // Filter unread if requested
             if args.unread && db_msg.is_read {
                 continue;
+            }
+
+            // Filter by date if requested
+            if let Some((filter_date, _)) = date_filter {
+                if let Some(ref received_at) = db_msg.received_at {
+                    // Parse the received_at timestamp and compare dates
+                    if let Ok(msg_dt) = DateTime::parse_from_rfc3339(received_at) {
+                        let msg_date = msg_dt.date_naive();
+                        if msg_date != filter_date {
+                            continue;
+                        }
+                    } else if let Ok(msg_dt) = NaiveDateTime::parse_from_str(received_at, "%Y-%m-%dT%H:%M:%S") {
+                        if msg_dt.date() != filter_date {
+                            continue;
+                        }
+                    } else {
+                        // Can't parse date, skip
+                        continue;
+                    }
+                } else {
+                    // No date, skip when filtering
+                    continue;
+                }
             }
 
             // Get flags from Maildir if available
@@ -1308,7 +1653,10 @@ fn handle_mail_list(
 
         emit_output(&ctx.common, &output)?;
     } else {
-        // Fall back to server
+        // Fall back to server (date filtering not supported for server-side)
+        if date_filter.is_some() {
+            return Err(anyhow!("Date filtering requires synced messages. Run 'h8 mail sync' first."));
+        }
         let messages = client
             .mail_list(account, &args.folder, args.limit, args.unread)
             .map_err(|e| anyhow!("{e}"))?;
@@ -1486,13 +1834,20 @@ fn handle_mail_send(
     account: &str,
     args: MailSendArgs,
 ) -> Result<()> {
+    // Parse schedule time if provided
+    let schedule_at = if let Some(ref schedule_str) = args.schedule {
+        Some(parse_schedule_datetime(schedule_str)?)
+    } else {
+        None
+    };
+
     if args.all {
         // Send all drafts
         let mail_dir = get_mail_dir(ctx, account)?;
         let drafts = mail_dir.list(FOLDER_DRAFTS).map_err(|e| anyhow!("{e}"))?;
 
         for draft in drafts {
-            send_draft(ctx, client, account, &mail_dir, &draft.id)?;
+            send_draft(ctx, client, account, &mail_dir, &draft.id, schedule_at.as_deref())?;
         }
         return Ok(());
     }
@@ -1500,10 +1855,13 @@ fn handle_mail_send(
     if let Some(id) = args.id {
         // Send specific draft
         let mail_dir = get_mail_dir(ctx, account)?;
-        send_draft(ctx, client, account, &mail_dir, &id)?;
+        send_draft(ctx, client, account, &mail_dir, &id, schedule_at.as_deref())?;
     } else {
         // Read from file/stdin
-        let payload = read_json_payload(args.file.as_ref())?;
+        let mut payload = read_json_payload(args.file.as_ref())?;
+        if let Some(ref schedule) = schedule_at {
+            payload["schedule_at"] = serde_json::Value::String(schedule.clone());
+        }
         let result = client
             .mail_send(account, payload)
             .map_err(|e| anyhow!("{e}"))?;
@@ -1519,6 +1877,7 @@ fn send_draft(
     account: &str,
     mail_dir: &Maildir,
     draft_id: &str,
+    schedule_at: Option<&str>,
 ) -> Result<()> {
     // Load draft from local storage
     let draft = mail_dir
@@ -1533,7 +1892,7 @@ fn send_draft(
     doc.validate().map_err(|e| anyhow!("{e}"))?;
 
     // Build send payload
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "to": doc.to,
         "cc": doc.cc,
         "bcc": doc.bcc,
@@ -1541,6 +1900,11 @@ fn send_draft(
         "body": doc.body,
         "html": false,
     });
+
+    // Add schedule time if provided
+    if let Some(schedule) = schedule_at {
+        payload["schedule_at"] = serde_json::Value::String(schedule.to_string());
+    }
 
     // Send via service
     let result = client
@@ -1552,7 +1916,11 @@ fn send_draft(
         .delete(FOLDER_DRAFTS, draft_id)
         .map_err(|e| anyhow!("{e}"))?;
 
-    println!("Sent: {}", draft_id);
+    if schedule_at.is_some() {
+        println!("Scheduled: {}", draft_id);
+    } else {
+        println!("Sent: {}", draft_id);
+    }
     emit_output(&ctx.common, &result)?;
 
     Ok(())
