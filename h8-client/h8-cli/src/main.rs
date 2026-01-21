@@ -435,7 +435,7 @@ impl From<FetchFormat> for h8_core::types::FetchFormat {
 
 #[derive(Debug, Args)]
 struct MailSendArgs {
-    /// Draft ID to send (if not provided, reads from file/stdin)
+    /// Draft ID to send (if not provided, uses --to/--subject/--body or reads from file/stdin)
     id: Option<String>,
     /// Read email from file instead of stdin
     #[arg(long)]
@@ -446,6 +446,26 @@ struct MailSendArgs {
     /// Schedule delivery (e.g., "tomorrow 9am", "friday 14:00", "2026-01-20 10:30")
     #[arg(long, short = 's')]
     schedule: Option<String>,
+
+    // Direct composition flags (for programmatic/agent use)
+    /// Recipient email address(es) - can be specified multiple times
+    #[arg(long, short = 't')]
+    to: Vec<String>,
+    /// CC recipient(s) - can be specified multiple times
+    #[arg(long, short = 'c')]
+    cc: Vec<String>,
+    /// BCC recipient(s) - can be specified multiple times
+    #[arg(long)]
+    bcc: Vec<String>,
+    /// Email subject
+    #[arg(long)]
+    subject: Option<String>,
+    /// Email body (use "-" to read from stdin)
+    #[arg(long, short = 'b')]
+    body: Option<String>,
+    /// Treat body as HTML
+    #[arg(long)]
+    html: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1856,8 +1876,47 @@ fn handle_mail_send(
         // Send specific draft
         let mail_dir = get_mail_dir(ctx, account)?;
         send_draft(ctx, client, account, &mail_dir, &id, schedule_at.as_deref())?;
-    } else {
-        // Read from file/stdin
+    } else if !args.to.is_empty() {
+        // Direct composition mode (for agents/programmatic use)
+        let subject = args.subject.unwrap_or_default();
+        let body = if args.body.as_deref() == Some("-") {
+            // Read body from stdin
+            let mut buf = String::new();
+            io::stdin().read_to_string(&mut buf)?;
+            buf
+        } else {
+            args.body.unwrap_or_default()
+        };
+
+        let mut payload = serde_json::json!({
+            "to": args.to,
+            "cc": args.cc,
+            "bcc": args.bcc,
+            "subject": subject,
+            "body": body,
+            "html": args.html,
+        });
+
+        if let Some(ref schedule) = schedule_at {
+            payload["schedule_at"] = serde_json::Value::String(schedule.clone());
+        }
+
+        let result = client
+            .mail_send(account, payload)
+            .map_err(|e| anyhow!("{e}"))?;
+
+        // User-friendly output
+        if !ctx.common.json && !ctx.common.yaml {
+            if schedule_at.is_some() {
+                println!("Scheduled: {}", subject);
+            } else {
+                println!("Sent: {}", subject);
+            }
+            println!("  To: {}", args.to.join(", "));
+        }
+        emit_output(&ctx.common, &result)?;
+    } else if args.file.is_some() {
+        // Read from file
         let mut payload = read_json_payload(args.file.as_ref())?;
         if let Some(ref schedule) = schedule_at {
             payload["schedule_at"] = serde_json::Value::String(schedule.clone());
@@ -1866,6 +1925,10 @@ fn handle_mail_send(
             .mail_send(account, payload)
             .map_err(|e| anyhow!("{e}"))?;
         emit_output(&ctx.common, &result)?;
+    } else {
+        return Err(anyhow!(
+            "No email to send. Use --to/--subject/--body, --file, or provide a draft ID."
+        ));
     }
 
     Ok(())
