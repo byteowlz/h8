@@ -161,6 +161,12 @@ enum CalendarCommand {
     Add(CalendarAddArgs),
     /// Search events by subject, location, or body
     Search(CalendarSearchArgs),
+    /// Send meeting invite to attendees
+    Invite(CalendarInviteArgs),
+    /// List pending meeting invites
+    Invites(CalendarInvitesArgs),
+    /// Respond to a meeting invite (accept/decline/tentative)
+    Rsvp(CalendarRsvpArgs),
     Create(CalendarCreateArgs),
     Delete(CalendarDeleteArgs),
 }
@@ -221,6 +227,68 @@ struct CalendarSearchArgs {
     /// Maximum results to return
     #[arg(short = 'n', long, default_value_t = 50)]
     limit: i64,
+}
+
+#[derive(Debug, Args)]
+struct CalendarInviteArgs {
+    /// Meeting subject
+    #[arg(long, short = 's')]
+    subject: String,
+    /// Start time (ISO format, e.g., 2026-01-22T14:00:00)
+    #[arg(long)]
+    start: String,
+    /// End time (ISO format)
+    #[arg(long)]
+    end: String,
+    /// Required attendee email(s) - can be specified multiple times
+    #[arg(long, short = 't')]
+    to: Vec<String>,
+    /// Optional attendee email(s) - can be specified multiple times
+    #[arg(long, short = 'o')]
+    optional: Vec<String>,
+    /// Meeting location
+    #[arg(long, short = 'l')]
+    location: Option<String>,
+    /// Meeting body/description
+    #[arg(long, short = 'b')]
+    body: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct CalendarInvitesArgs {
+    /// Maximum results to return
+    #[arg(short = 'n', long, default_value_t = 50)]
+    limit: usize,
+}
+
+#[derive(Debug, Args)]
+struct CalendarRsvpArgs {
+    /// Meeting invite ID
+    id: String,
+    /// Response: accept, decline, or tentative
+    #[arg(value_enum)]
+    response: RsvpResponse,
+    /// Optional message to include with response
+    #[arg(long, short = 'm')]
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RsvpResponse {
+    Accept,
+    Decline,
+    Tentative,
+    Maybe,
+}
+
+impl RsvpResponse {
+    fn as_str(&self) -> &'static str {
+        match self {
+            RsvpResponse::Accept => "accept",
+            RsvpResponse::Decline => "decline",
+            RsvpResponse::Tentative | RsvpResponse::Maybe => "tentative",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -923,6 +991,60 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             } else if let Some(e) = events_with_ids.as_array().and_then(|a| a.first()) {
                 emit_output(&ctx.common, e)?;
             }
+        }
+        CalendarCommand::Invite(args) => {
+            let payload = serde_json::json!({
+                "subject": args.subject,
+                "start": args.start,
+                "end": args.end,
+                "required_attendees": args.to,
+                "optional_attendees": args.optional,
+                "location": args.location,
+                "body": args.body,
+            });
+
+            let result = client
+                .calendar_invite(&account, payload)
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if !ctx.common.json && !ctx.common.yaml {
+                println!("Meeting invite sent: {}", args.subject);
+                println!("  When: {} - {}", args.start, args.end);
+                if !args.to.is_empty() {
+                    println!("  To: {}", args.to.join(", "));
+                }
+                if !args.optional.is_empty() {
+                    println!("  Optional: {}", args.optional.join(", "));
+                }
+            }
+            emit_output(&ctx.common, &result)?;
+        }
+        CalendarCommand::Invites(args) => {
+            let invites = client
+                .calendar_invites(&account, args.limit)
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if !ctx.common.json && !ctx.common.yaml {
+                let count = invites.as_array().map(|a| a.len()).unwrap_or(0);
+                if count == 0 {
+                    println!("No pending meeting invites.");
+                } else {
+                    println!("Pending meeting invites ({}):\n", count);
+                }
+            }
+
+            emit_output(&ctx.common, &invites)?;
+        }
+        CalendarCommand::Rsvp(args) => {
+            let result = client
+                .calendar_rsvp(&account, &args.id, args.response.as_str(), args.message.as_deref())
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if !ctx.common.json && !ctx.common.yaml {
+                let subject = result.get("subject").and_then(|v| v.as_str()).unwrap_or("Meeting");
+                println!("Responded '{}' to: {}", args.response.as_str(), subject);
+            }
+            emit_output(&ctx.common, &result)?;
         }
     }
     Ok(())

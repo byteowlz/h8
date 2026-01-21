@@ -55,6 +55,39 @@ class CalendarCreate(BaseModel):
     body: Optional[str] = None
 
 
+class CalendarInvite(BaseModel):
+    """Request model for sending meeting invites."""
+
+    subject: str
+    start: str
+    end: str
+    location: Optional[str] = None
+    body: Optional[str] = None
+    attendees: List[str] = Field(default_factory=list)
+    required_attendees: List[str] = Field(default_factory=list)
+    optional_attendees: List[str] = Field(default_factory=list)
+
+    @field_validator(
+        "attendees", "required_attendees", "optional_attendees", mode="before"
+    )
+    @classmethod
+    def _coerce_list(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v]
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        raise ValueError("must be a string or list of strings")
+
+
+class CalendarRsvp(BaseModel):
+    """Request model for responding to meeting invites."""
+
+    response: str  # accept, decline, tentative
+    message: Optional[str] = None
+
+
 class SendEmail(BaseModel):
     to: list[str]
     cc: list[str] = Field(default_factory=list)
@@ -488,6 +521,39 @@ async def calendar_search(
     acct = auth.get_account(email)
     return await safe_call_with_retry(
         calendar.search_events, email, acct, q, days, from_date, to_date, limit
+    )
+
+
+@app.post("/calendar/invite")
+async def calendar_invite(payload: CalendarInvite, account: Optional[str] = None):
+    """Create a calendar event and send meeting invites to attendees."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        calendar.invite_event, email, acct, payload.model_dump()
+    )
+
+
+@app.get("/calendar/invites")
+async def calendar_invites(
+    limit: int = 50,
+    account: Optional[str] = None,
+):
+    """List pending meeting invites from inbox."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(calendar.list_invites, email, acct, limit)
+
+
+@app.post("/calendar/{item_id}/rsvp")
+async def calendar_rsvp(
+    item_id: str, payload: CalendarRsvp, account: Optional[str] = None
+):
+    """Respond to a meeting invite (accept/decline/tentative)."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        calendar.rsvp_event, email, acct, item_id, payload.response, payload.message
     )
 
 
