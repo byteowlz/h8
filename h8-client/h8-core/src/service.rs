@@ -376,6 +376,36 @@ impl ServiceClient {
         self.post_json(&format!("/calendar/parse?account={}", account), payload)
     }
 
+    /// Create a calendar event and send meeting invites to attendees.
+    pub fn calendar_invite(&self, account: &str, payload: Value) -> Result<Value> {
+        self.post_json(&format!("/calendar/invite?account={}", account), payload)
+    }
+
+    /// List pending meeting invites from inbox.
+    pub fn calendar_invites(&self, account: &str, limit: usize) -> Result<Value> {
+        let limit_str = limit.to_string();
+        let params = [("account", account), ("limit", &limit_str)];
+        self.get("/calendar/invites", &params)
+    }
+
+    /// Respond to a meeting invite (accept/decline/tentative).
+    pub fn calendar_rsvp(
+        &self,
+        account: &str,
+        item_id: &str,
+        response: &str,
+        message: Option<&str>,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "response": response,
+            "message": message,
+        });
+        self.post_json(
+            &format!("/calendar/{}/rsvp?account={}", item_id, account),
+            payload,
+        )
+    }
+
     // Internal HTTP methods
 
     fn get(&self, path: &str, params: &[(&str, &str)]) -> Result<Value> {
