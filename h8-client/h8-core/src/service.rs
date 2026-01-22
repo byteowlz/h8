@@ -232,6 +232,59 @@ impl ServiceClient {
         )
     }
 
+    /// Delete a message (move to trash or permanently delete).
+    pub fn mail_delete(
+        &self,
+        account: &str,
+        folder: &str,
+        id: &str,
+        permanent: bool,
+    ) -> Result<Value> {
+        self.delete(&format!(
+            "/mail/{}?account={}&folder={}&permanent={}",
+            id, account, folder, permanent
+        ))
+    }
+
+    /// Move a message to another folder.
+    pub fn mail_move(
+        &self,
+        account: &str,
+        folder: &str,
+        id: &str,
+        target_folder: &str,
+        create_folder: bool,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "target_folder": target_folder,
+            "create_folder": create_folder,
+        });
+        self.post_json(
+            &format!("/mail/{}/move?account={}&folder={}", id, account, folder),
+            payload,
+        )
+    }
+
+    /// Empty a folder by permanently deleting all items.
+    pub fn mail_empty_folder(&self, account: &str, folder: &str) -> Result<Value> {
+        self.delete(&format!("/mail/folder/{}?account={}", folder, account))
+    }
+
+    /// Mark a message as spam or not spam.
+    pub fn mail_mark_spam(
+        &self,
+        account: &str,
+        id: &str,
+        is_spam: bool,
+        move_item: bool,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "is_spam": is_spam,
+            "move": move_item,
+        });
+        self.post_json(&format!("/mail/{}/spam?account={}", id, account), payload)
+    }
+
     /// List contacts.
     pub fn contacts_list(
         &self,

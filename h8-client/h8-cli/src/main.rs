@@ -337,6 +337,11 @@ enum MailCommand {
     /// List or download attachments
     #[command(alias = "att")]
     Attachments(MailAttachmentsArgs),
+    /// Empty a folder (permanently delete all items)
+    #[command(alias = "empty")]
+    EmptyFolder(MailEmptyFolderArgs),
+    /// Mark message(s) as spam/junk
+    Spam(MailSpamArgs),
 }
 
 #[derive(Debug, Args)]
@@ -578,18 +583,26 @@ struct MailForwardArgs {
 
 #[derive(Debug, Args)]
 struct MailMoveArgs {
-    /// Message ID to move
-    id: String,
-    /// Destination folder
-    dest: String,
+    /// Message ID(s) to move (space or comma separated)
+    #[arg(required = true, num_args = 1..)]
+    ids: Vec<String>,
+    /// Target folder (use --to or natural "to" keyword)
+    #[arg(short = 't', long = "to")]
+    target: Option<String>,
     /// Source folder
     #[arg(short = 'f', long, default_value = "inbox")]
     folder: String,
+    /// Create target folder if it doesn't exist
+    #[arg(short = 'c', long)]
+    create: bool,
+    /// Sync move to server (default: true)
+    #[arg(long, default_value_t = true)]
+    sync: bool,
 }
 
 #[derive(Debug, Args)]
 struct MailDeleteArgs {
-    /// Message ID(s) to delete
+    /// Message ID(s) to delete (space or comma separated)
     #[arg(required = true, num_args = 1..)]
     ids: Vec<String>,
     /// Folder containing the message(s)
@@ -598,6 +611,9 @@ struct MailDeleteArgs {
     /// Permanently delete (skip trash)
     #[arg(long)]
     force: bool,
+    /// Sync deletion to server (default: true)
+    #[arg(long, default_value_t = true)]
+    sync: bool,
 }
 
 #[derive(Debug, Args)]
@@ -659,6 +675,29 @@ struct MailAttachmentsArgs {
     /// Output path (directory or file)
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct MailEmptyFolderArgs {
+    /// Folder to empty (default: trash)
+    #[arg(default_value = "trash")]
+    folder: String,
+    /// Skip confirmation prompt
+    #[arg(short = 'y', long)]
+    yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct MailSpamArgs {
+    /// Message ID(s) to mark as spam (space or comma separated)
+    #[arg(required = true, num_args = 1..)]
+    ids: Vec<String>,
+    /// Mark as NOT spam (move to inbox instead)
+    #[arg(long)]
+    not_spam: bool,
+    /// Only mark, don't move to junk/inbox folder
+    #[arg(long)]
+    no_move: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1696,6 +1735,8 @@ fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
         MailCommand::Edit(args) => handle_mail_edit(ctx, &account, args),
         MailCommand::Sync(args) => handle_mail_sync(ctx, &client, &account, args),
         MailCommand::Attachments(args) => handle_mail_attachments(ctx, &client, &account, args),
+        MailCommand::EmptyFolder(args) => handle_mail_empty_folder(ctx, &client, &account, args),
+        MailCommand::Spam(args) => handle_mail_spam(ctx, &client, &account, args),
     }
 }
 
@@ -2239,52 +2280,229 @@ fn handle_mail_forward(
     open_editor_and_save_draft(ctx, account, doc, true, true)
 }
 
+/// Parse message IDs from command args, handling comma-separated values.
+/// e.g., ["id1", "id2,id3", "id4"] -> ["id1", "id2", "id3", "id4"]
+fn parse_message_ids(ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .flat_map(|s| s.split(','))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Parse move args to extract target folder from positional args or --to flag.
+/// Supports: "h8 mail move id1 id2 --to folder" or "h8 mail move id1 id2 to folder"
+fn parse_move_args(args: &MailMoveArgs) -> Result<(Vec<String>, String)> {
+    let all_args = parse_message_ids(&args.ids);
+
+    // If --to is provided, use it
+    if let Some(ref target) = args.target {
+        return Ok((all_args, target.clone()));
+    }
+
+    // Otherwise, look for natural "to" keyword in positional args
+    let mut ids = Vec::new();
+    let mut target: Option<String> = None;
+    let mut found_to = false;
+
+    for arg in all_args {
+        if found_to {
+            // Everything after "to" is the target folder
+            if target.is_some() {
+                return Err(anyhow!("multiple target folders specified"));
+            }
+            target = Some(arg);
+        } else if arg.eq_ignore_ascii_case("to") {
+            found_to = true;
+        } else {
+            ids.push(arg);
+        }
+    }
+
+    match target {
+        Some(t) => Ok((ids, t)),
+        None => Err(anyhow!(
+            "target folder required: use --to <folder> or 'to <folder>'"
+        )),
+    }
+}
+
 fn handle_mail_move(ctx: &RuntimeContext, account: &str, args: MailMoveArgs) -> Result<()> {
+    let (ids, target) = parse_move_args(&args)?;
+
+    if ids.is_empty() {
+        return Err(anyhow!("no message IDs provided"));
+    }
+
     let mail_dir = get_mail_dir(ctx, account)?;
+    let db_path = ctx.paths.sync_db_path(account);
+    let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+    let service = ctx.service_client()?;
 
-    mail_dir
-        .move_to(&args.folder, &args.id, &args.dest)
-        .map_err(|e| anyhow!("{e}"))?
-        .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
+    let mut moved_count = 0;
+    let mut errors: Vec<String> = Vec::new();
 
-    println!("Moved {} to {}", args.id, args.dest);
+    for id in &ids {
+        // Get remote_id for server sync
+        let remote_id = db
+            .get_message(id)
+            .ok()
+            .flatten()
+            .map(|m| m.remote_id.clone());
+
+        // Sync to server first if enabled and we have remote_id
+        if args.sync {
+            if let Some(ref rid) = remote_id {
+                match service.mail_move(account, &args.folder, rid, &target, args.create) {
+                    Ok(resp) => {
+                        if resp.get("success").and_then(|v| v.as_bool()) != Some(true) {
+                            let err = resp
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown error");
+                            errors.push(format!("{}: server error: {}", id, err));
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("{}: server sync failed: {}", id, e));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Move locally
+        match mail_dir.move_to(&args.folder, id, &target) {
+            Ok(Some(_)) => {
+                // Update database folder
+                if let Some(mut msg) = db.get_message(id).ok().flatten() {
+                    msg.folder = target.clone();
+                    let _ = db.upsert_message(&msg);
+                }
+                if !ctx.common.quiet {
+                    println!("Moved {} to {}", id, target);
+                }
+                moved_count += 1;
+            }
+            Ok(None) => {
+                errors.push(format!("message not found locally: {}", id));
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", id, e));
+            }
+        }
+    }
+
+    // Summary for multiple moves
+    if ids.len() > 1 && !ctx.common.quiet {
+        println!("\n{} of {} messages moved to {}", moved_count, ids.len(), target);
+    }
+
+    // Report errors
+    if !errors.is_empty() {
+        for err in &errors {
+            eprintln!("Error: {}", err);
+        }
+        if moved_count == 0 {
+            return Err(anyhow!("no messages were moved"));
+        }
+    }
+
     Ok(())
 }
 
 fn handle_mail_delete(ctx: &RuntimeContext, account: &str, args: MailDeleteArgs) -> Result<()> {
+    let ids = parse_message_ids(&args.ids);
+
+    if ids.is_empty() {
+        return Err(anyhow!("no message IDs provided"));
+    }
+
     let mail_dir = get_mail_dir(ctx, account)?;
+    let db_path = ctx.paths.sync_db_path(account);
+    let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+    let service = ctx.service_client()?;
 
     let mut deleted_count = 0;
     let mut errors: Vec<String> = Vec::new();
 
-    for id in &args.ids {
+    for id in &ids {
+        // Get remote_id for server sync
+        let remote_id = db
+            .get_message(id)
+            .ok()
+            .flatten()
+            .map(|m| m.remote_id.clone());
+
+        // Sync deletion to server first if enabled and we have remote_id
+        if args.sync {
+            if let Some(ref rid) = remote_id {
+                match service.mail_delete(account, &args.folder, rid, args.force) {
+                    Ok(resp) => {
+                        if resp.get("success").and_then(|v| v.as_bool()) != Some(true) {
+                            let err = resp
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown error");
+                            errors.push(format!("{}: server error: {}", id, err));
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("{}: server sync failed: {}", id, e));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Delete/move locally
         if args.force {
-            // Permanently delete
+            // Permanently delete locally
             match mail_dir.delete(&args.folder, id) {
                 Ok(true) => {
+                    // Also delete from database
+                    let _ = db.delete_message(id);
                     if !ctx.common.quiet {
                         println!("Deleted {}", id);
                     }
                     deleted_count += 1;
                 }
                 Ok(false) => {
-                    errors.push(format!("message not found: {}", id));
+                    // Server deletion succeeded, local file may already be gone
+                    let _ = db.delete_message(id);
+                    if !ctx.common.quiet {
+                        println!("Deleted {}", id);
+                    }
+                    deleted_count += 1;
                 }
                 Err(e) => {
                     errors.push(format!("{}: {}", id, e));
                 }
             }
         } else {
-            // Move to trash
+            // Move to trash locally
             match mail_dir.move_to(&args.folder, id, FOLDER_TRASH) {
                 Ok(Some(_)) => {
+                    // Update database folder
+                    if let Some(mut msg) = db.get_message(id).ok().flatten() {
+                        msg.folder = FOLDER_TRASH.to_string();
+                        let _ = db.upsert_message(&msg);
+                    }
                     if !ctx.common.quiet {
                         println!("Moved {} to trash", id);
                     }
                     deleted_count += 1;
                 }
                 Ok(None) => {
-                    errors.push(format!("message not found: {}", id));
+                    // Server deletion succeeded, local file may already be gone
+                    let _ = db.delete_message(id);
+                    if !ctx.common.quiet {
+                        println!("Moved {} to trash", id);
+                    }
+                    deleted_count += 1;
                 }
                 Err(e) => {
                     errors.push(format!("{}: {}", id, e));
@@ -2294,9 +2512,9 @@ fn handle_mail_delete(ctx: &RuntimeContext, account: &str, args: MailDeleteArgs)
     }
 
     // Summary for multiple deletions
-    if args.ids.len() > 1 && !ctx.common.quiet {
+    if ids.len() > 1 && !ctx.common.quiet {
         let action = if args.force { "deleted" } else { "moved to trash" };
-        println!("\n{} of {} messages {}", deleted_count, args.ids.len(), action);
+        println!("\n{} of {} messages {}", deleted_count, ids.len(), action);
     }
 
     // Report errors
@@ -2663,6 +2881,129 @@ fn handle_mail_attachments(
         } else {
             emit_output(&ctx.common, &attachments)?;
         }
+    }
+
+    Ok(())
+}
+
+fn handle_mail_empty_folder(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    args: MailEmptyFolderArgs,
+) -> Result<()> {
+    // Confirm unless --yes is passed
+    if !args.yes {
+        print!(
+            "Permanently delete all items in '{}'? This cannot be undone. [y/N] ",
+            args.folder
+        );
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled");
+            return Ok(());
+        }
+    }
+
+    let result = client
+        .mail_empty_folder(account, &args.folder)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    if let Some(count) = result.get("deleted_count").and_then(|v| v.as_u64()) {
+        if count == 0 {
+            println!("Folder '{}' is already empty", args.folder);
+        } else {
+            println!(
+                "Permanently deleted {} item(s) from '{}'",
+                count, args.folder
+            );
+        }
+    } else if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+        eprintln!("Error: {}", err);
+    }
+
+    emit_output(&ctx.common, &result)?;
+    Ok(())
+}
+
+fn handle_mail_spam(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    args: MailSpamArgs,
+) -> Result<()> {
+    // Parse message IDs (support comma-separated)
+    let ids = parse_message_ids(&args.ids);
+
+    if ids.is_empty() {
+        eprintln!("No message IDs provided");
+        return Ok(());
+    }
+
+    // Resolve human-readable IDs to remote IDs
+    let db_path = ctx.paths.sync_db_path(account);
+    let db = if db_path.exists() {
+        Some(Database::open(&db_path).map_err(|e| anyhow!("{e}"))?)
+    } else {
+        None
+    };
+    let id_gen = db.as_ref().map(IdGenerator::new);
+
+    let is_spam = !args.not_spam;
+    let move_item = !args.no_move;
+    let mut success_count = 0;
+    let mut errors: Vec<String> = Vec::new();
+
+    for id in &ids {
+        // Resolve ID
+        let remote_id = if let Some(ref id_generator) = id_gen {
+            id_generator
+                .resolve(id)
+                .map_err(|e| anyhow!("{e}"))?
+                .unwrap_or_else(|| id.clone())
+        } else {
+            id.clone()
+        };
+
+        match client.mail_mark_spam(account, &remote_id, is_spam, move_item) {
+            Ok(result) => {
+                if result.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                    success_count += 1;
+                    if is_spam {
+                        if move_item {
+                            println!("Marked {} as spam (moved to junk)", id);
+                        } else {
+                            println!("Marked {} as spam", id);
+                        }
+                    } else if move_item {
+                        println!("Marked {} as not spam (moved to inbox)", id);
+                    } else {
+                        println!("Marked {} as not spam", id);
+                    }
+                } else if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                    errors.push(format!("{}: {}", id, err));
+                }
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", id, e));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        for err in &errors {
+            eprintln!("Error: {}", err);
+        }
+    }
+
+    if success_count > 0 {
+        let action = if is_spam { "spam" } else { "not spam" };
+        println!(
+            "Marked {} message(s) as {}",
+            success_count, action
+        );
     }
 
     Ok(())

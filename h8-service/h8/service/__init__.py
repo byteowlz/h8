@@ -35,8 +35,9 @@ DEFAULT_HOST = os.environ.get("H8_SERVICE_HOST", "127.0.0.1")
 REFRESH_INTERVAL = int(os.environ.get("H8_SERVICE_REFRESH_SECONDS", "300"))
 CACHE_TTL = int(os.environ.get("H8_SERVICE_CACHE_TTL", "300"))
 LOG_LEVEL = os.environ.get("H8_SERVICE_LOGLEVEL", "INFO").upper()
-# Token refresh interval in seconds (default: 50 minutes)
-TOKEN_REFRESH_INTERVAL = int(os.environ.get("H8_SERVICE_TOKEN_REFRESH_SECONDS", "3000"))
+# Token refresh interval in seconds (default: 45 minutes)
+# OAuth tokens typically expire after 60 minutes, so refresh at 45 to be safe
+TOKEN_REFRESH_INTERVAL = int(os.environ.get("H8_SERVICE_TOKEN_REFRESH_SECONDS", "2700"))
 
 
 class CacheEntry(BaseModel):
@@ -332,11 +333,16 @@ async def refresh_defaults():
 
 
 async def refresh_tokens():
-    """Periodically refresh authentication tokens before they expire."""
+    """Periodically refresh authentication tokens before they expire.
+
+    This proactively calls oama renew to get a fresh token before the current
+    one expires, preventing authentication failures.
+    """
     try:
         email = current_account_email(None)
-        log.info("Proactively refreshing token for %s", email)
-        auth.refresh_account(email)
+        log.info("Proactively renewing and refreshing token for %s", email)
+        # Call oama renew first to ensure we get a fresh token
+        auth.renew_and_refresh_account(email)
     except Exception as e:
         log.warning("Token refresh failed: %s", e)
 
@@ -345,6 +351,8 @@ async def refresh_tokens():
 async def startup() -> None:
     level = getattr(logging, LOG_LEVEL, logging.INFO)
     logging.basicConfig(level=level)
+    # Refresh tokens immediately on startup to ensure we have valid tokens
+    await refresh_tokens()
     app.state.refresh_task = asyncio.create_task(_refresh_loop())
     app.state.token_refresh_task = asyncio.create_task(_token_refresh_loop())
     log.info("h8-service started on %s:%s", DEFAULT_HOST, DEFAULT_PORT)
@@ -720,6 +728,89 @@ async def mail_attachment_download(
         payload.index,
         payload.output_path,
         folder,
+    )
+
+
+# Message delete/move endpoints
+
+
+@app.delete("/mail/{item_id}")
+async def mail_delete(
+    item_id: str,
+    folder: str = "inbox",
+    permanent: bool = False,
+    account: Optional[str] = None,
+):
+    """Delete a message (move to trash or permanently delete)."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        mail.delete_message, email, acct, item_id, folder, permanent
+    )
+
+
+class MailMove(BaseModel):
+    """Request model for moving a message."""
+
+    target_folder: str
+    create_folder: bool = False
+
+
+@app.post("/mail/{item_id}/move")
+async def mail_move(
+    item_id: str,
+    payload: MailMove,
+    folder: str = "inbox",
+    account: Optional[str] = None,
+):
+    """Move a message to another folder."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        mail.move_message,
+        email,
+        acct,
+        item_id,
+        payload.target_folder,
+        folder,
+        payload.create_folder,
+    )
+
+
+@app.delete("/mail/folder/{folder_name}")
+async def mail_empty_folder(
+    folder_name: str,
+    account: Optional[str] = None,
+):
+    """Empty a folder by permanently deleting all items."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(mail.empty_folder, email, acct, folder_name)
+
+
+class MailSpam(BaseModel):
+    """Request model for marking a message as spam."""
+
+    is_spam: bool = True
+    move: bool = True
+
+
+@app.post("/mail/{item_id}/spam")
+async def mail_mark_spam(
+    item_id: str,
+    payload: MailSpam,
+    account: Optional[str] = None,
+):
+    """Mark a message as spam or not spam."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        mail.mark_as_spam,
+        email,
+        acct,
+        item_id,
+        payload.is_spam,
+        payload.move,
     )
 
 
