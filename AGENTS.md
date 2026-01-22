@@ -18,6 +18,6 @@
 - `h8-client/`: Rust workspace (h8-core lib, h8-cli, h8-tui)
 - Config: `$XDG_CONFIG_HOME/h8/config.toml`, data: `$XDG_DATA_HOME/h8/`
 
-## Issue Tracking (bd/beads)
-Use `bd` for all tracking: `bd ready --json`, `bd create "title" -t bug -p 1`, `bd close <id>`.
-Always commit `.beads/issues.jsonl` with code changes. Store planning docs in `history/`.
+## Issue Tracking (trx)
+Use `trx` for all tracking: `trx list`, `trx add "title"`, `trx done <id>`.
+Always commit `.trx/` with code changes. Store planning docs in `history/`.
