@@ -158,15 +158,16 @@ def delete_event(account: Account, item_id: str) -> dict:
     """Delete a calendar event by ID."""
     from exchangelib import ItemId
 
-    # Find the item by ID
-    calendar: Any = account.calendar
-    items = list(calendar.filter(id=item_id))
+    # Fetch item by ID using account.fetch() - EWS IDs are globally unique
+    try:
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if not items or items[0] is None:
+            return {"success": False, "error": "Event not found"}
 
-    if not items:
-        return {"success": False, "error": "Event not found"}
-
-    items[0].delete()
-    return {"success": True, "id": item_id}
+        items[0].delete()
+        return {"success": True, "id": item_id}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to delete event: {e}"}
 
 
 def search_events(
@@ -426,17 +427,14 @@ def rsvp_event(
     Returns:
         Dict with response status
     """
-    inbox: Any = account.inbox
+    from exchangelib import ItemId
 
-    # First try to find in inbox as MeetingRequest
-    items = list(inbox.filter(id=item_id))
-    item = items[0] if items else None
-
-    # If not found in inbox, try calendar
-    if not item:
-        calendar: Any = account.calendar
-        items = list(calendar.filter(id=item_id))
-        item = items[0] if items else None
+    # Fetch item by ID using account.fetch() - EWS IDs are globally unique
+    try:
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        item = items[0] if items and items[0] is not None else None
+    except Exception:
+        item = None
 
     if not item:
         return {"success": False, "error": "Meeting invite not found"}

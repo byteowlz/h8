@@ -110,45 +110,31 @@ def get_message(account: Account, item_id: str, folder: str = "inbox") -> dict:
     """Get a full message by ID including body."""
     from exchangelib import ItemId
 
-    mail_folder = get_folder(account, folder)
-
-    # Direct lookup by ID (much faster than iterating all messages)
+    # Fetch item by ID using account.fetch() - EWS IDs are globally unique
+    # Note: folder parameter is unused since EWS IDs are unique across folders
     try:
-        items = list(
-            mail_folder.filter(id=item_id).only(
-                "id",
-                "changekey",
-                "subject",
-                "sender",
-                "to_recipients",
-                "cc_recipients",
-                "datetime_received",
-                "is_read",
-                "has_attachments",
-                "body",
-            )
-        )
-        if items:
-            item = items[0]
-            return {
-                "id": item.id,
-                "changekey": item.changekey,
-                "subject": item.subject,
-                "from": item.sender.email_address if item.sender else None,
-                "to": [r.email_address for r in (item.to_recipients or [])],
-                "cc": [r.email_address for r in (item.cc_recipients or [])],
-                "datetime_received": item.datetime_received.isoformat()
-                if item.datetime_received
-                else None,
-                "is_read": item.is_read,
-                "has_attachments": item.has_attachments,
-                "body": item.body,
-                "body_type": "html" if isinstance(item.body, HTMLBody) else "text",
-            }
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if not items or items[0] is None:
+            return {"error": "Message not found"}
+
+        item = items[0]
+        return {
+            "id": item.id,
+            "changekey": item.changekey,
+            "subject": item.subject,
+            "from": item.sender.email_address if item.sender else None,
+            "to": [r.email_address for r in (item.to_recipients or [])],
+            "cc": [r.email_address for r in (item.cc_recipients or [])],
+            "datetime_received": item.datetime_received.isoformat()
+            if item.datetime_received
+            else None,
+            "is_read": item.is_read,
+            "has_attachments": item.has_attachments,
+            "body": item.body,
+            "body_type": "html" if isinstance(item.body, HTMLBody) else "text",
+        }
     except Exception as e:
         return {"error": f"Failed to fetch message: {e}"}
-
-    return {"error": "Message not found"}
 
 
 def fetch_messages(
@@ -539,13 +525,12 @@ def list_attachments(
     Returns:
         List of attachment dictionaries with id, name, size, content_type
     """
-    mail_folder = get_folder(account, folder)
+    from exchangelib import ItemId
 
     try:
-        items = list(
-            mail_folder.filter(id=item_id).only("id", "has_attachments", "attachments")
-        )
-        if not items:
+        # Fetch item by ID using account.fetch() - EWS IDs are globally unique
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if not items or items[0] is None:
             return []
 
         item = items[0]
@@ -723,13 +708,12 @@ def download_attachment(
     Returns:
         Dict with success status and file path
     """
-    mail_folder = get_folder(account, folder)
+    from exchangelib import ItemId
 
     try:
-        items = list(
-            mail_folder.filter(id=item_id).only("id", "has_attachments", "attachments")
-        )
-        if not items:
+        # Fetch item by ID using account.fetch() - EWS IDs are globally unique
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if not items or items[0] is None:
             return {"success": False, "error": "Message not found"}
 
         item = items[0]
