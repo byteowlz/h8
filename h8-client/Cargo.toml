@@ -3,7 +3,7 @@ members = ["h8-core", "h8-cli", "h8-tui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 
 [workspace.dependencies]
