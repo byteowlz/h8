@@ -312,12 +312,12 @@ h8 calendar add "next month 1st 9am Monthly Kickoff"
 To test if a natural language pattern works:
 
 ```bash
-# Use --dry-run to test without creating
-h8 calendar add "friday 2pm Test Event" --dry-run
+# Create test event
+h8 calendar add "friday 2pm Test Event"
 
-# Check created event details
-h8 agenda
+# Check created event appears
+h8 calendar show friday
 
-# Or show specific day
-h8 calendar show "friday"
+# Or check today's schedule
+h8 calendar show today
 ```

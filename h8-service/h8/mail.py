@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from exchangelib import Message, Mailbox, HTMLBody, ExtendedProperty, EWSDateTime
 from exchangelib.account import Account
+from exchangelib.items import HARD_DELETE
 
 
 # Extended property for deferred/scheduled sending
@@ -762,3 +763,228 @@ def download_attachment(
         }
     except Exception as e:
         return {"success": False, "error": f"Failed to download attachment: {e}"}
+
+
+def delete_message(
+    account: Account,
+    item_id: str,
+    folder: str = "inbox",
+    permanent: bool = False,
+) -> dict:
+    """Delete a message (move to trash or permanently delete).
+
+    Args:
+        account: EWS account
+        item_id: The item ID of the message to delete
+        folder: Folder containing the message (unused, IDs are global in EWS)
+        permanent: If True, permanently delete; if False, move to trash
+
+    Returns:
+        Dict with success status
+    """
+    from exchangelib import ItemId
+
+    try:
+        # Fetch the item by ID using account.fetch()
+        # EWS item IDs are globally unique, so we don't need the folder
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if not items or items[0] is None:
+            return {"success": False, "error": f"Message not found: {item_id}"}
+
+        item = items[0]
+
+        if permanent:
+            # Hard delete - permanently remove
+            item.delete()
+            return {"success": True, "id": item_id, "action": "deleted"}
+        else:
+            # Soft delete - move to trash (Deleted Items)
+            item.move_to_trash()
+            return {"success": True, "id": item_id, "action": "moved_to_trash"}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to delete message: {e}"}
+
+
+def move_message(
+    account: Account,
+    item_id: str,
+    target_folder: str,
+    source_folder: str = "inbox",
+    create_folder: bool = False,
+) -> dict:
+    """Move a message to another folder.
+
+    Args:
+        account: EWS account
+        item_id: The item ID of the message to move
+        target_folder: Destination folder name or path
+        source_folder: Source folder containing the message (unused, IDs are global in EWS)
+        create_folder: If True, create target folder if it doesn't exist
+
+    Returns:
+        Dict with success status and new item ID
+    """
+    from exchangelib import ItemId
+
+    # Try to get target folder, optionally create it
+    try:
+        target = get_folder(account, target_folder)
+    except ValueError:
+        if create_folder:
+            target = _create_folder(account, target_folder)
+        else:
+            return {
+                "success": False,
+                "error": f"Target folder not found: {target_folder}. Use --create to create it.",
+            }
+
+    try:
+        # Fetch the item by ID using account.fetch()
+        # EWS item IDs are globally unique, so we don't need the source folder
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if not items or items[0] is None:
+            return {"success": False, "error": f"Message not found: {item_id}"}
+
+        item = items[0]
+        new_item = item.move(target)
+
+        return {
+            "success": True,
+            "id": item_id,
+            "new_id": new_item.id if new_item else None,
+            "target_folder": target_folder,
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Failed to move message: {e}"}
+
+
+def _create_folder(account: Account, folder_path: str):
+    """Create a folder, supporting nested paths like 'inbox/projects/active'.
+
+    Args:
+        account: EWS account
+        folder_path: Folder path (e.g., 'projects' or 'inbox/projects/active')
+
+    Returns:
+        The created folder
+    """
+    from exchangelib import Folder
+
+    parts = folder_path.split("/")
+
+    # Determine parent folder
+    if parts[0].lower() in FOLDER_MAP:
+        parent = get_folder(account, parts[0])
+        parts = parts[1:]
+    else:
+        # Create under msg_folder_root (top-level)
+        parent = account.msg_folder_root
+
+    # Create nested folders
+    current = parent
+    for part in parts:
+        if not part:
+            continue
+        # Check if folder exists
+        existing = None
+        for child in current.children:
+            if child.name.lower() == part.lower():
+                existing = child
+                break
+
+        if existing:
+            current = existing
+        else:
+            # Create new folder
+            new_folder = Folder(parent=current, name=part)
+            new_folder.save()
+            current = new_folder
+
+    return current
+
+
+def empty_folder(account: Account, folder_name: str = "trash") -> dict:
+    """Empty a folder by permanently deleting all items.
+
+    Args:
+        account: EWS account
+        folder_name: Folder to empty (default: trash)
+
+    Returns:
+        Dict with success status and count of deleted items
+    """
+    try:
+        folder = get_folder(account, folder_name)
+
+        # Count items before deletion
+        count = folder.total_count or 0
+
+        if count == 0:
+            return {"success": True, "deleted_count": 0, "folder": folder_name}
+
+        # Empty the folder - this permanently deletes all items
+        # Using delete_type=HARD_DELETE to bypass Recoverable Items
+        folder.empty(delete_sub_folders=False, delete_type=HARD_DELETE)
+
+        return {"success": True, "deleted_count": count, "folder": folder_name}
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to empty folder: {e}"}
+
+
+def mark_as_spam(
+    account: Account,
+    item_id: str,
+    is_spam: bool = True,
+    move_to_junk: bool = True,
+) -> dict:
+    """Mark a message as spam/junk or not spam.
+
+    Args:
+        account: EWS account
+        item_id: The item ID of the message
+        is_spam: True to mark as spam, False to mark as not spam
+        move_to_junk: If True and is_spam, move to junk folder; if False and not is_spam, move to inbox
+
+    Returns:
+        Dict with success status
+    """
+    from exchangelib import ItemId
+
+    try:
+        # Fetch the item by ID
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if not items or items[0] is None:
+            return {"success": False, "error": f"Message not found: {item_id}"}
+
+        item = items[0]
+
+        if is_spam:
+            # Mark as junk and optionally move to junk folder
+            if move_to_junk:
+                item.mark_as_junk(is_junk=True, move_item=True)
+                return {
+                    "success": True,
+                    "id": item_id,
+                    "action": "marked_as_spam",
+                    "moved_to": "junk",
+                }
+            else:
+                item.mark_as_junk(is_junk=True, move_item=False)
+                return {"success": True, "id": item_id, "action": "marked_as_spam"}
+        else:
+            # Mark as not junk and optionally move to inbox
+            if move_to_junk:
+                item.mark_as_junk(is_junk=False, move_item=True)
+                return {
+                    "success": True,
+                    "id": item_id,
+                    "action": "marked_as_not_spam",
+                    "moved_to": "inbox",
+                }
+            else:
+                item.mark_as_junk(is_junk=False, move_item=False)
+                return {"success": True, "id": item_id, "action": "marked_as_not_spam"}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to mark as spam: {e}"}

@@ -1,11 +1,12 @@
 //! Data layer for integrating with h8-core.
 //!
-//! Provides email loading from Maildir and sync database.
+//! Provides email loading from Maildir and sync database,
+//! with server synchronization via h8-service.
 
 use std::path::PathBuf;
 
 use h8_core::types::MessageSync;
-use h8_core::{AppPaths, Database, Maildir};
+use h8_core::{AppConfig, AppPaths, Database, Maildir, ServiceClient};
 
 use crate::app::FolderInfo;
 
@@ -58,6 +59,8 @@ impl From<std::io::Error> for DataError {
 pub struct DataSource {
     /// Application paths.
     paths: AppPaths,
+    /// Application configuration.
+    config: AppConfig,
     /// Optional override for the mail data directory root.
     mail_root_override: Option<PathBuf>,
     /// Current account email address.
@@ -66,23 +69,34 @@ pub struct DataSource {
     db: Option<Database>,
     /// Maildir handle (lazy initialized).
     maildir: Option<Maildir>,
+    /// Service client for server communication (lazy initialized).
+    service_client: Option<ServiceClient>,
 }
 
 impl DataSource {
     /// Create a new data source.
     pub fn new() -> Result<Self> {
         let paths = AppPaths::discover(None).map_err(DataError::from)?;
-        Ok(Self::with_paths(paths))
+        let config = AppConfig::load(&paths, None).map_err(DataError::from)?;
+        Ok(Self::with_paths_and_config(paths, config))
     }
 
     /// Create a data source from pre-discovered paths.
     pub fn with_paths(paths: AppPaths) -> Self {
+        let config = AppConfig::load(&paths, None).unwrap_or_default();
+        Self::with_paths_and_config(paths, config)
+    }
+
+    /// Create a data source from pre-discovered paths and config.
+    pub fn with_paths_and_config(paths: AppPaths, config: AppConfig) -> Self {
         Self {
             paths,
+            config,
             mail_root_override: None,
             account: None,
             db: None,
             maildir: None,
+            service_client: None,
         }
     }
 
@@ -169,6 +183,15 @@ impl DataSource {
         Ok(self.maildir.as_ref().unwrap())
     }
 
+    /// Get or initialize the service client.
+    fn get_service_client(&mut self) -> Result<&ServiceClient> {
+        if self.service_client.is_none() {
+            let client = ServiceClient::new(&self.config.service_url, None)?;
+            self.service_client = Some(client);
+        }
+        Ok(self.service_client.as_ref().unwrap())
+    }
+
     /// Load emails from the sync database for a folder.
     pub fn load_emails(&mut self, folder: &str, limit: usize) -> Result<Vec<MessageSync>> {
         let db = self.get_db()?;
@@ -223,9 +246,46 @@ impl DataSource {
         }
     }
 
-    /// Delete emails by local IDs (permanent deletion).
+    /// Delete emails by local IDs (permanent deletion, syncs to server).
     #[allow(dead_code)]
     pub fn delete_emails(&mut self, folder: &str, local_ids: &[&str]) -> Result<usize> {
+        let account = self.account.clone().ok_or(DataError::NoAccount)?;
+
+        // Get remote IDs from database for server sync
+        let db = self.get_db()?;
+        let mut remote_ids: Vec<(String, String)> = Vec::new(); // (local_id, remote_id)
+        for id in local_ids {
+            if let Some(msg) = db.get_message(id)? {
+                remote_ids.push((id.to_string(), msg.remote_id.clone()));
+            }
+        }
+
+        // Sync permanent deletions to server first
+        let client = self.get_service_client()?;
+        let mut server_deleted = 0;
+        for (local_id, remote_id) in &remote_ids {
+            // Permanent delete on server
+            match client.mail_delete(&account, folder, remote_id, true) {
+                Ok(_) => {
+                    server_deleted += 1;
+                    log::debug!(
+                        "Permanently deleted {} on server (local: {})",
+                        remote_id,
+                        local_id
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to permanently delete {} on server (local: {}): {}",
+                        remote_id,
+                        local_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Now delete locally
         let maildir = self.get_maildir()?;
         let mut deleted = 0;
 
@@ -241,11 +301,52 @@ impl DataSource {
             db.delete_message(id)?;
         }
 
+        log::info!(
+            "Permanently deleted {} emails (server: {}, local: {})",
+            local_ids.len(),
+            server_deleted,
+            deleted
+        );
+
         Ok(deleted)
     }
 
-    /// Move emails to trash.
+    /// Move emails to trash (syncs to server first, then updates local state).
     pub fn trash_emails(&mut self, folder: &str, local_ids: &[&str]) -> Result<usize> {
+        let account = self.account.clone().ok_or(DataError::NoAccount)?;
+
+        // Get remote IDs from database for server sync
+        let db = self.get_db()?;
+        let mut remote_ids: Vec<(String, String)> = Vec::new(); // (local_id, remote_id)
+        for id in local_ids {
+            if let Some(msg) = db.get_message(id)? {
+                remote_ids.push((id.to_string(), msg.remote_id.clone()));
+            }
+        }
+
+        // Sync deletions to server first
+        let client = self.get_service_client()?;
+        let mut server_deleted = 0;
+        for (local_id, remote_id) in &remote_ids {
+            // Delete on server (moves to trash by default, not permanent)
+            match client.mail_delete(&account, folder, remote_id, false) {
+                Ok(_) => {
+                    server_deleted += 1;
+                    log::debug!("Deleted {} on server (local: {})", remote_id, local_id);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to delete {} on server (local: {}): {}",
+                        remote_id,
+                        local_id,
+                        e
+                    );
+                    // Continue with other deletions
+                }
+            }
+        }
+
+        // Now update local state
         let maildir = self.get_maildir()?;
         let mut moved = 0;
 
@@ -263,6 +364,95 @@ impl DataSource {
                 db.upsert_message(&msg)?;
             }
         }
+
+        log::info!(
+            "Trashed {} emails (server: {}, local: {})",
+            local_ids.len(),
+            server_deleted,
+            moved
+        );
+
+        Ok(moved)
+    }
+
+    /// Move emails to a target folder (syncs to server first, then updates local state).
+    #[allow(dead_code)]
+    pub fn move_emails(
+        &mut self,
+        source_folder: &str,
+        target_folder: &str,
+        local_ids: &[&str],
+        create_folder: bool,
+    ) -> Result<usize> {
+        let account = self.account.clone().ok_or(DataError::NoAccount)?;
+
+        // Get remote IDs from database for server sync
+        let db = self.get_db()?;
+        let mut remote_ids: Vec<(String, String)> = Vec::new(); // (local_id, remote_id)
+        for id in local_ids {
+            if let Some(msg) = db.get_message(id)? {
+                remote_ids.push((id.to_string(), msg.remote_id.clone()));
+            }
+        }
+
+        // Sync moves to server first
+        let client = self.get_service_client()?;
+        let mut server_moved = 0;
+        for (local_id, remote_id) in &remote_ids {
+            match client.mail_move(
+                &account,
+                source_folder,
+                remote_id,
+                target_folder,
+                create_folder,
+            ) {
+                Ok(_) => {
+                    server_moved += 1;
+                    log::debug!(
+                        "Moved {} to {} on server (local: {})",
+                        remote_id,
+                        target_folder,
+                        local_id
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to move {} to {} on server (local: {}): {}",
+                        remote_id,
+                        target_folder,
+                        local_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Now update local state
+        let maildir = self.get_maildir()?;
+        let mut moved = 0;
+
+        for id in local_ids {
+            if maildir.move_to(source_folder, id, target_folder)?.is_some() {
+                moved += 1;
+            }
+        }
+
+        // Update folder in database
+        let db = self.get_db()?;
+        for id in local_ids {
+            if let Some(mut msg) = db.get_message(id)? {
+                msg.folder = target_folder.to_string();
+                db.upsert_message(&msg)?;
+            }
+        }
+
+        log::info!(
+            "Moved {} emails to {} (server: {}, local: {})",
+            local_ids.len(),
+            target_folder,
+            server_moved,
+            moved
+        );
 
         Ok(moved)
     }

@@ -8,36 +8,20 @@ Complete reference for h8 CLI commands.
 h8 [OPTIONS] <COMMAND>
 
 Commands:
-  calendar     Calendar operations
-  mail         Email operations
-  agenda       Today's agenda (calendar)
-  contacts     Contact management
-  free         Find free time slots
-  ppl          Other people's calendar operations
-  config       Configuration management
-  init         Initialize h8
-  service      Manage the Python EWS service
-  completions  Generate shell completions
+  calendar (cal)   Calendar operations
+  mail (m)         Email operations
+  contacts (c)     Contact management
+  free             Find free time slots in your calendar
+  ppl (people)     Other people's calendar operations
 ```
 
 ## Global Options
 
 ```
---config <PATH>      Configuration file path
--q, --quiet          Suppress output
--v, --verbose        Verbose output (can be repeated: -vv, -vvv)
---debug              Debug output
---trace              Trace output
---json               JSON output format
---yaml               YAML output format
---no-color           Disable colored output
---color <COLOR>      Color mode: auto, always, never
---dry-run            Dry run mode
--y, --yes            Skip confirmations
---timeout <SECONDS>  Command timeout
---no-progress        Disable progress indicators
---diagnostics        Show diagnostic information
--a, --account <ACCOUNT>  Use specific account
+--json, -j           Output as JSON
+--account, -a        Use specific account (default: configured account)
+-h, --help           Show help
+--version            Show version
 ```
 
 ---
@@ -50,191 +34,231 @@ List messages in a folder.
 
 ```bash
 h8 mail list [OPTIONS]
+
+Options:
+  --folder, -f <FOLDER>  Folder name (default: inbox)
+  --limit, -l <LIMIT>    Max messages (default: 20)
+  --unread, -u           Only show unread messages
 ```
 
-**Output**: List of recent emails with subject, sender, and timestamp.
+**Examples:**
+```bash
+h8 mail list
+h8 mail list --folder sent
+h8 mail list --unread --limit 50
+h8 mail list --json
+```
+
+### mail get
+
+Get a full message by ID including body.
+
+```bash
+h8 mail get --id <MESSAGE_ID> [OPTIONS]
+
+Options:
+  --id <ID>              Message ID (required)
+  --folder, -f <FOLDER>  Folder name (default: inbox)
+```
+
+**Examples:**
+```bash
+h8 mail get --id AAMkAGI2TG9...
+h8 mail get --id AAMkAGI2TG9... --json
+```
 
 ### mail send
 
-Send an email.
+Send an email. Reads JSON from stdin.
 
 ```bash
-h8 mail send [OPTIONS] [ID]
+h8 mail send
 
-Arguments:
-  [ID]  Draft ID to send (optional)
-
-Options:
-  --file <FILE>          Read email from file
-  --all                  Send all drafts
-  -s, --schedule <SCHEDULE>  Schedule delivery (e.g., "tomorrow 9am", "friday 14:00")
-  -t, --to <TO>          Recipient email (can specify multiple times)
-  -c, --cc <CC>          CC recipient (can specify multiple times)
-  --bcc <BCC>            BCC recipient (can specify multiple times)
-  --subject <SUBJECT>    Email subject
-  -b, --body <BODY>      Email body (use "-" for stdin)
-  --html                 Treat body as HTML
+# JSON schema:
+{
+  "to": ["email@example.com"],      # Required: list of recipient emails
+  "subject": "Subject line",         # Required: email subject
+  "body": "Email body text",         # Optional: email body
+  "cc": ["cc@example.com"],          # Optional: CC recipients
+  "html": true,                      # Optional: treat body as HTML
+  "schedule_at": "2026-01-22T09:00:00"  # Optional: ISO datetime for delayed send
+}
 ```
 
-**Examples**:
+**Examples:**
 ```bash
 # Simple email
-h8 mail send --to alice@example.com --subject "Hello" --body "Hi Alice!"
+echo '{"to": ["alice@example.com"], "subject": "Hello", "body": "Hi Alice!"}' | h8 mail send
 
 # Multiple recipients with CC
-h8 mail send --to alice@example.com --to bob@example.com --cc manager@example.com --subject "Team Update" --body "Status report..."
+echo '{"to": ["alice@example.com", "bob@example.com"], "cc": ["manager@example.com"], "subject": "Team Update", "body": "Status report..."}' | h8 mail send
 
 # Scheduled email
-h8 mail send --to alice@example.com --subject "Reminder" --body "Meeting tomorrow" --schedule "tomorrow 9am"
+echo '{"to": ["alice@example.com"], "subject": "Reminder", "body": "Meeting tomorrow", "schedule_at": "2026-01-22T09:00:00"}' | h8 mail send
 
 # HTML email
-h8 mail send --to alice@example.com --subject "Newsletter" --body "<h1>News</h1><p>Updates...</p>" --html
+echo '{"to": ["alice@example.com"], "subject": "Newsletter", "body": "<h1>News</h1><p>Updates...</p>", "html": true}' | h8 mail send
+
+# Using heredoc for complex body (recommended for multi-line)
+cat <<'EOF' | h8 mail send
+{
+  "to": ["alice@example.com"],
+  "subject": "Project Update",
+  "body": "Hi Alice,\n\nHere is the update you requested.\n\nBest regards"
+}
+EOF
 ```
 
-### mail search
+### mail fetch
 
-Search messages by subject, sender, or body.
-
-```bash
-h8 mail search <query>
-```
-
-**Examples**:
-```bash
-h8 mail search "project update"
-h8 mail search "alice@example.com"
-```
-
-### mail read
-
-Read a message (view in pager).
+Fetch messages to maildir or mbox format.
 
 ```bash
-h8 mail read <message-id>
-```
-
-### mail reply
-
-Reply to a message.
-
-```bash
-h8 mail reply <message-id>
-```
-
-### mail forward
-
-Forward a message.
-
-```bash
-h8 mail forward <message-id>
-```
-
-### mail compose
-
-Compose a new email (opens editor).
-
-```bash
-h8 mail compose [OPTIONS]
+h8 mail fetch --output <PATH> [OPTIONS]
 
 Options:
-  --no-edit  Open editor immediately
-```
-
-### mail mark
-
-Mark a message (read/unread/flagged).
-
-```bash
-h8 mail mark <message-id> <status>
-```
-
-### mail delete
-
-Delete a message (move to trash).
-
-```bash
-h8 mail delete <message-id>
+  --folder, -f <FOLDER>  Folder name (default: inbox)
+  --output, -o <PATH>    Output directory (required)
+  --format <FORMAT>      Output format: maildir, mbox (default: maildir)
+  --limit, -l <LIMIT>    Max messages
 ```
 
 ### mail attachments
 
-List or download attachments.
+List or download attachments from a message.
 
 ```bash
-h8 mail attachments [OPTIONS] <message-id>
+h8 mail attachments --id <MESSAGE_ID> [OPTIONS]
+
+Options:
+  --id <ID>              Message ID (required)
+  --folder, -f <FOLDER>  Folder name (default: inbox)
+  --download, -d <INDEX> Download attachment by index
+  --output, -o <PATH>    Output path for download
+```
+
+**Examples:**
+```bash
+# List attachments
+h8 mail attachments --id AAMkAGI2TG9...
+
+# Download first attachment
+h8 mail attachments --id AAMkAGI2TG9... --download 0 --output ./downloads/
 ```
 
 ---
 
 ## Calendar Commands
 
-### calendar add
-
-Add event with natural language.
-
-```bash
-h8 calendar add [OPTIONS] <INPUT>...
-
-Arguments:
-  <INPUT>...  Natural language event description
-
-Options:
-  -d, --duration <DURATION>  Default duration in minutes [default: 60]
-  -l, --location <LOCATION>  Event location
-```
-
-**Natural Language Examples**:
-```bash
-# Time-based
-h8 calendar add "friday 2pm Team Sync"
-h8 calendar add "tomorrow 14:00 Project Review"
-h8 calendar add "next monday 10am Sprint Planning"
-
-# With duration
-h8 calendar add "friday 2pm-4pm Workshop"
-h8 calendar add "tomorrow 9am Team Standup" --duration 15
-
-# With location
-h8 calendar add "friday 2pm Team Sync" --location "Conference Room A"
-h8 calendar add "tomorrow 3pm Client Call" --location "Zoom"
-
-# With attendees (in description)
-h8 calendar add "friday 2pm Meeting with alice@example.com"
-h8 calendar add "tomorrow 10am Sync with bob and charlie"
-```
-
 ### calendar show
 
-Show events with natural language dates.
+Show events using natural language date expressions.
 
 ```bash
-h8 calendar show <date-expression>
+h8 calendar show [WHEN]
+
+Arguments:
+  WHEN  Date expression (default: today)
 ```
 
-**Examples**:
+**Examples:**
 ```bash
-h8 calendar show "today"
-h8 calendar show "tomorrow"
+h8 calendar show today
+h8 calendar show tomorrow
+h8 calendar show friday
+h8 calendar show "next monday"
 h8 calendar show "next week"
-h8 calendar show "friday"
-h8 calendar show "kw30"  # Calendar week 30
-h8 calendar show "january"
+h8 calendar show "kw30"           # Calendar week 30
+h8 calendar show january
+h8 calendar show "11 december"
 ```
 
 ### calendar list
 
-List calendar events.
+List calendar events with date range options.
 
 ```bash
 h8 calendar list [OPTIONS]
+
+Options:
+  --days, -d <DAYS>      Number of days to show (default: 7)
+  --from <DATE>          Start date (ISO format)
+  --to <DATE>            End date (ISO format)
 ```
 
-### calendar search
+**Examples:**
+```bash
+h8 calendar list
+h8 calendar list --days 14
+h8 calendar list --from 2026-01-20 --to 2026-01-25
+h8 calendar list --json
+```
 
-Search events by subject, location, or body.
+### calendar add
+
+Add event with natural language input. Supports attendees via "with" keyword.
 
 ```bash
-h8 calendar search <query>
+h8 calendar add <INPUT>... [OPTIONS]
+
+Arguments:
+  INPUT...  Natural language event description
+
+Options:
+  --duration, -d <MINUTES>  Default duration in minutes (default: 60)
+  --location, -l <LOCATION> Event location
+```
+
+**Natural Language Format:**
+```
+[day/date] [time] [title] [with attendee@email.com]
+```
+
+**Examples:**
+```bash
+# Simple event
+h8 calendar add friday 2pm Team Sync
+
+# With quoted title
+h8 calendar add 'friday 2pm "Sprint Planning"'
+
+# With attendee (sends meeting invite)
+h8 calendar add 'friday 2pm Meeting with alice@example.com'
+h8 calendar add 'tomorrow 10am Sync with bob@example.com'
+
+# Multiple words without quotes work too
+h8 calendar add friday 2pm Project Status Update
+
+# With duration (default is 60 min)
+h8 calendar add 'tomorrow 9am Standup' --duration 15
+
+# With location
+h8 calendar add 'friday 2pm Team Sync' --location "Conference Room A"
+h8 calendar add 'tomorrow 3pm Client Call' --location "Zoom"
+
+# Time range (explicit end time)
+h8 calendar add 'friday 2pm-4pm Workshop'
+```
+
+### calendar create
+
+Create event from JSON input (for complex events).
+
+```bash
+h8 calendar create
+
+# JSON schema:
+{
+  "subject": "Meeting Title",        # Required
+  "start": "2026-01-22T14:00:00",   # Required: ISO datetime
+  "end": "2026-01-22T15:00:00",     # Required: ISO datetime
+  "location": "Room A"              # Optional
+}
+```
+
+**Examples:**
+```bash
+echo '{"subject": "Team Meeting", "start": "2026-01-22T14:00:00", "end": "2026-01-22T15:00:00", "location": "Room A"}' | h8 calendar create
 ```
 
 ### calendar delete
@@ -242,100 +266,31 @@ h8 calendar search <query>
 Delete a calendar event.
 
 ```bash
-h8 calendar delete <event-id>
-```
-
-### calendar invite
-
-Send meeting invite to attendees.
-
-```bash
-h8 calendar invite [OPTIONS] --subject <SUBJECT> --start <START> --end <END>
-
-Options:
-  -s, --subject <SUBJECT>    Meeting subject
-  --start <START>            Start time (ISO format, e.g., 2026-01-22T14:00:00)
-  --end <END>                End time (ISO format)
-  -t, --to <TO>              Required attendee email (can specify multiple times)
-  -o, --optional <OPTIONAL>  Optional attendee email (can specify multiple times)
-  -l, --location <LOCATION>  Meeting location
-  -b, --body <BODY>          Meeting body/description
-```
-
-**Examples**:
-```bash
-# Simple meeting invite
-h8 calendar invite --subject "Team Sync" \
-  --start 2026-01-22T14:00:00 --end 2026-01-22T15:00:00 \
-  --to alice@example.com
-
-# Multiple attendees with optional
-h8 calendar invite --subject "Sprint Planning" \
-  --start 2026-01-23T10:00:00 --end 2026-01-23T12:00:00 \
-  --to alice@example.com --to bob@example.com \
-  --optional charlie@example.com \
-  --location "Conference Room A" \
-  --body "Quarterly sprint planning session"
-```
-
-### calendar invites
-
-List pending meeting invites from inbox.
-
-```bash
-h8 calendar invites [OPTIONS]
-
-Options:
-  -n, --limit <LIMIT>  Maximum results to return [default: 50]
-```
-
-**Examples**:
-```bash
-# List all pending invites
-h8 calendar invites
-
-# JSON output for processing
-h8 calendar invites --json
-```
-
-### calendar rsvp
-
-Respond to a meeting invite (accept/decline/tentative).
-
-```bash
-h8 calendar rsvp [OPTIONS] <ID> <RESPONSE>
-
-Arguments:
-  <ID>        Meeting invite ID
-  <RESPONSE>  Response: accept, decline, tentative, maybe
-
-Options:
-  -m, --message <MESSAGE>  Optional message to include with response
-```
-
-**Examples**:
-```bash
-# Accept an invite
-h8 calendar rsvp abc123 accept
-
-# Decline with message
-h8 calendar rsvp abc123 decline --message "I have a conflict at this time"
-
-# Tentatively accept
-h8 calendar rsvp abc123 tentative --message "Need to check with my team first"
+h8 calendar delete --id <EVENT_ID>
 ```
 
 ---
 
-## Agenda Command
+## Free Slots Command
 
-View today's agenda.
+Find free slots in your own calendar.
 
 ```bash
-h8 agenda [OPTIONS]
+h8 free [OPTIONS]
+
+Options:
+  --weeks, -w <WEEKS>        Number of weeks to look at (default: 1)
+  --duration, -d <MINUTES>   Minimum slot duration in minutes (default: 30)
+  --limit, -l <LIMIT>        Maximum number of slots to return
 ```
 
-**Output**: List of today's events with time, title, and location.
+**Examples:**
+```bash
+h8 free
+h8 free --weeks 2
+h8 free --duration 60 --limit 10
+h8 free --json
+```
 
 ---
 
@@ -346,28 +301,23 @@ h8 agenda [OPTIONS]
 Find free slots in another person's calendar.
 
 ```bash
-h8 ppl free [OPTIONS] <PERSON>
+h8 ppl free <PERSON> [OPTIONS]
 
 Arguments:
-  <PERSON>  Person alias or email address
+  PERSON  Person alias or email address
 
 Options:
-  -w, --weeks <WEEKS>        Number of weeks to check [default: 1]
-  -d, --duration <DURATION>  Minimum slot duration in minutes [default: 30]
-  -l, --limit <LIMIT>        Limit number of results
-  -V, --view <VIEW>          View mode: list, gantt, compact
+  --weeks, -w <WEEKS>        Number of weeks to check (default: 1)
+  --duration, -d <MINUTES>   Minimum slot duration in minutes (default: 30)
+  --limit, -l <LIMIT>        Limit number of results
 ```
 
-**Examples**:
+**Examples:**
 ```bash
-# Check availability for next week
 h8 ppl free alice@example.com
-
-# Find 2-hour slots over 2 weeks
-h8 ppl free alice@example.com --weeks 2 --duration 120
-
-# Compact view
-h8 ppl free alice@example.com --view compact
+h8 ppl free alice@example.com --weeks 2
+h8 ppl free alice@example.com --duration 120  # Find 2-hour slots
+h8 ppl free alice@example.com --json
 ```
 
 ### ppl agenda
@@ -375,7 +325,22 @@ h8 ppl free alice@example.com --view compact
 View another person's calendar events.
 
 ```bash
-h8 ppl agenda <PERSON>
+h8 ppl agenda <PERSON> [OPTIONS]
+
+Arguments:
+  PERSON  Person alias or email address
+
+Options:
+  --days, -d <DAYS>   Number of days to show (default: 7)
+  --from <DATE>       Start date (ISO format)
+  --to <DATE>         End date (ISO format)
+```
+
+**Examples:**
+```bash
+h8 ppl agenda alice@example.com
+h8 ppl agenda alice@example.com --days 14
+h8 ppl agenda alice@example.com --json
 ```
 
 ### ppl common
@@ -383,72 +348,63 @@ h8 ppl agenda <PERSON>
 Find common free slots between multiple people.
 
 ```bash
-h8 ppl common <email1> <email2> [email3...]
+h8 ppl common <PERSON1> <PERSON2> [PERSON3...] [OPTIONS]
+
+Arguments:
+  PEOPLE  Two or more person aliases or email addresses
+
+Options:
+  --weeks, -w <WEEKS>        Number of weeks to look at (default: 1)
+  --duration, -d <MINUTES>   Minimum slot duration in minutes (default: 30)
+  --limit, -l <LIMIT>        Maximum number of slots to return
 ```
 
-**Examples**:
+**Examples:**
 ```bash
-# Two people
 h8 ppl common alice@example.com bob@example.com
-
-# Multiple people
-h8 ppl common alice@example.com bob@example.com charlie@example.com manager@example.com
+h8 ppl common alice@example.com bob@example.com charlie@example.com
+h8 ppl common alice@example.com bob@example.com --weeks 2 --duration 60
+h8 ppl common alice@example.com bob@example.com --json
 ```
 
 ---
 
-## Service Commands
+## Contacts Commands
 
-### service start
+### contacts list
 
-Start the h8 Python EWS service.
+List contacts.
 
 ```bash
-h8 service start
+h8 contacts list [OPTIONS]
+
+Options:
+  --limit, -l <LIMIT>   Max contacts (default: 100)
+  --search, -s <QUERY>  Search by name or email
 ```
 
-### service stop
+### contacts get
 
-Stop the h8 Python EWS service.
+Get a contact by ID.
 
 ```bash
-h8 service stop
+h8 contacts get --id <CONTACT_ID>
 ```
 
-### service restart
+### contacts create
 
-Restart the h8 Python EWS service.
+Create a contact from JSON input.
 
 ```bash
-h8 service restart
+h8 contacts create
 ```
 
-### service status
+### contacts delete
 
-Check h8 service status.
-
-```bash
-h8 service status
-```
-
----
-
-## Configuration Commands
-
-### config
-
-View or edit configuration.
+Delete a contact.
 
 ```bash
-h8 config [OPTIONS]
-```
-
-### init
-
-Initialize h8 (first-time setup).
-
-```bash
-h8 init
+h8 contacts delete --id <CONTACT_ID>
 ```
 
 ---
@@ -467,80 +423,43 @@ h8 mail list
 
 ```bash
 h8 mail list --json
-```
-
-### YAML
-
-```bash
-h8 mail list --yaml
+h8 calendar show today --json
+h8 ppl free alice@example.com --json
 ```
 
 ---
 
 ## Tips and Tricks
 
-### Chaining Commands
+### Using JSON output for scripting
 
 ```bash
-# Check agenda then send summary
-h8 agenda --json | jq -r '.[] | .subject' | xargs -I {} h8 mail send --to manager@example.com --subject "My Schedule" --body "Events: {}"
+# Get list of unread message IDs
+h8 mail list --unread --json | jq -r '.[].id'
+
+# Get today's meeting subjects
+h8 calendar show today --json | jq -r '.[].subject'
 ```
 
-### Using Aliases
+### Heredoc for complex JSON
 
-Create shell aliases for common operations:
+When sending emails with complex content, use heredoc:
 
 ```bash
-alias check-mail='h8 mail list'
-alias today='h8 agenda'
-alias send-mail='h8 mail send'
+cat <<'EOF' | h8 mail send
+{
+  "to": ["team@example.com"],
+  "subject": "Weekly Update",
+  "body": "Hi team,\n\nHere are this week's updates:\n\n1. Item one\n2. Item two\n\nBest regards"
+}
+EOF
 ```
 
-### Scheduling Emails
+### Person aliases
+
+h8 supports person aliases configured in your config.toml. Use aliases instead of full emails:
 
 ```bash
-# Send email tomorrow morning
-h8 mail send --to team@example.com --subject "Daily Standup" --body "Meeting at 9am" --schedule "tomorrow 8am"
-
-# Send on specific date
-h8 mail send --to alice@example.com --subject "Reminder" --body "Project deadline" --schedule "2026-01-25 14:00"
+h8 ppl free alice           # Uses alias "alice" from config
+h8 ppl agenda bob           # Uses alias "bob" from config
 ```
-
-### Natural Language Parsing
-
-h8 calendar add supports flexible natural language:
-
-- **Days**: today, tomorrow, monday, next friday, etc.
-- **Times**: 2pm, 14:00, 9am, noon, midnight
-- **Durations**: 2pm-4pm, 30min, 2h, etc.
-- **Relative**: in 2 hours, in 3 days, etc.
-
----
-
-## Error Handling
-
-### Service Not Running
-
-```bash
-# Check status
-h8 service status
-
-# Start if needed
-h8 service start
-```
-
-### Authentication Issues
-
-```bash
-# Re-initialize
-h8 init
-
-# Check configuration
-h8 config
-```
-
-### Invalid Email/Calendar Input
-
-- Ensure email addresses are properly formatted
-- Use clear natural language for calendar entries
-- Specify times explicitly when ambiguous

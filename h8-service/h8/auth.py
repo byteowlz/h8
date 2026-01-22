@@ -270,9 +270,14 @@ def renew_token(email: str) -> bool:
     ensure_oama()
     log.info("Renewing token for %s via oama renew", email)
     try:
-        subprocess.check_output(["oama", "renew", email], stderr=subprocess.PIPE)
+        subprocess.check_output(
+            ["oama", "renew", email], stderr=subprocess.PIPE, timeout=30
+        )
         log.info("Token renewed successfully for %s", email)
         return True
+    except subprocess.TimeoutExpired:
+        log.error("Token renewal timed out for %s", email)
+        return False
     except subprocess.CalledProcessError as e:
         log.warning(
             "Failed to renew token for %s: %s",
@@ -291,11 +296,18 @@ def get_token(email: str, attempt_renew: bool = True) -> str:
     log.debug("Requesting token for %s from oama", email)
     try:
         result = subprocess.check_output(
-            ["oama", "access", email], stderr=subprocess.PIPE
+            ["oama", "access", email], stderr=subprocess.PIPE, timeout=10
         )
         token = result.decode().strip()
         log.debug("Token obtained successfully for %s", email)
         return token
+    except subprocess.TimeoutExpired:
+        log.error("Token access timed out for %s", email)
+        if attempt_renew:
+            log.info("Attempting token renewal for %s after timeout", email)
+            if renew_token(email):
+                return get_token(email, attempt_renew=False)
+        raise RuntimeError(f"Token access timed out for {email}")
     except subprocess.CalledProcessError as e:
         stderr_msg = e.stderr.decode() if e.stderr else str(e)
         log.warning("Failed to get token for %s: %s", email, stderr_msg)

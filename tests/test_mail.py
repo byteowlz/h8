@@ -8,8 +8,12 @@ import tempfile
 # Mock exchangelib before importing mail module
 import sys
 
-sys.modules["exchangelib"] = MagicMock()
+mock_exchangelib = MagicMock()
+mock_exchangelib.items = MagicMock()
+mock_exchangelib.items.HARD_DELETE = "HardDelete"
+sys.modules["exchangelib"] = mock_exchangelib
 sys.modules["exchangelib.account"] = MagicMock()
+sys.modules["exchangelib.items"] = mock_exchangelib.items
 
 from h8 import mail
 
@@ -266,3 +270,195 @@ class TestDraftOperations:
         assert len(result) == 1
         assert result[0]["id"] == "draft-123"
         assert result[0]["subject"] == "Draft Subject"
+
+
+class TestDeleteMessage:
+    """Tests for delete_message function."""
+
+    def test_delete_message_not_found(self):
+        """delete_message should return error when message not found."""
+        mock_account = MagicMock()
+        mock_account.fetch.return_value = [None]
+
+        result = mail.delete_message(mock_account, "nonexistent-id")
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    def test_delete_message_to_trash(self):
+        """delete_message should move to trash by default."""
+        mock_account = MagicMock()
+        mock_item = MagicMock()
+        mock_item.id = "msg-123"
+        mock_account.fetch.return_value = [mock_item]
+
+        result = mail.delete_message(mock_account, "msg-123")
+
+        mock_item.move_to_trash.assert_called_once()
+        assert result["success"] is True
+        assert result["action"] == "moved_to_trash"
+
+    def test_delete_message_permanent(self):
+        """delete_message should permanently delete when permanent=True."""
+        mock_account = MagicMock()
+        mock_item = MagicMock()
+        mock_item.id = "msg-123"
+        mock_account.fetch.return_value = [mock_item]
+
+        result = mail.delete_message(mock_account, "msg-123", permanent=True)
+
+        mock_item.delete.assert_called_once()
+        assert result["success"] is True
+        assert result["action"] == "deleted"
+
+
+class TestMoveMessage:
+    """Tests for move_message function."""
+
+    def test_move_message_not_found(self):
+        """move_message should return error when message not found."""
+        mock_account = MagicMock()
+        mock_account.sent = MagicMock()
+        mock_account.fetch.return_value = [None]
+
+        result = mail.move_message(mock_account, "nonexistent-id", "sent")
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    def test_move_message_target_not_found(self):
+        """move_message should return error when target folder not found."""
+        mock_account = MagicMock()
+        # Make get_folder fail for the target
+        mock_account.root = MagicMock()
+        mock_account.root.walk.return_value = []
+
+        result = mail.move_message(
+            mock_account, "msg-123", "nonexistent_folder", create_folder=False
+        )
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    def test_move_message_success(self):
+        """move_message should move message to target folder."""
+        mock_account = MagicMock()
+        mock_sent = MagicMock()
+        mock_item = MagicMock()
+        mock_item.id = "msg-123"
+        mock_new_item = MagicMock()
+        mock_new_item.id = "new-msg-456"
+        mock_item.move.return_value = mock_new_item
+        mock_account.sent = mock_sent
+        mock_account.fetch.return_value = [mock_item]
+
+        result = mail.move_message(mock_account, "msg-123", "sent")
+
+        mock_item.move.assert_called_once_with(mock_sent)
+        assert result["success"] is True
+        assert result["new_id"] == "new-msg-456"
+        assert result["target_folder"] == "sent"
+
+
+class TestEmptyFolder:
+    """Tests for empty_folder function."""
+
+    def test_empty_folder_not_found(self):
+        """empty_folder should return error when folder not found."""
+        mock_account = MagicMock()
+        mock_account.root = MagicMock()
+        mock_account.root.walk.return_value = []
+
+        result = mail.empty_folder(mock_account, "nonexistent_folder")
+
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_empty_folder_already_empty(self):
+        """empty_folder should report when folder is already empty."""
+        mock_account = MagicMock()
+        mock_trash = MagicMock()
+        mock_trash.total_count = 0
+        mock_account.trash = mock_trash
+
+        result = mail.empty_folder(mock_account, "trash")
+
+        assert result["success"] is True
+        assert result["deleted_count"] == 0
+
+    def test_empty_folder_success(self):
+        """empty_folder should empty the folder and return count."""
+        mock_account = MagicMock()
+        mock_trash = MagicMock()
+        mock_trash.total_count = 5
+        mock_account.trash = mock_trash
+
+        result = mail.empty_folder(mock_account, "trash")
+
+        # empty() should have been called on the folder
+        mock_trash.empty.assert_called_once()
+        assert result["success"] is True
+        assert result["deleted_count"] == 5
+        assert result["folder"] == "trash"
+
+
+class TestMarkAsSpam:
+    """Tests for mark_as_spam function."""
+
+    def test_mark_as_spam_not_found(self):
+        """mark_as_spam should return error when message not found."""
+        mock_account = MagicMock()
+        mock_account.fetch.return_value = [None]
+
+        result = mail.mark_as_spam(mock_account, "nonexistent-id")
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    def test_mark_as_spam_with_move(self):
+        """mark_as_spam should mark as junk and move to junk folder."""
+        mock_account = MagicMock()
+        mock_item = MagicMock()
+        mock_item.id = "msg-123"
+        mock_account.fetch.return_value = [mock_item]
+
+        result = mail.mark_as_spam(
+            mock_account, "msg-123", is_spam=True, move_to_junk=True
+        )
+
+        mock_item.mark_as_junk.assert_called_once_with(is_junk=True, move_item=True)
+        assert result["success"] is True
+        assert result["action"] == "marked_as_spam"
+        assert result["moved_to"] == "junk"
+
+    def test_mark_as_not_spam_with_move(self):
+        """mark_as_spam should mark as not junk and move to inbox."""
+        mock_account = MagicMock()
+        mock_item = MagicMock()
+        mock_item.id = "msg-123"
+        mock_account.fetch.return_value = [mock_item]
+
+        result = mail.mark_as_spam(
+            mock_account, "msg-123", is_spam=False, move_to_junk=True
+        )
+
+        mock_item.mark_as_junk.assert_called_once_with(is_junk=False, move_item=True)
+        assert result["success"] is True
+        assert result["action"] == "marked_as_not_spam"
+        assert result["moved_to"] == "inbox"
+
+    def test_mark_as_spam_no_move(self):
+        """mark_as_spam should mark without moving when move_to_junk is False."""
+        mock_account = MagicMock()
+        mock_item = MagicMock()
+        mock_item.id = "msg-123"
+        mock_account.fetch.return_value = [mock_item]
+
+        result = mail.mark_as_spam(
+            mock_account, "msg-123", is_spam=True, move_to_junk=False
+        )
+
+        mock_item.mark_as_junk.assert_called_once_with(is_junk=True, move_item=False)
+        assert result["success"] is True
+        assert result["action"] == "marked_as_spam"
+        assert "moved_to" not in result
