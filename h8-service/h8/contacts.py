@@ -6,22 +6,31 @@ from exchangelib.indexed_properties import EmailAddress, PhoneNumber
 from exchangelib.account import Account
 
 
-def list_contacts(account: Account, limit: int = 100, search: Optional[str] = None) -> list[dict]:
+def list_contacts(
+    account: Account, limit: int = 100, search: Optional[str] = None
+) -> list[dict]:
     """List contacts, optionally filtered by search query."""
     contacts = []
-    
+
     # Use .only() to fetch only required fields - avoids fetching large data
     base_query = account.contacts.all().only(
-        'id', 'changekey', 'display_name', 'given_name', 'surname',
-        'email_addresses', 'phone_numbers', 'company_name', 'job_title'
+        "id",
+        "changekey",
+        "display_name",
+        "given_name",
+        "surname",
+        "email_addresses",
+        "phone_numbers",
+        "company_name",
+        "job_title",
     )
-    
+
     if search:
         search_lower = search.lower()
         for item in base_query:
             if not isinstance(item, Contact):
                 continue
-            
+
             # Search in display_name, email, given_name, surname
             match = False
             if item.display_name and search_lower in item.display_name.lower():
@@ -35,11 +44,13 @@ def list_contacts(account: Account, limit: int = 100, search: Optional[str] = No
                 if item.email_addresses:
                     for addr in item.email_addresses:
                         if addr:
-                            email = getattr(addr, 'email', None) or getattr(addr, 'email_address', None)
+                            email = getattr(addr, "email", None) or getattr(
+                                addr, "email_address", None
+                            )
                             if email and search_lower in email.lower():
                                 match = True
                                 break
-            
+
             if match:
                 contacts.append(_contact_to_dict(item))
                 if len(contacts) >= limit:
@@ -49,78 +60,83 @@ def list_contacts(account: Account, limit: int = 100, search: Optional[str] = No
             if not isinstance(item, Contact):
                 continue
             contacts.append(_contact_to_dict(item))
-    
+
     return contacts
 
 
 def get_contact(account: Account, item_id: str) -> dict:
     """Get a contact by ID."""
-    # Use filter by ID instead of iterating all contacts
-    items = list(account.contacts.filter(id=item_id).only(
-        'id', 'changekey', 'display_name', 'given_name', 'surname',
-        'email_addresses', 'phone_numbers', 'company_name', 'job_title'
-    ))
-    
-    if items:
-        return _contact_to_dict(items[0])
-    
-    return {'error': 'Contact not found'}
+    from exchangelib import ItemId
+
+    # Fetch item by ID using account.fetch() - EWS IDs are globally unique
+    try:
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if items and items[0] is not None:
+            return _contact_to_dict(items[0])
+    except Exception:
+        pass
+
+    return {"error": "Contact not found"}
 
 
 def create_contact(account: Account, contact_data: dict) -> dict:
     """Create a contact from JSON data."""
     # Parse name
-    name = contact_data.get('name', '')
-    name_parts = name.split(' ', 1) if name else ['', '']
-    given_name = name_parts[0] if name_parts else ''
-    surname = name_parts[1] if len(name_parts) > 1 else ''
-    
+    name = contact_data.get("name", "")
+    name_parts = name.split(" ", 1) if name else ["", ""]
+    given_name = name_parts[0] if name_parts else ""
+    surname = name_parts[1] if len(name_parts) > 1 else ""
+
     # Build email addresses
     email_addresses = None
-    if contact_data.get('email'):
+    if contact_data.get("email"):
         email_addresses = [
-            EmailAddress(email=contact_data['email'], label='EmailAddress1')
+            EmailAddress(email=contact_data["email"], label="EmailAddress1")
         ]
-    
+
     # Build phone numbers
     phone_numbers = None
-    if contact_data.get('phone'):
+    if contact_data.get("phone"):
         phone_numbers = [
-            PhoneNumber(phone_number=contact_data['phone'], label='BusinessPhone')
+            PhoneNumber(phone_number=contact_data["phone"], label="BusinessPhone")
         ]
-    
+
     contact = Contact(
         account=account,
         folder=account.contacts,
-        given_name=contact_data.get('given_name', given_name),
-        surname=contact_data.get('surname', surname),
-        display_name=contact_data.get('display_name', name),
+        given_name=contact_data.get("given_name", given_name),
+        surname=contact_data.get("surname", surname),
+        display_name=contact_data.get("display_name", name),
         email_addresses=email_addresses,
         phone_numbers=phone_numbers,
-        company_name=contact_data.get('company'),
-        job_title=contact_data.get('job_title'),
+        company_name=contact_data.get("company"),
+        job_title=contact_data.get("job_title"),
     )
-    
+
     contact.save()
-    
+
     return {
-        'id': contact.id,
-        'changekey': contact.changekey,
-        'name': contact.display_name,
-        'email': contact_data.get('email'),
+        "id": contact.id,
+        "changekey": contact.changekey,
+        "name": contact.display_name,
+        "email": contact_data.get("email"),
     }
 
 
 def delete_contact(account: Account, item_id: str) -> dict:
     """Delete a contact by ID."""
-    # Use filter by ID instead of iterating all contacts
-    items = list(account.contacts.filter(id=item_id))
-    
-    if items:
-        items[0].delete()
-        return {'success': True, 'id': item_id}
-    
-    return {'success': False, 'error': 'Contact not found'}
+    from exchangelib import ItemId
+
+    # Fetch item by ID using account.fetch() - EWS IDs are globally unique
+    try:
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if items and items[0] is not None:
+            items[0].delete()
+            return {"success": True, "id": item_id}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to delete contact: {e}"}
+
+    return {"success": False, "error": "Contact not found"}
 
 
 def _contact_to_dict(contact: Contact) -> dict:
@@ -131,33 +147,33 @@ def _contact_to_dict(contact: Contact) -> dict:
         for addr in contact.email_addresses:
             if addr:
                 # EmailAddress object has email attribute
-                if hasattr(addr, 'email'):
+                if hasattr(addr, "email"):
                     email = addr.email
-                elif hasattr(addr, 'email_address'):
+                elif hasattr(addr, "email_address"):
                     email = addr.email_address
                 else:
                     email = str(addr)
                 break
-    
+
     # Get primary phone
     phone = None
     if contact.phone_numbers:
         for p in contact.phone_numbers:
             if p:
-                if hasattr(p, 'phone_number'):
+                if hasattr(p, "phone_number"):
                     phone = p.phone_number
                 else:
                     phone = str(p)
                 break
-    
+
     return {
-        'id': contact.id,
-        'changekey': contact.changekey,
-        'display_name': contact.display_name,
-        'given_name': contact.given_name,
-        'surname': contact.surname,
-        'email': email,
-        'phone': phone,
-        'company': contact.company_name,
-        'job_title': contact.job_title,
+        "id": contact.id,
+        "changekey": contact.changekey,
+        "display_name": contact.display_name,
+        "given_name": contact.given_name,
+        "surname": contact.surname,
+        "email": email,
+        "phone": phone,
+        "company": contact.company_name,
+        "job_title": contact.job_title,
     }

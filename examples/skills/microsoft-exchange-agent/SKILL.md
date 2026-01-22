@@ -101,6 +101,7 @@ h8 contacts get --id <id>
 ## Key Patterns
 
 **Check then act:**
+
 ```bash
 h8 calendar show today            # check schedule
 h8 ppl free alice@example.com     # check availability
@@ -108,6 +109,7 @@ h8 calendar add 'friday 2pm Sync with alice@example.com'
 ```
 
 **Send email:**
+
 ```bash
 cat <<'EOF' | h8 mail send
 {"to":["team@x.com"],"subject":"Update","body":"Status report..."}
@@ -115,6 +117,7 @@ EOF
 ```
 
 **JSON output for parsing:**
+
 ```bash
 h8 mail list --json
 h8 calendar show today --json
