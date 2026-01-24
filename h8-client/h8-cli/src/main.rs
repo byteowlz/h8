@@ -706,6 +706,8 @@ enum ContactsCommand {
     List(ContactsListArgs),
     Get(ContactsGetArgs),
     Create(ContactsCreateArgs),
+    /// Update an existing contact
+    Update(ContactsUpdateArgs),
     Delete(ContactsDeleteArgs),
 }
 
@@ -727,6 +729,34 @@ struct ContactsGetArgs {
 struct ContactsCreateArgs {
     #[arg(long)]
     file: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ContactsUpdateArgs {
+    /// Contact ID to update
+    #[arg(long)]
+    id: String,
+    /// Display name
+    #[arg(long)]
+    name: Option<String>,
+    /// Given/first name
+    #[arg(long)]
+    given_name: Option<String>,
+    /// Surname/last name
+    #[arg(long)]
+    surname: Option<String>,
+    /// Email address
+    #[arg(long)]
+    email: Option<String>,
+    /// Phone number
+    #[arg(long)]
+    phone: Option<String>,
+    /// Company name
+    #[arg(long)]
+    company: Option<String>,
+    /// Job title
+    #[arg(long)]
+    job_title: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -3108,6 +3138,51 @@ fn handle_contacts(ctx: &RuntimeContext, cmd: ContactsCommand) -> Result<()> {
             let result = client
                 .contacts_create(&account, payload)
                 .map_err(|e| anyhow!("{e}"))?;
+            emit_output(&ctx.common, &result)?;
+        }
+        ContactsCommand::Update(args) => {
+            // Build update payload from provided args
+            let mut updates = serde_json::Map::new();
+            if let Some(v) = args.name {
+                updates.insert("display_name".to_string(), serde_json::json!(v));
+            }
+            if let Some(v) = args.given_name {
+                updates.insert("given_name".to_string(), serde_json::json!(v));
+            }
+            if let Some(v) = args.surname {
+                updates.insert("surname".to_string(), serde_json::json!(v));
+            }
+            if let Some(v) = args.email {
+                updates.insert("email".to_string(), serde_json::json!(v));
+            }
+            if let Some(v) = args.phone {
+                updates.insert("phone".to_string(), serde_json::json!(v));
+            }
+            if let Some(v) = args.company {
+                updates.insert("company".to_string(), serde_json::json!(v));
+            }
+            if let Some(v) = args.job_title {
+                updates.insert("job_title".to_string(), serde_json::json!(v));
+            }
+
+            if updates.is_empty() {
+                return Err(anyhow!("no fields to update - specify at least one of: --name, --email, --phone, --company, --job-title, --given-name, --surname"));
+            }
+
+            let result = client
+                .contacts_update(&account, &args.id, serde_json::Value::Object(updates))
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if !ctx.common.json && !ctx.common.yaml {
+                if result.get("success") == Some(&serde_json::json!(false)) {
+                    if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                        return Err(anyhow!("{}", err));
+                    }
+                } else {
+                    let name = result.get("display_name").and_then(|v| v.as_str()).unwrap_or("Contact");
+                    println!("Updated: {}", name);
+                }
+            }
             emit_output(&ctx.common, &result)?;
         }
         ContactsCommand::Delete(args) => {

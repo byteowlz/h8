@@ -139,6 +139,58 @@ def delete_contact(account: Account, item_id: str) -> dict:
     return {"success": False, "error": "Contact not found"}
 
 
+def update_contact(account: Account, item_id: str, updates: dict) -> dict:
+    """Update an existing contact.
+
+    Args:
+        account: EWS account
+        item_id: Contact ID
+        updates: Dict of fields to update. Supported fields:
+            - display_name, given_name, surname
+            - email (primary email address)
+            - phone (primary phone number)
+            - company, job_title
+    """
+    from exchangelib import ItemId
+
+    try:
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if not items or items[0] is None:
+            return {"success": False, "error": "Contact not found"}
+
+        contact = items[0]
+
+        # Update simple string fields
+        if "display_name" in updates:
+            contact.display_name = updates["display_name"]
+        if "given_name" in updates:
+            contact.given_name = updates["given_name"]
+        if "surname" in updates:
+            contact.surname = updates["surname"]
+        if "company" in updates:
+            contact.company_name = updates["company"]
+        if "job_title" in updates:
+            contact.job_title = updates["job_title"]
+
+        # Update email - replace primary email
+        if "email" in updates:
+            contact.email_addresses = [
+                EmailAddress(email=updates["email"], label="EmailAddress1")
+            ]
+
+        # Update phone - replace primary phone
+        if "phone" in updates:
+            contact.phone_numbers = [
+                PhoneNumber(phone_number=updates["phone"], label="BusinessPhone")
+            ]
+
+        contact.save(update_fields=list(updates.keys()))
+
+        return _contact_to_dict(contact)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to update contact: {e}"}
+
+
 def _contact_to_dict(contact: Contact) -> dict:
     """Convert a Contact to a dictionary."""
     # Get primary email
