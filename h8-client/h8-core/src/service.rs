@@ -318,6 +318,11 @@ impl ServiceClient {
         self.delete(&format!("/contacts/{}?account={}", id, account))
     }
 
+    /// Update a contact.
+    pub fn contacts_update(&self, account: &str, id: &str, updates: Value) -> Result<Value> {
+        self.put_json(&format!("/contacts/{}?account={}", id, account), updates)
+    }
+
     /// Find free calendar slots.
     pub fn free_slots(
         &self,

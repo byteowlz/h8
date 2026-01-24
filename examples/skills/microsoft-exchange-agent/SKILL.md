@@ -9,123 +9,130 @@ allowed-tools: Bash
 
 # h8 Exchange Agent
 
-CLI tool for Microsoft Exchange email and calendar operations.
+Rust CLI for Microsoft Exchange (EWS). Uses word-based short IDs (e.g., `cold-lamp`) for mail/calendar.
 
 ## Email
 
 ```bash
-# List emails
+# List (supports natural language dates)
 h8 mail list                      # inbox, last 20
-h8 mail list -f sent -l 50        # sent folder, 50 items
-h8 mail list --unread             # unread only
 h8 mail list today                # today's emails
-h8 mail list yesterday            # yesterday's emails
+h8 mail list monday               # emails from Monday
+h8 mail list "jan 15"             # specific date
+h8 mail list -u                   # unread only
+h8 mail list -f sent -l 50        # sent folder, 50 items
 
-# Read email
-h8 mail get --id <id>
+# Read/view
+h8 mail read <id>                 # view in pager (marks read)
+h8 mail get --id <id>             # raw JSON
 
 # Search
-h8 mail search "query"            # search inbox
-h8 mail search "from:alice"       # by sender
+h8 mail search "meeting notes"
+h8 mail search "from:alice"
 
-# Send (JSON via stdin)
-echo '{"to":["a@x.com"],"subject":"Hi","body":"Hello"}' | h8 mail send
-echo '{"to":["a@x.com"],"cc":["b@x.com"],"subject":"Update","body":"..."}' | h8 mail send
-echo '{"to":["a@x.com"],"subject":"Later","body":"...","schedule_at":"2026-01-22T09:00:00"}' | h8 mail send
+# Compose & send
+h8 mail compose                   # opens editor, saves draft
+h8 mail drafts                    # list drafts
+h8 mail send <draft-id>           # send a draft
+h8 mail send --to alice@x.com --subject "Hi" --body "Hello"
+
+# Reply/forward
+h8 mail reply <id>                # reply to sender
+h8 mail reply <id> --all          # reply all
+h8 mail forward <id>
+
+# Manage
+h8 mail delete <id>               # move to trash
+h8 mail delete <id> --force       # permanent
+h8 mail move <id> --to archive
+h8 mail mark <id> --read
+h8 mail mark <id> --flag
+h8 mail spam <id>
+h8 mail empty-folder trash -y
 
 # Attachments
-h8 mail attachments <id>                    # list
-h8 mail attachments <id> -d 0 -o ./out/     # download first
-
-# Delete/Move
-h8 mail delete <id>               # move to trash
-h8 mail delete <id> --force       # permanent delete
-h8 mail move <id> --to archive    # move to folder
-h8 mail spam <id>                 # mark as spam
-h8 mail spam <id> --not-spam      # mark as not spam
-h8 mail empty-folder trash -y     # empty trash
+h8 mail attachments <id>
+h8 mail attachments <id> -d 0 -o ./downloads/
 ```
 
 ## Calendar
 
 ```bash
-# View schedule
-h8 calendar show today
-h8 calendar show tomorrow
-h8 calendar show friday
-h8 calendar show "next week"
-h8 calendar list --days 14
+# View (natural language)
+h8 cal show today
+h8 cal show tomorrow
+h8 cal show friday
+h8 cal show "next week"
+h8 cal show kw30                  # calendar week
+h8 agenda                         # today's agenda (formatted)
 
-# Search
-h8 calendar search "standup"
+# Add events (natural language)
+h8 cal add friday 2pm Team Sync
+h8 cal add 'tomorrow 10am-11am Review'
+h8 cal add 'monday 9am Standup' -d 15        # 15 min duration
+h8 cal add 'friday 2pm Meeting with alice'   # sends invite
 
-# Add event (natural language)
-h8 calendar add friday 2pm Team Sync
-h8 calendar add 'tomorrow 10am Meeting with alice@example.com'
-h8 calendar add 'friday 2pm-4pm Workshop' --location "Room A"
-h8 calendar add 'monday 9am Standup' --duration 15
-
-# Delete
-h8 calendar delete <id>
+# Search & delete
+h8 cal search "standup"
+h8 cal delete <id>
 
 # Meeting invites
-h8 calendar invite --subject "Sync" --start 2026-01-22T14:00:00 --end 2026-01-22T15:00:00 --attendees alice@x.com
-h8 calendar invites                # list pending invites
-h8 calendar rsvp <id> --accept     # accept invite
-h8 calendar rsvp <id> --decline    # decline invite
+h8 cal invite -s "Sync" --start 2026-01-22T14:00:00 --end 2026-01-22T15:00:00 -t alice@x.com
+h8 cal invites                    # list pending
+h8 cal rsvp <id> accept
+h8 cal rsvp <id> decline
 ```
 
 ## Availability
 
 ```bash
-# Your free slots
-h8 free
-h8 free --weeks 2 --duration 60
+h8 free                           # your free slots
+h8 free -w 2 -d 60                # 2 weeks, 60-min slots
 
-# Someone else's availability
-h8 ppl free alice@example.com
-h8 ppl agenda alice@example.com
-
-# Common free time (2+ people)
-h8 ppl common alice@x.com bob@x.com
+h8 ppl agenda alice               # someone's calendar
+h8 ppl free alice                 # their free slots
+h8 ppl common alice bob           # common free time
 ```
 
 ## Contacts
 
 ```bash
 h8 contacts list
-h8 contacts list -s "alice"       # search
+h8 contacts list -s "horst"       # search
 h8 contacts get --id <id>
+
+# Update contact fields
+h8 contacts update --id <id> --phone "+49 123 456"
+h8 contacts update --id <id> --email "new@x.com" --name "New Name"
+h8 contacts update --id <id> --company "Acme" --job-title "Engineer"
+
+# Create (JSON)
+echo '{"name":"Alice","email":"a@x.com","phone":"+1234"}' | h8 contacts create
+h8 contacts delete --id <id>
 ```
 
-## Key Patterns
+## Patterns
 
-**Check then act:**
-
+**Schedule a meeting:**
 ```bash
-h8 calendar show today            # check schedule
-h8 ppl free alice@example.com     # check availability
-h8 calendar add 'friday 2pm Sync with alice@example.com'
+h8 ppl free alice                 # check availability
+h8 cal add 'friday 2pm Sync with alice'
 ```
 
-**Send email:**
-
+**Send email programmatically:**
 ```bash
-cat <<'EOF' | h8 mail send
-{"to":["team@x.com"],"subject":"Update","body":"Status report..."}
-EOF
+h8 mail send --to team@x.com --subject "Update" --body "Status: done"
 ```
 
-**JSON output for parsing:**
-
+**JSON output:**
 ```bash
-h8 mail list --json
-h8 calendar show today --json
+h8 mail list --json | jq '.[0].subject'
+h8 cal show today --json
 ```
 
 ## Notes
 
-- IDs can be word-based (e.g., `tiger-castle`) or Exchange IDs
-- Use `--json` flag for programmatic output
-- Natural language supports: today, tomorrow, weekdays, "next monday", dates
-- `with email@x.com` in calendar add sends meeting invite automatically
+- Short IDs: `cold-lamp`, `weak-dams` (mail/calendar only, not contacts yet)
+- Person aliases: configure in `~/.config/h8/config.toml` under `[people]`
+- Natural dates: today, tomorrow, weekdays, "next week", kw30, "jan 15"
+- `with <email>` in cal add sends meeting invite automatically

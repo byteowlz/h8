@@ -120,6 +120,18 @@ class ContactCreate(BaseModel):
     job_title: Optional[str] = None
 
 
+class ContactUpdate(BaseModel):
+    """Request model for updating a contact."""
+
+    display_name: Optional[str] = None
+    given_name: Optional[str] = None
+    surname: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
+    job_title: Optional[str] = None
+
+
 class FetchMail(BaseModel):
     folder: str = "inbox"
     output: str
@@ -853,6 +865,19 @@ async def contacts_delete(item_id: str, account: Optional[str] = None):
     email = current_account_email(account)
     acct = auth.get_account(email)
     return await safe_call_with_retry(contacts.delete_contact, email, acct, item_id)
+
+
+@app.put("/contacts/{item_id}")
+async def contacts_update(
+    item_id: str, payload: ContactUpdate, account: Optional[str] = None
+):
+    """Update an existing contact."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    update_data = {k: v for k, v in payload.model_dump().items() if v is not None}
+    return await safe_call_with_retry(
+        contacts.update_contact, email, acct, item_id, update_data
+    )
 
 
 @app.get("/free")
