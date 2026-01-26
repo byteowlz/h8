@@ -1620,12 +1620,12 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
     for (name, weekday) in weekdays {
         if text_lower == *name {
             let today_weekday = today.weekday();
-            // Find the most recent occurrence (today or earlier this week, or last week)
-            let days_back =
-                (today_weekday.num_days_from_monday() as i64 - weekday.num_days_from_monday() as i64
-                    + 7)
-                    % 7;
-            let target = today - ChronoDuration::days(days_back);
+            // Find this week's occurrence of the weekday
+            // Week runs Mon-Sun, so we calculate offset from Monday
+            let today_offset = today_weekday.num_days_from_monday() as i64;
+            let target_offset = weekday.num_days_from_monday() as i64;
+            let days_diff = target_offset - today_offset;
+            let target = today + ChronoDuration::days(days_diff);
             return Some((target, (*name).to_string()));
         }
     }
