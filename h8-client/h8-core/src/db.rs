@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::{Error, Result};
-use crate::types::{CalendarEventSync, FolderSync, MessageSync};
+use crate::types::{AddressEntry, CalendarEventSync, FolderSync, MessageSync};
 
 /// Database handle for h8 sync state.
 pub struct Database {
@@ -76,11 +76,22 @@ impl Database {
                 synced_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS addresses (
+                email TEXT PRIMARY KEY,
+                name TEXT,
+                last_sent TEXT,
+                last_received TEXT,
+                send_count INTEGER DEFAULT 0,
+                receive_count INTEGER DEFAULT 0
+            );
+
             CREATE INDEX IF NOT EXISTS idx_messages_remote_id ON messages(remote_id);
             CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder);
             CREATE INDEX IF NOT EXISTS idx_id_pool_status ON id_pool(status);
             CREATE INDEX IF NOT EXISTS idx_calendar_remote_id ON calendar_events(remote_id);
             CREATE INDEX IF NOT EXISTS idx_calendar_start ON calendar_events(start);
+            CREATE INDEX IF NOT EXISTS idx_addresses_name ON addresses(name);
+            CREATE INDEX IF NOT EXISTS idx_addresses_send_count ON addresses(send_count DESC);
             "#,
         )?;
 
@@ -492,6 +503,100 @@ impl Database {
             params![local_id],
         )?;
         Ok(count > 0)
+    }
+
+    // ─── Address Cache ───────────────────────────────────────────────────────
+
+    /// Record an email address seen in sent mail.
+    pub fn record_sent_address(&self, email: &str, name: Option<&str>) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let email_lower = email.to_lowercase();
+        self.conn.execute(
+            r#"
+            INSERT INTO addresses (email, name, last_sent, send_count)
+            VALUES (?1, ?2, ?3, 1)
+            ON CONFLICT(email) DO UPDATE SET
+                name = COALESCE(?2, addresses.name),
+                last_sent = ?3,
+                send_count = addresses.send_count + 1
+            "#,
+            params![email_lower, name, now],
+        )?;
+        Ok(())
+    }
+
+    /// Record an email address seen in received mail.
+    pub fn record_received_address(&self, email: &str, name: Option<&str>) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let email_lower = email.to_lowercase();
+        self.conn.execute(
+            r#"
+            INSERT INTO addresses (email, name, last_received, receive_count)
+            VALUES (?1, ?2, ?3, 1)
+            ON CONFLICT(email) DO UPDATE SET
+                name = COALESCE(?2, addresses.name),
+                last_received = ?3,
+                receive_count = addresses.receive_count + 1
+            "#,
+            params![email_lower, name, now],
+        )?;
+        Ok(())
+    }
+
+    /// Search addresses by email or name (fuzzy).
+    pub fn search_addresses(&self, query: &str, limit: usize) -> Result<Vec<AddressEntry>> {
+        let pattern = format!("%{}%", query.to_lowercase());
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT email, name, last_sent, last_received, send_count, receive_count
+            FROM addresses
+            WHERE email LIKE ?1 OR LOWER(name) LIKE ?1
+            ORDER BY send_count DESC, receive_count DESC
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = stmt.query_map(params![pattern, limit], |row| {
+            Ok(AddressEntry {
+                email: row.get(0)?,
+                name: row.get(1)?,
+                last_sent: row.get(2)?,
+                last_received: row.get(3)?,
+                send_count: row.get(4)?,
+                receive_count: row.get(5)?,
+            })
+        })?;
+        let mut addresses = Vec::new();
+        for row in rows {
+            addresses.push(row?);
+        }
+        Ok(addresses)
+    }
+
+    /// Get most frequently used addresses.
+    pub fn frequent_addresses(&self, limit: usize) -> Result<Vec<AddressEntry>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT email, name, last_sent, last_received, send_count, receive_count
+            FROM addresses
+            ORDER BY send_count DESC, receive_count DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(AddressEntry {
+                email: row.get(0)?,
+                name: row.get(1)?,
+                last_sent: row.get(2)?,
+                last_received: row.get(3)?,
+                send_count: row.get(4)?,
+                receive_count: row.get(5)?,
+            })
+        })?;
+        let mut addresses = Vec::new();
+        for row in rows {
+            addresses.push(row?);
+        }
+        Ok(addresses)
     }
 }
 

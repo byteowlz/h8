@@ -26,6 +26,7 @@ pub use id::IdGenerator;
 pub use maildir::Maildir;
 pub use paths::AppPaths;
 pub use service::ServiceClient;
+pub use types::AddressEntry;
 
 /// Convert HTML content to readable plain text.
 ///

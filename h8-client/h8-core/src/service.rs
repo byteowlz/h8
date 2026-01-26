@@ -76,6 +76,17 @@ impl ServiceClient {
         self.delete(&url)
     }
 
+    /// Cancel a calendar event and notify attendees.
+    pub fn calendar_cancel(
+        &self,
+        account: &str,
+        id: &str,
+        message: Option<&str>,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({ "message": message });
+        self.post_json(&format!("/calendar/{}/cancel?account={}", id, account), payload)
+    }
+
     /// Search calendar events.
     pub fn calendar_search(
         &self,

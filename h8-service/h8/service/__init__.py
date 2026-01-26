@@ -527,6 +527,24 @@ async def calendar_delete(
     return await safe_call_with_retry(calendar.delete_event, email, acct, item_id)
 
 
+class CalendarCancel(BaseModel):
+    """Request model for cancelling a meeting."""
+
+    message: Optional[str] = None
+
+
+@app.post("/calendar/{item_id}/cancel")
+async def calendar_cancel(
+    item_id: str, payload: CalendarCancel, account: Optional[str] = None
+):
+    """Cancel a calendar event and notify all attendees."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        calendar.cancel_event, email, acct, item_id, payload.message
+    )
+
+
 @app.get("/calendar/search")
 async def calendar_search(
     q: str,

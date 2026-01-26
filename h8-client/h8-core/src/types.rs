@@ -149,6 +149,17 @@ pub struct CalendarEventSync {
     pub synced_at: Option<String>,
 }
 
+/// Cached email address entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressEntry {
+    pub email: String,
+    pub name: Option<String>,
+    pub last_sent: Option<String>,
+    pub last_received: Option<String>,
+    pub send_count: i64,
+    pub receive_count: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

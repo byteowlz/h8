@@ -155,7 +155,7 @@ def create_event(account: Account, event_data: dict) -> dict:
 
 
 def delete_event(account: Account, item_id: str) -> dict:
-    """Delete a calendar event by ID."""
+    """Delete a calendar event by ID (without notifying attendees)."""
     from exchangelib import ItemId
 
     # Fetch item by ID using account.fetch() - EWS IDs are globally unique
@@ -168,6 +168,58 @@ def delete_event(account: Account, item_id: str) -> dict:
         return {"success": True, "id": item_id}
     except Exception as e:
         return {"success": False, "error": f"Failed to delete event: {e}"}
+
+
+def cancel_event(account: Account, item_id: str, message: Optional[str] = None) -> dict:
+    """Cancel a calendar event and notify all attendees.
+
+    Args:
+        account: EWS account
+        item_id: Event ID to cancel
+        message: Optional cancellation message to include
+
+    Returns:
+        Dict with cancellation status
+    """
+    from exchangelib import ItemId
+
+    try:
+        items = list(account.fetch(ids=[ItemId(id=item_id)]))
+        if not items or items[0] is None:
+            return {"success": False, "error": "Event not found"}
+
+        item = items[0]
+
+        # Check if this is a calendar item we can cancel
+        if not isinstance(item, CalendarItem):
+            return {"success": False, "error": "Item is not a calendar event"}
+
+        # Check if we're the organizer
+        if item.organizer and item.organizer.email_address:
+            if (
+                item.organizer.email_address.lower()
+                != account.primary_smtp_address.lower()
+            ):
+                return {
+                    "success": False,
+                    "error": f"Cannot cancel - you are not the organizer (organizer: {item.organizer.email_address})",
+                }
+
+        subject = item.subject
+
+        # Cancel and send notifications to attendees
+        # send_meeting_cancellations options: SendToNone, SendOnlyToAll, SendToAllAndSaveCopy
+        item.delete(send_meeting_cancellations="SendToAllAndSaveCopy")
+
+        return {
+            "success": True,
+            "id": item_id,
+            "subject": subject,
+            "cancellation_sent": True,
+            "message": message,
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Failed to cancel event: {e}"}
 
 
 def search_events(
