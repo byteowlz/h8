@@ -47,6 +47,7 @@ fn try_main() -> Result<()> {
         Command::Mail { command } => handle_mail(&ctx, command),
         Command::Agenda(args) => handle_agenda(&ctx, args),
         Command::Contacts { command } => handle_contacts(&ctx, command),
+        Command::Addr(args) => handle_addr(&ctx, args),
         Command::Free(cmd) => handle_free(&ctx, cmd),
         Command::Ppl { command } => handle_ppl(&ctx, command),
         Command::Config { command } => handle_config(&ctx, command),
@@ -128,6 +129,9 @@ enum Command {
         #[command(subcommand)]
         command: ContactsCommand,
     },
+    /// Search cached email addresses (from sent/received mail)
+    #[command(alias = "address")]
+    Addr(AddrArgs),
     Free(FreeCommand),
     /// Other people's calendar operations
     #[command(alias = "people")]
@@ -168,6 +172,8 @@ enum CalendarCommand {
     /// Respond to a meeting invite (accept/decline/tentative)
     Rsvp(CalendarRsvpArgs),
     Create(CalendarCreateArgs),
+    /// Cancel a meeting and notify attendees
+    Cancel(CalendarCancelArgs),
     Delete(CalendarDeleteArgs),
 }
 
@@ -183,7 +189,7 @@ struct CalendarListArgs {
 
 #[derive(Debug, Args)]
 struct CalendarShowArgs {
-    /// Date expression (e.g., today, tomorrow, friday, next week, kw30, 11 dezember)
+    /// Date expression (e.g., today, mittwoch, 28.01, next week, kw30, feb 13, +2)
     #[arg(num_args = 0..)]
     when: Vec<String>,
 }
@@ -292,6 +298,21 @@ impl RsvpResponse {
 }
 
 #[derive(Debug, Args)]
+struct CalendarCancelArgs {
+    /// Event ID to cancel (or use --query to cancel multiple)
+    id: Option<String>,
+    /// Search query to select events to cancel (e.g., "today", "standup")
+    #[arg(short = 'q', long)]
+    query: Option<String>,
+    /// Optional cancellation message to send to attendees
+    #[arg(short = 'm', long)]
+    message: Option<String>,
+    /// Dry run - show what would be cancelled
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
 struct CalendarDeleteArgs {
     #[arg(long)]
     id: String,
@@ -346,7 +367,7 @@ enum MailCommand {
 
 #[derive(Debug, Args)]
 struct MailListArgs {
-    /// Date filter (e.g., today, yesterday, monday, 2025/01/15, jan 15, dec 8 2024)
+    /// Date filter (e.g., today, monday, mittwoch, 28.01, jan 15, +2)
     #[arg(num_args = 0..)]
     when: Vec<String>,
     #[arg(short = 'f', long, default_value = "inbox")]
@@ -380,14 +401,14 @@ struct MailGetArgs {
 
 #[derive(Debug, Args)]
 struct AgendaArgs {
+    /// Date expression (e.g., today, tomorrow, mittwoch, feb 13, +2, 28.01)
+    #[arg(num_args = 0..)]
+    when: Vec<String>,
     #[arg(short = 'a', long = "account")]
     account: Option<String>,
     /// View mode: list, gantt, or compact (default from config)
     #[arg(short = 'V', long = "view", value_enum)]
     view: Option<AgendaView>,
-    /// Day offset or name: 0/today (default), 1/tomorrow, -1/yesterday, or any integer
-    #[arg(short = 'd', long = "day", default_value = "0")]
-    day: String,
 }
 
 /// Event status for visual indicators.
@@ -583,8 +604,8 @@ struct MailForwardArgs {
 
 #[derive(Debug, Args)]
 struct MailMoveArgs {
-    /// Message ID(s) to move (space or comma separated)
-    #[arg(required = true, num_args = 1..)]
+    /// Message ID(s) to move (space or comma separated). Optional if --query is used.
+    #[arg(num_args = 0..)]
     ids: Vec<String>,
     /// Target folder (use --to or natural "to" keyword)
     #[arg(short = 't', long = "to")]
@@ -592,12 +613,21 @@ struct MailMoveArgs {
     /// Source folder
     #[arg(short = 'f', long, default_value = "inbox")]
     folder: String,
-    /// Create target folder if it doesn't exist
-    #[arg(short = 'c', long)]
+    /// Search query to select messages (e.g., "from:newsletter", "subject:weekly")
+    #[arg(short = 'q', long)]
+    query: Option<String>,
+    /// Maximum messages to move when using --query
+    #[arg(short = 'n', long, default_value_t = 50)]
+    limit: i64,
+    /// Create target folder if it doesn't exist (default: true)
+    #[arg(short = 'c', long, default_value_t = true)]
     create: bool,
     /// Sync move to server (default: true)
     #[arg(long, default_value_t = true)]
     sync: bool,
+    /// Dry run - show what would be moved without actually moving
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -776,6 +806,18 @@ struct FreeCommand {
     /// View mode: list, gantt, or compact (default from config)
     #[arg(short = 'V', long = "view", value_enum)]
     view: Option<AgendaView>,
+}
+
+#[derive(Debug, Args)]
+struct AddrArgs {
+    /// Search query (matches email or name)
+    query: Option<String>,
+    /// Maximum results
+    #[arg(short = 'l', long, default_value_t = 20)]
+    limit: usize,
+    /// Show most frequently used (ignore query)
+    #[arg(long)]
+    frequent: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -969,6 +1011,93 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             } else {
                 emit_output(&ctx.common, &event)?;
             }
+        }
+        CalendarCommand::Cancel(args) => {
+            // Get events to cancel - either by ID or by query
+            let events_to_cancel: Vec<(String, String, String)> = if let Some(ref query) = args.query {
+                // Search for events matching query
+                let (from_date, to_date, _) = parse_date_range_expr(query);
+                let results = client
+                    .calendar_list(&account, 0, Some(&from_date), Some(&to_date))
+                    .map_err(|e| anyhow!("{e}"))?;
+
+                results
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|e| {
+                                let id = e.get("id").and_then(|v| v.as_str())?;
+                                let subject = e.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
+                                let start = e.get("start").and_then(|v| v.as_str()).unwrap_or("");
+                                Some((id.to_string(), subject.to_string(), start.to_string()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else if let Some(ref id) = args.id {
+                let remote_id = resolve_calendar_id(ctx, &account, id)?;
+                vec![(remote_id, id.clone(), String::new())]
+            } else {
+                return Err(anyhow!("provide event ID or --query"));
+            };
+
+            if events_to_cancel.is_empty() {
+                println!("No events found to cancel");
+                return Ok(());
+            }
+
+            // Show what will be cancelled
+            println!("Events to cancel ({}):", events_to_cancel.len());
+            for (_, subject, start) in &events_to_cancel {
+                if start.is_empty() {
+                    println!("  - {}", subject);
+                } else {
+                    println!("  - {} ({})", subject, start);
+                }
+            }
+
+            if args.dry_run {
+                println!("\nDry run - no events cancelled");
+                return Ok(());
+            }
+
+            println!();
+
+            // Cancel each event
+            let mut cancelled = 0;
+            let mut errors: Vec<String> = Vec::new();
+            let db_path = ctx.paths.sync_db_path(&account);
+            let db = Database::open(&db_path).ok();
+
+            for (remote_id, subject, _) in &events_to_cancel {
+                match client.calendar_cancel(&account, remote_id, args.message.as_deref()) {
+                    Ok(result) => {
+                        if result.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                            println!("Cancelled: {}", subject);
+                            cancelled += 1;
+
+                            // Free the word ID if we have a DB
+                            if let Some(ref database) = db {
+                                let _ = database.delete_calendar_event(remote_id);
+                                let id_gen = IdGenerator::new(database);
+                                let _ = id_gen.free(remote_id);
+                            }
+                        } else {
+                            let err = result.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                            errors.push(format!("{}: {}", subject, err));
+                        }
+                    }
+                    Err(e) => errors.push(format!("{}: {}", subject, e)),
+                }
+            }
+
+            if !errors.is_empty() {
+                for err in &errors {
+                    eprintln!("Error: {}", err);
+                }
+            }
+
+            println!("\nCancelled {} of {} event(s)", cancelled, events_to_cancel.len());
         }
         CalendarCommand::Delete(args) => {
             // Resolve word ID to remote ID if needed
@@ -1220,94 +1349,75 @@ fn resolve_calendar_id(ctx: &RuntimeContext, account: &str, id: &str) -> Result<
     Ok(id.to_string())
 }
 
-/// Parse a natural language date range expression for calendar viewing.
+// =============================================================================
+// Unified Date Parsing
+// =============================================================================
+
+/// Parse a single date from natural language expression.
 ///
-/// Returns (from_date, to_date, description) as ISO date strings and human-readable description.
+/// Returns (date, description) or None if not parseable.
 ///
-/// Supported expressions:
-/// - "today", "heute" - today only
-/// - "tomorrow", "morgen" - tomorrow only
-/// - "friday", "freitag" - next occurrence of that weekday
-/// - "next week", "nächste woche" - Monday to Sunday of next week
-/// - "this week", "diese woche" - rest of current week
-/// - "kw30", "week 30" - calendar week 30
-/// - "december", "dezember" - entire month
-/// - "11 december" - specific date
-fn parse_date_range_expr(text: &str) -> (String, String, String) {
+/// Supported formats:
+/// - Relative: "today", "heute", "yesterday", "gestern", "tomorrow", "morgen",
+///   "overmorrow", "uebermorgen", "übermorgen"
+/// - Offset: "+2", "-1", "+0" (days from today)
+/// - Weekdays: "monday", "mon", "montag", "mittwoch", etc. (most recent occurrence)
+/// - ISO: "2026-01-28"
+/// - Slash: "2026/01/28"
+/// - German dot: "28.01", "28.01.2026", "28.1", "28.1.26"
+/// - Month+day: "jan 28", "28 jan", "january 28", "28. januar"
+/// - Bare day: "28" (current month, or previous month if date passed)
+fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
     use chrono::{Datelike, Weekday};
     use regex::Regex;
 
     let now = Local::now();
-    let text_lower = text.to_lowercase();
+    let today = now.date_naive();
+    let text_lower = text.to_lowercase().trim().to_string();
 
-    // 1. Check for week number: "kw30", "kw 30", "week 30", "woche 30"
-    let week_re = Regex::new(r"(?i)\b(?:kw|week|woche)\s*(\d{1,2})\b").unwrap();
-    if let Some(caps) = week_re.captures(&text_lower) {
-        if let Ok(week_num) = caps.get(1).unwrap().as_str().parse::<u32>() {
-            let year = now.year();
-            // ISO week: find the Monday of week 1, then add weeks
-            let jan4 = NaiveDate::from_ymd_opt(year, 1, 4).unwrap();
-            let week1_monday = jan4 - ChronoDuration::days(jan4.weekday().num_days_from_monday() as i64);
-            let start = week1_monday + ChronoDuration::weeks((week_num - 1) as i64);
-            let end = start + ChronoDuration::days(6);
-            return (
-                start.format("%Y-%m-%d").to_string(),
-                end.format("%Y-%m-%d").to_string(),
-                format!("KW{} {}", week_num, year),
-            );
-        }
+    if text_lower.is_empty() {
+        return None;
     }
 
-    // 2. Check for "next week" / "nächste woche"
-    let next_week_re = Regex::new(r"(?i)\b(next\s+week|nächste\s+woche)\b").unwrap();
-    if next_week_re.is_match(&text_lower) {
-        let days_until_monday = (7 - now.weekday().num_days_from_monday()) % 7;
-        let days_until_monday = if days_until_monday == 0 { 7 } else { days_until_monday };
-        let next_monday = now.date_naive() + ChronoDuration::days(days_until_monday as i64);
-        let next_sunday = next_monday + ChronoDuration::days(6);
-        return (
-            next_monday.format("%Y-%m-%d").to_string(),
-            next_sunday.format("%Y-%m-%d").to_string(),
-            "next week".to_string(),
-        );
+    // 1. Offset format: "+2", "-1", "+0"
+    let offset_re = Regex::new(r"^([+-])(\d+)$").unwrap();
+    if let Some(caps) = offset_re.captures(&text_lower) {
+        let sign = caps.get(1).unwrap().as_str();
+        let num: i64 = caps.get(2).unwrap().as_str().parse().ok()?;
+        let offset = if sign == "-" { -num } else { num };
+        let target = today + ChronoDuration::days(offset);
+        let desc = if offset == 0 {
+            "today".to_string()
+        } else if offset == 1 {
+            "tomorrow".to_string()
+        } else if offset == -1 {
+            "yesterday".to_string()
+        } else {
+            format!("{:+} days", offset)
+        };
+        return Some((target, desc));
     }
 
-    // 3. Check for "this week" / "diese woche"
-    let this_week_re = Regex::new(r"(?i)\b(this\s+week|diese\s+woche)\b").unwrap();
-    if this_week_re.is_match(&text_lower) {
-        let today = now.date_naive();
-        let days_until_sunday = 6 - now.weekday().num_days_from_monday();
-        let sunday = today + ChronoDuration::days(days_until_sunday as i64);
-        return (
-            today.format("%Y-%m-%d").to_string(),
-            sunday.format("%Y-%m-%d").to_string(),
-            "this week".to_string(),
-        );
-    }
-
-    // 4. Relative days
+    // 2. Relative days (including uebermorgen without umlaut)
     let relative_days: &[(&str, i64)] = &[
         ("today", 0),
         ("heute", 0),
-        ("tomorrow", 1),
-        ("morgen", 1),
         ("yesterday", -1),
         ("gestern", -1),
+        ("tomorrow", 1),
+        ("morgen", 1),
         ("overmorrow", 2),
         ("übermorgen", 2),
+        ("uebermorgen", 2),
     ];
     for (keyword, offset) in relative_days {
-        if text_lower.contains(keyword) {
-            let target = now.date_naive() + ChronoDuration::days(*offset);
-            return (
-                target.format("%Y-%m-%d").to_string(),
-                target.format("%Y-%m-%d").to_string(),
-                (*keyword).to_string(),
-            );
+        if text_lower == *keyword {
+            let target = today + ChronoDuration::days(*offset);
+            return Some((target, (*keyword).to_string()));
         }
     }
 
-    // 5. Weekday names
+    // 3. Weekday names (returns most recent occurrence, including today)
     let weekdays: &[(&str, Weekday)] = &[
         ("monday", Weekday::Mon),
         ("mon", Weekday::Mon),
@@ -1332,22 +1442,63 @@ fn parse_date_range_expr(text: &str) -> (String, String, String) {
         ("sonntag", Weekday::Sun),
     ];
     for (name, weekday) in weekdays {
-        let pattern = format!(r"\b{}\b", regex::escape(name));
-        if Regex::new(&pattern).unwrap().is_match(&text_lower) {
-            let today = now.date_naive();
+        if text_lower == *name {
             let today_weekday = today.weekday();
-            let days_ahead = (*weekday as i64 - today_weekday as i64 + 7) % 7;
-            let days_ahead = if days_ahead == 0 { 7 } else { days_ahead }; // Next occurrence
-            let target = today + ChronoDuration::days(days_ahead);
-            return (
-                target.format("%Y-%m-%d").to_string(),
-                target.format("%Y-%m-%d").to_string(),
-                (*name).to_string(),
-            );
+            // Find the most recent occurrence (today or earlier this week, or last week)
+            let days_back =
+                (today_weekday.num_days_from_monday() as i64 - weekday.num_days_from_monday() as i64
+                    + 7)
+                    % 7;
+            let target = today - ChronoDuration::days(days_back);
+            return Some((target, (*name).to_string()));
         }
     }
 
-    // 6. Month names (with optional day)
+    // 4. German dot format: "28.01", "28.01.2026", "28.1", "28.1.26"
+    let dot_re = Regex::new(r"^(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?$").unwrap();
+    if let Some(caps) = dot_re.captures(&text_lower) {
+        let day: u32 = caps.get(1).unwrap().as_str().parse().ok()?;
+        let month: u32 = caps.get(2).unwrap().as_str().parse().ok()?;
+        let year: i32 = if let Some(y) = caps.get(3) {
+            let y_str = y.as_str();
+            let y_num: i32 = y_str.parse().ok()?;
+            if y_num < 100 {
+                2000 + y_num // "26" -> 2026
+            } else {
+                y_num
+            }
+        } else {
+            // No year: use current year, or previous year if date is in the future
+            let current_year = now.year();
+            if month > now.month() || (month == now.month() && day > now.day()) {
+                current_year - 1
+            } else {
+                current_year
+            }
+        };
+
+        if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+            return Some((date, date.format("%d.%m.%Y").to_string()));
+        }
+    }
+
+    // 5. Slash date format: "2025/02/01"
+    let slash_re = Regex::new(r"^(\d{4})/(\d{1,2})/(\d{1,2})$").unwrap();
+    if let Some(caps) = slash_re.captures(&text_lower) {
+        let year: i32 = caps.get(1).unwrap().as_str().parse().ok()?;
+        let month: u32 = caps.get(2).unwrap().as_str().parse().ok()?;
+        let day: u32 = caps.get(3).unwrap().as_str().parse().ok()?;
+        if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+            return Some((date, date.format("%B %d, %Y").to_string()));
+        }
+    }
+
+    // 6. ISO date format: "2025-02-01"
+    if let Ok(date) = NaiveDate::parse_from_str(&text_lower, "%Y-%m-%d") {
+        return Some((date, date.format("%B %d, %Y").to_string()));
+    }
+
+    // 7. Month names with optional day
     let months: &[(&str, u32)] = &[
         ("january", 1),
         ("jan", 1),
@@ -1386,175 +1537,10 @@ fn parse_date_range_expr(text: &str) -> (String, String, String) {
         ("dezember", 12),
     ];
 
-    for (name, month_num) in months {
-        let pattern = format!(r"\b{}\b", regex::escape(name));
-        if Regex::new(&pattern).unwrap().is_match(&text_lower) {
-            // Check for day number
-            let day_re = Regex::new(r"\b(\d{1,2})\b").unwrap();
-            if let Some(day_caps) = day_re.captures(&text_lower) {
-                if let Ok(day) = day_caps.get(1).unwrap().as_str().parse::<u32>() {
-                    if (1..=31).contains(&day) {
-                        let mut year = now.year();
-                        if *month_num < now.month()
-                            || (*month_num == now.month() && day < now.day())
-                        {
-                            year += 1;
-                        }
-                        if let Some(date) = NaiveDate::from_ymd_opt(year, *month_num, day) {
-                            return (
-                                date.format("%Y-%m-%d").to_string(),
-                                date.format("%Y-%m-%d").to_string(),
-                                format!("{} {}, {}", name, day, year),
-                            );
-                        }
-                    }
-                }
-            }
-            // Just the month
-            let mut year = now.year();
-            if *month_num < now.month() {
-                year += 1;
-            }
-            let start = NaiveDate::from_ymd_opt(year, *month_num, 1).unwrap();
-            let end = if *month_num == 12 {
-                NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap() - ChronoDuration::days(1)
-            } else {
-                NaiveDate::from_ymd_opt(year, *month_num + 1, 1).unwrap() - ChronoDuration::days(1)
-            };
-            return (
-                start.format("%Y-%m-%d").to_string(),
-                end.format("%Y-%m-%d").to_string(),
-                format!("{} {}", name, year),
-            );
-        }
-    }
-
-    // 7. Try to parse as ISO date (YYYY-MM-DD)
-    if let Ok(date) = NaiveDate::parse_from_str(&text_lower, "%Y-%m-%d") {
-        return (
-            date.format("%Y-%m-%d").to_string(),
-            date.format("%Y-%m-%d").to_string(),
-            date.format("%A, %B %d, %Y").to_string(),
-        );
-    }
-
-    // 8. Default: today
-    let today = now.date_naive();
-    (
-        today.format("%Y-%m-%d").to_string(),
-        today.format("%Y-%m-%d").to_string(),
-        "today".to_string(),
-    )
-}
-
-/// Parse a natural language date expression and return a single date.
-///
-/// Supports formats like:
-/// - "today", "yesterday", "tomorrow"
-/// - "2025/02/01", "2025-02-01"
-/// - "feb 11", "dec 8 2024", "11 feb", "8 dec 2024"
-/// - Weekday names: "monday", "friday"
-///
-/// Returns (date_string, description) where date_string is YYYY-MM-DD format.
-fn parse_date_expr(text: &str) -> Option<(NaiveDate, String)> {
-    use chrono::{Datelike, Weekday};
-    use regex::Regex;
-
-    let now = Local::now();
-    let text_lower = text.to_lowercase().trim().to_string();
-
-    if text_lower.is_empty() {
-        return None;
-    }
-
-    // 1. Relative days
-    let relative_days: &[(&str, i64)] = &[
-        ("today", 0),
-        ("heute", 0),
-        ("yesterday", -1),
-        ("gestern", -1),
-    ];
-    for (keyword, offset) in relative_days {
-        if text_lower == *keyword {
-            let target = now.date_naive() + ChronoDuration::days(*offset);
-            return Some((target, (*keyword).to_string()));
-        }
-    }
-
-    // 2. Weekday names (returns next occurrence, or today if it matches)
-    let weekdays: &[(&str, Weekday)] = &[
-        ("monday", Weekday::Mon),
-        ("mon", Weekday::Mon),
-        ("montag", Weekday::Mon),
-        ("tuesday", Weekday::Tue),
-        ("tue", Weekday::Tue),
-        ("dienstag", Weekday::Tue),
-        ("wednesday", Weekday::Wed),
-        ("wed", Weekday::Wed),
-        ("mittwoch", Weekday::Wed),
-        ("thursday", Weekday::Thu),
-        ("thu", Weekday::Thu),
-        ("donnerstag", Weekday::Thu),
-        ("friday", Weekday::Fri),
-        ("fri", Weekday::Fri),
-        ("freitag", Weekday::Fri),
-        ("saturday", Weekday::Sat),
-        ("sat", Weekday::Sat),
-        ("samstag", Weekday::Sat),
-        ("sunday", Weekday::Sun),
-        ("sun", Weekday::Sun),
-        ("sonntag", Weekday::Sun),
-    ];
-    for (name, weekday) in weekdays {
-        if text_lower == *name {
-            let today = now.date_naive();
-            let today_weekday = today.weekday();
-            // Find the most recent occurrence (today or earlier this week, or last week)
-            let days_back = (today_weekday.num_days_from_monday() as i64
-                - weekday.num_days_from_monday() as i64
-                + 7)
-                % 7;
-            let target = today - ChronoDuration::days(days_back);
-            return Some((target, (*name).to_string()));
-        }
-    }
-
-    // 3. Slash date format: 2025/02/01
-    let slash_re = Regex::new(r"^(\d{4})/(\d{1,2})/(\d{1,2})$").unwrap();
-    if let Some(caps) = slash_re.captures(&text_lower) {
-        let year: i32 = caps.get(1).unwrap().as_str().parse().ok()?;
-        let month: u32 = caps.get(2).unwrap().as_str().parse().ok()?;
-        let day: u32 = caps.get(3).unwrap().as_str().parse().ok()?;
-        if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
-            return Some((date, date.format("%B %d, %Y").to_string()));
-        }
-    }
-
-    // 4. ISO date format: 2025-02-01
-    if let Ok(date) = NaiveDate::parse_from_str(&text_lower, "%Y-%m-%d") {
-        return Some((date, date.format("%B %d, %Y").to_string()));
-    }
-
-    // 5. Month and day with optional year: "feb 11", "dec 8 2024", "11 feb", "8 dec 2024"
-    let months: &[(&str, u32)] = &[
-        ("january", 1), ("jan", 1), ("januar", 1),
-        ("february", 2), ("feb", 2), ("februar", 2),
-        ("march", 3), ("mar", 3), ("märz", 3), ("maerz", 3),
-        ("april", 4), ("apr", 4),
-        ("may", 5), ("mai", 5),
-        ("june", 6), ("jun", 6), ("juni", 6),
-        ("july", 7), ("jul", 7), ("juli", 7),
-        ("august", 8), ("aug", 8),
-        ("september", 9), ("sep", 9), ("sept", 9),
-        ("october", 10), ("oct", 10), ("okt", 10), ("oktober", 10),
-        ("november", 11), ("nov", 11),
-        ("december", 12), ("dec", 12), ("dez", 12), ("dezember", 12),
-    ];
-
     for (month_name, month_num) in months {
         if text_lower.contains(month_name) {
-            // Extract day and optional year
-            let day_year_re = Regex::new(r"(\d{1,2})(?:\s+(\d{4}))?").unwrap();
+            // Extract day and optional year: "28", "28 2024", "28.", etc.
+            let day_year_re = Regex::new(r"(\d{1,2})\.?(?:\s+(\d{4}))?").unwrap();
             if let Some(caps) = day_year_re.captures(&text_lower) {
                 let day: u32 = caps.get(1).unwrap().as_str().parse().ok()?;
                 let year: i32 = if let Some(y) = caps.get(2) {
@@ -1578,7 +1564,187 @@ fn parse_date_expr(text: &str) -> Option<(NaiveDate, String)> {
         }
     }
 
+    // 8. Bare day number: "28" (current month, or previous month if passed)
+    let bare_day_re = Regex::new(r"^(\d{1,2})$").unwrap();
+    if let Some(caps) = bare_day_re.captures(&text_lower) {
+        let day: u32 = caps.get(1).unwrap().as_str().parse().ok()?;
+        if (1..=31).contains(&day) {
+            let mut year = now.year();
+            let mut month = now.month();
+
+            // If day is in the future this month, look at previous month
+            if day > now.day() {
+                if month == 1 {
+                    month = 12;
+                    year -= 1;
+                } else {
+                    month -= 1;
+                }
+            }
+
+            if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+                return Some((date, date.format("%B %d").to_string()));
+            }
+        }
+    }
+
     None
+}
+
+/// Parse a natural language date range expression for calendar viewing.
+///
+/// Returns (from_date, to_date, description) as ISO date strings and human-readable description.
+///
+/// Supported expressions:
+/// - All single-date formats from parse_single_date
+/// - "next week", "nächste woche" - Monday to Sunday of next week
+/// - "this week", "diese woche" - rest of current week
+/// - "kw30", "week 30" - calendar week 30
+/// - "december", "dezember" - entire month (when no day specified)
+fn parse_date_range_expr(text: &str) -> (String, String, String) {
+    use chrono::Datelike;
+    use regex::Regex;
+
+    let now = Local::now();
+    let today = now.date_naive();
+    let text_lower = text.to_lowercase();
+
+    // 1. Check for week number: "kw30", "kw 30", "week 30", "woche 30"
+    let week_re = Regex::new(r"(?i)\b(?:kw|week|woche)\s*(\d{1,2})\b").unwrap();
+    if let Some(caps) = week_re.captures(&text_lower) {
+        if let Ok(week_num) = caps.get(1).unwrap().as_str().parse::<u32>() {
+            let year = now.year();
+            // ISO week: find the Monday of week 1, then add weeks
+            let jan4 = NaiveDate::from_ymd_opt(year, 1, 4).unwrap();
+            let week1_monday =
+                jan4 - ChronoDuration::days(jan4.weekday().num_days_from_monday() as i64);
+            let start = week1_monday + ChronoDuration::weeks((week_num - 1) as i64);
+            let end = start + ChronoDuration::days(6);
+            return (
+                start.format("%Y-%m-%d").to_string(),
+                end.format("%Y-%m-%d").to_string(),
+                format!("KW{} {}", week_num, year),
+            );
+        }
+    }
+
+    // 2. Check for "next week" / "nächste woche" / "naechste woche"
+    let next_week_re =
+        Regex::new(r"(?i)\b(next\s+week|nächste\s+woche|naechste\s+woche)\b").unwrap();
+    if next_week_re.is_match(&text_lower) {
+        let days_until_monday = (7 - now.weekday().num_days_from_monday()) % 7;
+        let days_until_monday = if days_until_monday == 0 {
+            7
+        } else {
+            days_until_monday
+        };
+        let next_monday = today + ChronoDuration::days(days_until_monday as i64);
+        let next_sunday = next_monday + ChronoDuration::days(6);
+        return (
+            next_monday.format("%Y-%m-%d").to_string(),
+            next_sunday.format("%Y-%m-%d").to_string(),
+            "next week".to_string(),
+        );
+    }
+
+    // 3. Check for "this week" / "diese woche"
+    let this_week_re = Regex::new(r"(?i)\b(this\s+week|diese\s+woche)\b").unwrap();
+    if this_week_re.is_match(&text_lower) {
+        let days_until_sunday = 6 - now.weekday().num_days_from_monday();
+        let sunday = today + ChronoDuration::days(days_until_sunday as i64);
+        return (
+            today.format("%Y-%m-%d").to_string(),
+            sunday.format("%Y-%m-%d").to_string(),
+            "this week".to_string(),
+        );
+    }
+
+    // 4. Month names without day (entire month)
+    let months: &[(&str, u32)] = &[
+        ("january", 1),
+        ("jan", 1),
+        ("januar", 1),
+        ("february", 2),
+        ("feb", 2),
+        ("februar", 2),
+        ("march", 3),
+        ("mar", 3),
+        ("märz", 3),
+        ("maerz", 3),
+        ("april", 4),
+        ("apr", 4),
+        ("may", 5),
+        ("mai", 5),
+        ("june", 6),
+        ("jun", 6),
+        ("juni", 6),
+        ("july", 7),
+        ("jul", 7),
+        ("juli", 7),
+        ("august", 8),
+        ("aug", 8),
+        ("september", 9),
+        ("sep", 9),
+        ("sept", 9),
+        ("october", 10),
+        ("oct", 10),
+        ("okt", 10),
+        ("oktober", 10),
+        ("november", 11),
+        ("nov", 11),
+        ("december", 12),
+        ("dec", 12),
+        ("dez", 12),
+        ("dezember", 12),
+    ];
+
+    // Check for month without a day number (whole month range)
+    let has_day = Regex::new(r"\d").unwrap().is_match(&text_lower);
+    if !has_day {
+        for (name, month_num) in months {
+            let pattern = format!(r"(?i)\b{}\b", regex::escape(name));
+            if Regex::new(&pattern).unwrap().is_match(&text_lower) {
+                let mut year = now.year();
+                if *month_num < now.month() {
+                    year += 1;
+                }
+                let start = NaiveDate::from_ymd_opt(year, *month_num, 1).unwrap();
+                let end = if *month_num == 12 {
+                    NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap() - ChronoDuration::days(1)
+                } else {
+                    NaiveDate::from_ymd_opt(year, *month_num + 1, 1).unwrap()
+                        - ChronoDuration::days(1)
+                };
+                return (
+                    start.format("%Y-%m-%d").to_string(),
+                    end.format("%Y-%m-%d").to_string(),
+                    format!("{} {}", name, year),
+                );
+            }
+        }
+    }
+
+    // 5. Try single-date parser for everything else
+    if let Some((date, description)) = parse_single_date(text) {
+        return (
+            date.format("%Y-%m-%d").to_string(),
+            date.format("%Y-%m-%d").to_string(),
+            description,
+        );
+    }
+
+    // 6. Default: today
+    (
+        today.format("%Y-%m-%d").to_string(),
+        today.format("%Y-%m-%d").to_string(),
+        "today".to_string(),
+    )
+}
+
+/// Parse a natural language date expression and return a single date.
+/// This is an alias for parse_single_date for backward compatibility.
+fn parse_date_expr(text: &str) -> Option<(NaiveDate, String)> {
+    parse_single_date(text)
 }
 
 /// Parse a natural language datetime expression for scheduling.
@@ -2321,6 +2487,38 @@ fn parse_message_ids(ids: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Parse an email address string like "Name <email@x.com>" or "email@x.com".
+/// Returns (email, Option<name>).
+fn parse_email_address(s: &str) -> Option<(String, Option<String>)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Check for "Name <email>" format
+    if let Some(start) = s.find('<') {
+        if let Some(end) = s.find('>') {
+            let email = s[start + 1..end].trim().to_lowercase();
+            let name = s[..start].trim();
+            let name = if name.is_empty() {
+                None
+            } else {
+                Some(name.trim_matches('"').to_string())
+            };
+            if email.contains('@') {
+                return Some((email, name));
+            }
+        }
+    }
+
+    // Just an email address
+    if s.contains('@') {
+        return Some((s.to_lowercase(), None));
+    }
+
+    None
+}
+
 /// Parse move args to extract target folder from positional args or --to flag.
 /// Supports: "h8 mail move id1 id2 --to folder" or "h8 mail move id1 id2 to folder"
 fn parse_move_args(args: &MailMoveArgs) -> Result<(Vec<String>, String)> {
@@ -2359,16 +2557,69 @@ fn parse_move_args(args: &MailMoveArgs) -> Result<(Vec<String>, String)> {
 }
 
 fn handle_mail_move(ctx: &RuntimeContext, account: &str, args: MailMoveArgs) -> Result<()> {
-    let (ids, target) = parse_move_args(&args)?;
+    let service = ctx.service_client()?;
 
-    if ids.is_empty() {
-        return Err(anyhow!("no message IDs provided"));
-    }
+    // Get IDs either from args or from search query
+    let (ids, target) = if let Some(ref query) = args.query {
+        // Search for messages matching query
+        let results = service
+            .mail_search(account, query, &args.folder, args.limit)
+            .map_err(|e| anyhow!("{e}"))?;
+
+        let search_ids: Vec<String> = results
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if search_ids.is_empty() {
+            println!("No messages found matching: {}", query);
+            return Ok(());
+        }
+
+        // Get target from --to flag (required when using --query)
+        let target = args.target.clone().ok_or_else(|| {
+            anyhow!("--to <folder> is required when using --query")
+        })?;
+
+        // Show what will be moved
+        println!("Found {} message(s) matching \"{}\":", search_ids.len(), query);
+        for (i, id) in search_ids.iter().take(10).enumerate() {
+            if let Some(msg) = results.as_array().and_then(|a| a.get(i)) {
+                let subject = msg.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
+                let from = msg.get("from").and_then(|v| v.as_str()).unwrap_or("unknown");
+                println!("  {} - {} ({})", id, subject, from);
+            }
+        }
+        if search_ids.len() > 10 {
+            println!("  ... and {} more", search_ids.len() - 10);
+        }
+
+        if args.dry_run {
+            println!("\nDry run - no messages moved");
+            return Ok(());
+        }
+
+        println!();
+        (search_ids, target)
+    } else {
+        let (ids, target) = parse_move_args(&args)?;
+        if ids.is_empty() {
+            return Err(anyhow!("no message IDs provided (use IDs or --query)"));
+        }
+        if args.dry_run {
+            println!("Would move {} message(s) to {}", ids.len(), target);
+            return Ok(());
+        }
+        (ids, target)
+    };
 
     let mail_dir = get_mail_dir(ctx, account)?;
     let db_path = ctx.paths.sync_db_path(account);
     let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
-    let service = ctx.service_client()?;
 
     let mut moved_count = 0;
     let mut errors: Vec<String> = Vec::new();
@@ -2833,6 +3084,16 @@ fn handle_mail_sync(
                 };
                 db.upsert_message(&msg_sync).map_err(|e| anyhow!("{e}"))?;
 
+                // Cache email addresses for autocomplete
+                // Parse "Name <email>" or just "email" format
+                if let Some((email, name)) = parse_email_address(from) {
+                    if folder == "sent" {
+                        let _ = db.record_sent_address(&email, name.as_deref());
+                    } else {
+                        let _ = db.record_received_address(&email, name.as_deref());
+                    }
+                }
+
                 synced += 1;
             }
         }
@@ -3195,6 +3456,49 @@ fn handle_contacts(ctx: &RuntimeContext, cmd: ContactsCommand) -> Result<()> {
     Ok(())
 }
 
+fn handle_addr(ctx: &RuntimeContext, args: AddrArgs) -> Result<()> {
+    let account = effective_account(ctx);
+    let db_path = ctx.paths.sync_db_path(&account);
+
+    if !db_path.exists() {
+        return Err(anyhow!("no address cache yet - run 'h8 mail sync' first"));
+    }
+
+    let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+
+    let addresses = if args.frequent || args.query.is_none() {
+        db.frequent_addresses(args.limit).map_err(|e| anyhow!("{e}"))?
+    } else {
+        db.search_addresses(args.query.as_deref().unwrap(), args.limit)
+            .map_err(|e| anyhow!("{e}"))?
+    };
+
+    if addresses.is_empty() {
+        if let Some(ref q) = args.query {
+            println!("No addresses found matching \"{}\"", q);
+        } else {
+            println!("No addresses cached yet - run 'h8 mail sync' to populate");
+        }
+        return Ok(());
+    }
+
+    if ctx.common.json || ctx.common.yaml {
+        emit_output(&ctx.common, &serde_json::to_value(&addresses)?)?;
+    } else {
+        for addr in &addresses {
+            let name_part = addr.name.as_deref().unwrap_or("");
+            let count_info = format!("sent:{} recv:{}", addr.send_count, addr.receive_count);
+            if name_part.is_empty() {
+                println!("{:<40} ({})", addr.email, count_info);
+            } else {
+                println!("{} <{}> ({})", name_part, addr.email, count_info);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
     let account = args.account.unwrap_or_else(|| effective_account(ctx));
     let client = ctx.service_client()?;
@@ -3211,13 +3515,19 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
         .parse::<chrono_tz::Tz>()
         .unwrap_or(chrono_tz::UTC);
 
-    // Parse day offset from argument
-    let day_offset = parse_day_offset(&args.day)?;
-    let target_date = Local::now()
-        .with_timezone(&tz)
-        .date_naive()
-        .checked_add_signed(ChronoDuration::days(day_offset))
-        .ok_or_else(|| anyhow!("invalid date offset"))?;
+    // Parse date from positional argument using unified parser
+    let when_text = if args.when.is_empty() {
+        "today".to_string()
+    } else {
+        args.when.join(" ")
+    };
+
+    let target_date = if let Some((date, _desc)) = parse_single_date(&when_text) {
+        date
+    } else {
+        // Default to today if parsing fails
+        Local::now().with_timezone(&tz).date_naive()
+    };
 
     let start = target_date.and_hms_opt(0, 0, 0).unwrap();
     let end = target_date.and_hms_opt(23, 59, 59).unwrap();
@@ -3240,21 +3550,6 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
         serde_json::from_value(events_val.clone()).context("parsing agenda items")?;
     render_agenda(&events, tz, view, target_date)?;
     Ok(())
-}
-
-/// Parse day offset from string: "today", "tomorrow", "yesterday", or integer offset.
-fn parse_day_offset(s: &str) -> Result<i64> {
-    match s.to_lowercase().as_str() {
-        "today" | "0" => Ok(0),
-        "tomorrow" | "1" => Ok(1),
-        "yesterday" | "-1" => Ok(-1),
-        other => other.parse::<i64>().map_err(|_| {
-            anyhow!(
-                "invalid day offset: '{}' (use integer, 'today', 'tomorrow', or 'yesterday')",
-                other
-            )
-        }),
-    }
 }
 
 fn handle_free(ctx: &RuntimeContext, cmd: FreeCommand) -> Result<()> {
