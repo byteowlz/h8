@@ -175,6 +175,8 @@ enum CalendarCommand {
     /// Cancel a meeting and notify attendees
     Cancel(CalendarCancelArgs),
     Delete(CalendarDeleteArgs),
+    /// Sync calendar events to local cache for fast access
+    Sync(CalendarSyncArgs),
 }
 
 #[derive(Debug, Args)]
@@ -318,6 +320,19 @@ struct CalendarDeleteArgs {
     id: String,
     #[arg(long = "changekey")]
     change_key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct CalendarSyncArgs {
+    /// Number of weeks to sync (default: 4)
+    #[arg(short = 'w', long, default_value_t = 4)]
+    weeks: i64,
+    /// Also sync past events (weeks back, default: 1)
+    #[arg(short = 'p', long, default_value_t = 1)]
+    past_weeks: i64,
+    /// Force full sync (ignore last sync time)
+    #[arg(long)]
+    full: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1147,12 +1162,45 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
 
             let (from_date, to_date, description) = parse_date_range_expr(&when_text);
 
-            let events = client
-                .calendar_list(&account, 0, Some(&from_date), Some(&to_date))
-                .map_err(|e| anyhow!("{e}"))?;
+            // Try local cache first for single-day queries
+            let db_path = ctx.paths.sync_db_path(&account);
+            let events_with_ids = if db_path.exists() && from_date == to_date {
+                let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+                let cached_events = db
+                    .list_calendar_events_range(&from_date, &to_date)
+                    .map_err(|e| anyhow!("{e}"))?;
 
-            // Sync events to local DB and assign word IDs
-            let events_with_ids = sync_calendar_events(ctx, &account, &events)?;
+                if !cached_events.is_empty() {
+                    // Convert cached events to JSON format
+                    let events_json: Vec<serde_json::Value> = cached_events
+                        .into_iter()
+                        .map(|e| {
+                            serde_json::json!({
+                                "id": e.local_id,
+                                "remote_id": e.remote_id,
+                                "subject": e.subject,
+                                "location": e.location,
+                                "start": e.start,
+                                "end": e.end,
+                                "is_all_day": e.is_all_day,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!(events_json)
+                } else {
+                    // No cached events, fetch from server
+                    let events = client
+                        .calendar_list(&account, 0, Some(&from_date), Some(&to_date))
+                        .map_err(|e| anyhow!("{e}"))?;
+                    sync_calendar_events(ctx, &account, &events)?
+                }
+            } else {
+                // Range query or no cache - fetch from server
+                let events = client
+                    .calendar_list(&account, 0, Some(&from_date), Some(&to_date))
+                    .map_err(|e| anyhow!("{e}"))?;
+                sync_calendar_events(ctx, &account, &events)?
+            };
 
             if !ctx.common.json && !ctx.common.yaml {
                 println!("Events for {}:", description);
@@ -1243,6 +1291,9 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 println!("Responded '{}' to: {}", args.response.as_str(), subject);
             }
             emit_output(&ctx.common, &result)?;
+        }
+        CalendarCommand::Sync(args) => {
+            handle_calendar_sync(ctx, &client, &account, args)?;
         }
     }
     Ok(())
@@ -1347,6 +1398,131 @@ fn resolve_calendar_id(ctx: &RuntimeContext, account: &str, id: &str) -> Result<
     }
     // Assume it's already a remote ID
     Ok(id.to_string())
+}
+
+/// Sync calendar events from server to local cache.
+fn handle_calendar_sync(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    args: CalendarSyncArgs,
+) -> Result<()> {
+    use h8_core::types::CalendarEventSync;
+
+    let db_path = ctx.paths.sync_db_path(account);
+    let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+    let id_gen = IdGenerator::new(&db);
+
+    // Ensure ID pool is seeded
+    let stats = id_gen.stats().map_err(|e| anyhow!("{e}"))?;
+    if stats.total() == 0 {
+        let words = h8_core::id::WordLists::embedded();
+        id_gen.init_pool(&words).map_err(|e| anyhow!("{e}"))?;
+    }
+
+    // Calculate date range
+    let now = Local::now();
+    let start_date = (now - ChronoDuration::weeks(args.past_weeks))
+        .format("%Y-%m-%dT00:00:00")
+        .to_string();
+    let end_date = (now + ChronoDuration::weeks(args.weeks))
+        .format("%Y-%m-%dT23:59:59")
+        .to_string();
+
+    if !ctx.common.quiet {
+        println!(
+            "Syncing calendar events from {} to {}...",
+            &start_date[..10],
+            &end_date[..10]
+        );
+    }
+
+    // Fetch events from server
+    let events = client
+        .calendar_list(account, 0, Some(&start_date), Some(&end_date))
+        .map_err(|e| anyhow!("{e}"))?;
+
+    let events_array = events.as_array().ok_or_else(|| anyhow!("expected array"))?;
+
+    if !ctx.common.quiet {
+        println!("Found {} events", events_array.len());
+    }
+
+    let sync_time = chrono::Utc::now().to_rfc3339();
+    let mut synced = 0;
+
+    for event in events_array {
+        let remote_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if remote_id.is_empty() {
+            continue;
+        }
+
+        // Check if we already have this event
+        let local_id = if let Ok(Some(existing)) = db.get_calendar_event_by_remote_id(remote_id) {
+            existing.local_id
+        } else if let Ok(Some(existing_id)) = id_gen.reverse_lookup(remote_id) {
+            existing_id
+        } else {
+            // Allocate new word ID
+            id_gen.allocate(remote_id).map_err(|e| anyhow!("{e}"))?
+        };
+
+        // Determine if all-day event
+        let start = event.get("start").and_then(|v| v.as_str()).unwrap_or("");
+        let is_all_day = !start.contains('T');
+
+        // Save to database
+        let event_sync = CalendarEventSync {
+            local_id: local_id.clone(),
+            remote_id: remote_id.to_string(),
+            change_key: event
+                .get("changekey")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            subject: event
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            location: event
+                .get("location")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            start: event
+                .get("start")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            end: event.get("end").and_then(|v| v.as_str()).map(String::from),
+            is_all_day,
+            synced_at: Some(sync_time.clone()),
+        };
+        db.upsert_calendar_event(&event_sync)
+            .map_err(|e| anyhow!("{e}"))?;
+        synced += 1;
+    }
+
+    // Update sync state
+    db.set_calendar_sync_state(&sync_time)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    // Optionally clean up old events
+    let cleanup_before = (now - ChronoDuration::weeks(args.past_weeks + 4))
+        .format("%Y-%m-%dT00:00:00")
+        .to_string();
+    let deleted = db
+        .delete_old_calendar_events(&cleanup_before)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    if !ctx.common.quiet {
+        println!("Synced {} events", synced);
+        if deleted > 0 {
+            println!("Cleaned up {} old events", deleted);
+        }
+        if let Ok(Some(last_sync)) = db.get_calendar_sync_state() {
+            println!("Last sync: {}", &last_sync[..19]);
+        }
+    }
+
+    Ok(())
 }
 
 // =============================================================================
@@ -3501,7 +3677,6 @@ fn handle_addr(ctx: &RuntimeContext, args: AddrArgs) -> Result<()> {
 
 fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
     let account = args.account.unwrap_or_else(|| effective_account(ctx));
-    let client = ctx.service_client()?;
 
     // Get view from args or config default
     let view = args
@@ -3529,17 +3704,44 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
         Local::now().with_timezone(&tz).date_naive()
     };
 
-    let start = target_date.and_hms_opt(0, 0, 0).unwrap();
-    let end = target_date.and_hms_opt(23, 59, 59).unwrap();
+    let start_str = target_date.format("%Y-%m-%d").to_string();
+    let end_str = target_date.format("%Y-%m-%d").to_string();
 
-    let events_val = client
-        .calendar_list(
-            &account,
-            1,
-            Some(&start.format("%Y-%m-%dT%H:%M:%S").to_string()),
-            Some(&end.format("%Y-%m-%dT%H:%M:%S").to_string()),
-        )
-        .map_err(|e| anyhow!("{e}"))?;
+    // Try local cache first for lightning-fast access
+    let db_path = ctx.paths.sync_db_path(&account);
+    let events_val = if db_path.exists() {
+        let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+
+        // Check if we have cached events for this date range
+        let cached_events = db
+            .list_calendar_events_range(&start_str, &end_str)
+            .map_err(|e| anyhow!("{e}"))?;
+
+        if !cached_events.is_empty() {
+            // Convert cached events to JSON format matching server response
+            let events_json: Vec<serde_json::Value> = cached_events
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.local_id,
+                        "remote_id": e.remote_id,
+                        "subject": e.subject,
+                        "location": e.location,
+                        "start": e.start,
+                        "end": e.end,
+                        "is_all_day": e.is_all_day,
+                    })
+                })
+                .collect();
+            serde_json::json!(events_json)
+        } else {
+            // No cached events, fall back to server
+            fetch_agenda_from_server(ctx, &account, &target_date)?
+        }
+    } else {
+        // No cache, fetch from server
+        fetch_agenda_from_server(ctx, &account, &target_date)?
+    };
 
     if ctx.common.json || ctx.common.yaml || !io::stdout().is_terminal() {
         emit_output(&ctx.common, &events_val)?;
@@ -3550,6 +3752,31 @@ fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
         serde_json::from_value(events_val.clone()).context("parsing agenda items")?;
     render_agenda(&events, tz, view, target_date)?;
     Ok(())
+}
+
+/// Fetch agenda events from server (fallback when no cache).
+fn fetch_agenda_from_server(
+    ctx: &RuntimeContext,
+    account: &str,
+    target_date: &NaiveDate,
+) -> Result<Value> {
+    let client = ctx.service_client()?;
+    let start = target_date.and_hms_opt(0, 0, 0).unwrap();
+    let end = target_date.and_hms_opt(23, 59, 59).unwrap();
+
+    let events_val = client
+        .calendar_list(
+            account,
+            1,
+            Some(&start.format("%Y-%m-%dT%H:%M:%S").to_string()),
+            Some(&end.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+
+    // Sync to local cache
+    let _ = sync_calendar_events(ctx, account, &events_val);
+
+    Ok(events_val)
 }
 
 fn handle_free(ctx: &RuntimeContext, cmd: FreeCommand) -> Result<()> {
