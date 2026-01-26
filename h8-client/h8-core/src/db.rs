@@ -496,6 +496,90 @@ impl Database {
         Ok(events)
     }
 
+    /// List calendar events in a specific date range (inclusive).
+    /// Dates should be in ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS).
+    pub fn list_calendar_events_range(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Vec<CalendarEventSync>> {
+        // For all-day events, start is just "YYYY-MM-DD", for timed events it's "YYYY-MM-DDTHH:MM:SS..."
+        // We need to match both, so we use string comparison with proper bounds
+        let start_bound = if start_date.contains('T') {
+            start_date.to_string()
+        } else {
+            format!("{}T00:00:00", start_date)
+        };
+        let end_bound = if end_date.contains('T') {
+            end_date.to_string()
+        } else {
+            format!("{}T23:59:59", end_date)
+        };
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at
+            FROM calendar_events
+            WHERE (start >= ?1 AND start <= ?2)
+               OR (start < ?1 AND end > ?1)
+               OR (is_all_day = 1 AND start >= ?3 AND start <= ?4)
+            ORDER BY start ASC
+            "#,
+        )?;
+
+        // For all-day events, also match by date prefix
+        let start_date_only = &start_date[..10.min(start_date.len())];
+        let end_date_only = &end_date[..10.min(end_date.len())];
+
+        let mut rows = stmt.query(params![
+            start_bound,
+            end_bound,
+            start_date_only,
+            end_date_only
+        ])?;
+
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
+            events.push(CalendarEventSync {
+                local_id: row.get(0)?,
+                remote_id: row.get(1)?,
+                change_key: row.get(2)?,
+                subject: row.get(3)?,
+                location: row.get(4)?,
+                start: row.get(5)?,
+                end: row.get(6)?,
+                is_all_day: row.get(7)?,
+                synced_at: row.get(8)?,
+            });
+        }
+        Ok(events)
+    }
+
+    /// Get the last sync timestamp for calendar events.
+    pub fn get_calendar_sync_state(&self) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT last_sync FROM sync_state WHERE folder = 'calendar'")?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get(0)?)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Update the calendar sync timestamp.
+    pub fn set_calendar_sync_state(&self, timestamp: &str) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO sync_state (folder, last_sync) VALUES ('calendar', ?1)
+            ON CONFLICT(folder) DO UPDATE SET last_sync = excluded.last_sync
+            "#,
+            params![timestamp],
+        )?;
+        Ok(())
+    }
+
     /// Delete a calendar event by local ID.
     pub fn delete_calendar_event(&self, local_id: &str) -> Result<bool> {
         let count = self.conn.execute(
@@ -503,6 +587,15 @@ impl Database {
             params![local_id],
         )?;
         Ok(count > 0)
+    }
+
+    /// Delete old calendar events (before a given date).
+    pub fn delete_old_calendar_events(&self, before_date: &str) -> Result<usize> {
+        let count = self.conn.execute(
+            "DELETE FROM calendar_events WHERE start < ?1 AND is_all_day = 0",
+            params![before_date],
+        )?;
+        Ok(count)
     }
 
     // ─── Address Cache ───────────────────────────────────────────────────────
