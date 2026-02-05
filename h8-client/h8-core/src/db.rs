@@ -589,6 +589,42 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// Search calendar events by subject or location (case-insensitive).
+    pub fn search_calendar_events(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<CalendarEventSync>> {
+        let pattern = format!("%{}%", query);
+        let mut stmt = self.conn.prepare(&format!(
+            r#"
+            SELECT local_id, remote_id, change_key, subject, location, start, end, is_all_day, synced_at
+            FROM calendar_events
+            WHERE subject LIKE ?1 COLLATE NOCASE
+               OR location LIKE ?1 COLLATE NOCASE
+            ORDER BY start ASC
+            LIMIT {}
+            "#,
+            limit
+        ))?;
+        let mut rows = stmt.query(params![pattern])?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
+            events.push(CalendarEventSync {
+                local_id: row.get(0)?,
+                remote_id: row.get(1)?,
+                change_key: row.get(2)?,
+                subject: row.get(3)?,
+                location: row.get(4)?,
+                start: row.get(5)?,
+                end: row.get(6)?,
+                is_all_day: row.get(7)?,
+                synced_at: row.get(8)?,
+            });
+        }
+        Ok(events)
+    }
+
     /// Delete old calendar events (before a given date).
     pub fn delete_old_calendar_events(&self, before_date: &str) -> Result<usize> {
         let count = self.conn.execute(
