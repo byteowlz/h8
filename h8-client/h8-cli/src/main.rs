@@ -1132,19 +1132,58 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             emit_output(&ctx.common, &result)?;
         }
         CalendarCommand::Search(args) => {
-            let events = client
-                .calendar_search(
-                    &account,
-                    &args.query,
-                    args.days,
-                    args.from_date.as_deref(),
-                    args.to_date.as_deref(),
-                    args.limit,
-                )
-                .map_err(|e| anyhow!("{e}"))?;
+            // Try local cache first
+            let db_path = ctx.paths.sync_db_path(&account);
+            let events_with_ids = if db_path.exists() {
+                let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+                let cached = db
+                    .search_calendar_events(&args.query, args.limit as usize)
+                    .map_err(|e| anyhow!("{e}"))?;
 
-            // Sync events to local DB and assign word IDs
-            let events_with_ids = sync_calendar_events(ctx, &account, &events)?;
+                if !cached.is_empty() {
+                    let events_json: Vec<serde_json::Value> = cached
+                        .into_iter()
+                        .map(|e| {
+                            serde_json::json!({
+                                "id": e.local_id,
+                                "remote_id": e.remote_id,
+                                "subject": e.subject,
+                                "location": e.location,
+                                "start": e.start,
+                                "end": e.end,
+                                "is_all_day": e.is_all_day,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!(events_json)
+                } else {
+                    // Nothing in cache, fall back to server
+                    let events = client
+                        .calendar_search(
+                            &account,
+                            &args.query,
+                            args.days,
+                            args.from_date.as_deref(),
+                            args.to_date.as_deref(),
+                            args.limit,
+                        )
+                        .map_err(|e| anyhow!("{e}"))?;
+                    sync_calendar_events(ctx, &account, &events)?
+                }
+            } else {
+                // No cache, use server
+                let events = client
+                    .calendar_search(
+                        &account,
+                        &args.query,
+                        args.days,
+                        args.from_date.as_deref(),
+                        args.to_date.as_deref(),
+                        args.limit,
+                    )
+                    .map_err(|e| anyhow!("{e}"))?;
+                sync_calendar_events(ctx, &account, &events)?
+            };
 
             if !ctx.common.json && !ctx.common.yaml {
                 let count = events_with_ids.as_array().map(|a| a.len()).unwrap_or(0);
