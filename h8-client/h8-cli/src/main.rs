@@ -199,6 +199,9 @@ struct CalendarShowArgs {
 #[derive(Debug, Args)]
 struct CalendarAddArgs {
     /// Natural language event description (e.g., friday 2pm "Team Sync" with roman)
+    ///
+    /// Attendees can be added using "with <name>" - names are resolved from config aliases.
+    /// Multiple attendees: "with alice, bob and charlie" or "with alice and bob"
     #[arg(required = true, num_args = 1..)]
     input: Vec<String>,
     /// Default duration in minutes if not specified
@@ -1272,6 +1275,41 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 println!("  When: {} - {}", start, end);
                 if let Some(loc) = args.location.as_ref() {
                     println!("  Where: {}", loc);
+                }
+                // Display attendees if present
+                if let Some(attendees) = payload.get("attendees").and_then(|v| v.as_array()) {
+                    if !attendees.is_empty() {
+                        let emails: Vec<&str> = attendees
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect();
+                        if !emails.is_empty() {
+                            println!("  With: {}", emails.join(", "));
+                        }
+                    }
+                }
+                // Also check required_attendees and optional_attendees
+                if let Some(req) = payload.get("required_attendees").and_then(|v| v.as_array()) {
+                    if !req.is_empty() {
+                        let emails: Vec<&str> = req
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect();
+                        if !emails.is_empty() {
+                            println!("  Required: {}", emails.join(", "));
+                        }
+                    }
+                }
+                if let Some(opt) = payload.get("optional_attendees").and_then(|v| v.as_array()) {
+                    if !opt.is_empty() {
+                        let emails: Vec<&str> = opt
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect();
+                        if !emails.is_empty() {
+                            println!("  Optional: {}", emails.join(", "));
+                        }
+                    }
                 }
             } else if let Some(e) = events_with_ids.as_array().and_then(|a| a.first()) {
                 emit_output(&ctx.common, e)?;
