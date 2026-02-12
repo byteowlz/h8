@@ -1683,13 +1683,8 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
                 y_num
             }
         } else {
-            // No year: use current year, or previous year if date is in the future
-            let current_year = now.year();
-            if month > now.month() || (month == now.month() && day > now.day()) {
-                current_year - 1
-            } else {
-                current_year
-            }
+            // No year: use current year
+            now.year()
         };
 
         if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
@@ -1761,15 +1756,8 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
                 let year: i32 = if let Some(y) = caps.get(2) {
                     y.as_str().parse().ok()?
                 } else {
-                    // Use current year, or previous year if the date is in the future
-                    let current_year = now.year();
-                    if *month_num > now.month()
-                        || (*month_num == now.month() && day > now.day())
-                    {
-                        current_year - 1
-                    } else {
-                        current_year
-                    }
+                    // Use current year
+                    now.year()
                 };
 
                 if let Some(date) = NaiveDate::from_ymd_opt(year, *month_num, day) {
