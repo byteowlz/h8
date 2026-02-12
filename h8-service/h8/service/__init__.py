@@ -436,9 +436,23 @@ async def calendar_list(
 async def calendar_create(payload: CalendarCreate, account: Optional[str] = None):
     email = current_account_email(account)
     acct = auth.get_account(email)
-    return await safe_call_with_retry(
-        calendar.create_event, email, acct, payload.model_dump()
-    )
+
+    # Check if payload has attendees and use invite_event if so
+    data = payload.model_dump()
+    attendees = data.get("attendees", [])
+    required_attendees = data.get("required_attendees", [])
+    optional_attendees = data.get("optional_attendees", [])
+
+    if attendees or required_attendees or optional_attendees:
+        # Use invite_event to create and send meeting invites
+        return await safe_call_with_retry(
+            calendar.invite_event, email, acct, data
+        )
+    else:
+        # Simple event without attendees
+        return await safe_call_with_retry(
+            calendar.create_event, email, acct, data
+        )
 
 
 class CalendarParse(BaseModel):
