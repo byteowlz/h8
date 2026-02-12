@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-02-12
+
+### Fixed
+
+- **Date year default**: Month-day dates without a year (e.g., `june 9`, `9.6`) now correctly default to the current year instead of the previous year
+
+## [0.5.2] - 2026-02-12
+
 ### Added
 
 - **Meeting cancellation with attendee notifications**: `h8 cal cancel <id>` properly cancels meetings and sends cancellation emails to all attendees (unlike delete which silently removes)

@@ -1,6 +1,6 @@
 [project]
 name = "h8"
-version = "0.5.1"
+version = "0.5.3"
 description = "EWS CLI for calendar, mail, and contacts"
 readme = "README.md"
 requires-python = ">=3.12"
