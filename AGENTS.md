@@ -79,6 +79,8 @@ let remote_id = id_gen.resolve(&args.id)?.unwrap_or_else(|| args.id.clone());
 | `h8 contacts list [-s search]` | List/search contacts |
 | `h8 contacts update --id <id> --phone <phone>` | Update contact |
 | `h8 agenda` | Today's calendar |
+| `h8 ppl schedule A B -w N --json` | List common free slots (step 1) |
+| `h8 ppl schedule A B --slot N -s "Subj" -m 45` | Book a slot (step 2) |
 
 ## Issue Tracking
 ```bash
