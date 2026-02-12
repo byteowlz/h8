@@ -846,6 +846,12 @@ enum PplCommand {
     Free(PplFreeArgs),
     /// Find common free slots between multiple people
     Common(PplCommonArgs),
+    /// Find common free slots and schedule a meeting (agent-friendly)
+    ///
+    /// Two-step workflow for automation:
+    ///   1. List slots:  h8 ppl schedule alice bob -w 2 --json
+    ///   2. Book a slot: h8 ppl schedule alice bob -w 2 --slot 1 -s "Review" --meeting-duration 45
+    Schedule(PplScheduleArgs),
 }
 
 #[derive(Debug, Args)]
@@ -895,6 +901,37 @@ struct PplCommonArgs {
     /// Interactive mode: select a slot and create a meeting (only in terminal)
     #[arg(short = 'i', long)]
     interactive: bool,
+}
+
+#[derive(Debug, Args)]
+struct PplScheduleArgs {
+    /// Person aliases or email addresses (2 or more)
+    #[arg(required = true, num_args = 2..)]
+    people: Vec<String>,
+    /// Minimum free slot duration in minutes
+    #[arg(short = 'd', long, default_value_t = 30)]
+    duration: u32,
+    /// Weeks to look ahead
+    #[arg(short = 'w', long, default_value_t = 2)]
+    weeks: u8,
+    /// Maximum number of slots to return
+    #[arg(short = 'l', long)]
+    limit: Option<usize>,
+    /// Select slot by number (1-indexed) and create meeting
+    #[arg(long)]
+    slot: Option<usize>,
+    /// Meeting subject (required when --slot is used)
+    #[arg(short = 's', long)]
+    subject: Option<String>,
+    /// Meeting duration in minutes (required when --slot is used, max = slot duration)
+    #[arg(short = 'm', long = "meeting-duration")]
+    meeting_duration: Option<i64>,
+    /// Meeting location
+    #[arg(long)]
+    location: Option<String>,
+    /// Meeting body/description
+    #[arg(short = 'b', long)]
+    body: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -3974,6 +4011,157 @@ fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
             } else {
                 let label = display_names.join(", ");
                 render_free_slots_for_person(&label, &result, ctx, view)?;
+            }
+        }
+        PplCommand::Schedule(args) => {
+            // Resolve all aliases to emails
+            let mut resolved_emails: Vec<String> = Vec::new();
+            let mut display_names: Vec<String> = Vec::new();
+            for person in &args.people {
+                let email = ctx
+                    .config
+                    .resolve_person(person)
+                    .map_err(|e| anyhow!("{e}"))?;
+                if person != &email {
+                    display_names.push(person.clone());
+                } else {
+                    display_names.push(email.clone());
+                }
+                resolved_emails.push(email);
+            }
+            let email_refs: Vec<&str> = resolved_emails.iter().map(|s| s.as_str()).collect();
+
+            // Fetch common free slots
+            let result = client
+                .ppl_common(&account, &email_refs, args.weeks, args.duration, args.limit)
+                .map_err(|e| anyhow!("{e}"))?;
+
+            let slots: Vec<FreeSlotItem> =
+                serde_json::from_value(result.clone()).context("parsing free slots")?;
+
+            if slots.is_empty() {
+                if ctx.common.json || ctx.common.yaml {
+                    emit_output(&ctx.common, &serde_json::json!({
+                        "slots": [],
+                        "people": display_names,
+                        "emails": resolved_emails,
+                    }))?;
+                } else {
+                    println!("No common free slots found for {}", display_names.join(", "));
+                }
+                return Ok(());
+            }
+
+            // Build numbered slot list
+            let mut numbered_slots: Vec<serde_json::Value> = Vec::new();
+            for (i, slot) in slots.iter().enumerate() {
+                let start = slot.start.as_deref().unwrap_or("");
+                let end = slot.end.as_deref().unwrap_or("");
+                let date = slot.date.clone().unwrap_or_else(|| {
+                    if start.len() >= 10 { start[..10].to_string() } else { String::new() }
+                });
+                let start_time = extract_time(start).unwrap_or_default();
+                let end_time = extract_time(end).unwrap_or_default();
+                let duration = slot.duration_minutes.unwrap_or(0);
+
+                numbered_slots.push(serde_json::json!({
+                    "slot": i + 1,
+                    "date": date,
+                    "start": start,
+                    "end": end,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "duration_minutes": duration,
+                }));
+            }
+
+            // If --slot is not provided, just list the available slots
+            if args.slot.is_none() {
+                if ctx.common.json || ctx.common.yaml {
+                    emit_output(&ctx.common, &serde_json::json!({
+                        "slots": numbered_slots,
+                        "people": display_names,
+                        "emails": resolved_emails,
+                    }))?;
+                } else {
+                    let label = display_names.join(", ");
+                    println!("Common free slots for: {}\n", label);
+                    for ns in &numbered_slots {
+                        let num = ns["slot"].as_u64().unwrap_or(0);
+                        let date = ns["date"].as_str().unwrap_or("");
+                        let st = ns["start_time"].as_str().unwrap_or("");
+                        let et = ns["end_time"].as_str().unwrap_or("");
+                        let dur = ns["duration_minutes"].as_i64().unwrap_or(0);
+                        println!("  [{}] {} {}-{} ({}m)", num, date, st, et, dur);
+                    }
+                    println!("\nTo book a slot:");
+                    let people_str = args.people.join(" ");
+                    println!("  h8 ppl schedule {} -w {} --slot N -s \"Subject\" -m MINUTES", people_str, args.weeks);
+                }
+                return Ok(());
+            }
+
+            // --slot provided: create the meeting
+            let slot_idx = args.slot.unwrap();
+            if slot_idx == 0 || slot_idx > slots.len() {
+                return Err(anyhow!("Invalid slot number {}. Valid range: 1-{}", slot_idx, slots.len()));
+            }
+
+            let selected = &slots[slot_idx - 1];
+            let start = selected.start.as_deref()
+                .ok_or_else(|| anyhow!("Selected slot has no start time"))?;
+            let max_duration = selected.duration_minutes.unwrap_or(60);
+
+            let subject = args.subject.as_deref()
+                .ok_or_else(|| anyhow!("--subject/-s is required when using --slot"))?;
+
+            let meeting_duration = args.meeting_duration.unwrap_or(30.min(max_duration));
+            if meeting_duration > max_duration {
+                return Err(anyhow!(
+                    "Meeting duration {}m exceeds slot maximum of {}m",
+                    meeting_duration, max_duration
+                ));
+            }
+            if meeting_duration <= 0 {
+                return Err(anyhow!("Meeting duration must be positive"));
+            }
+
+            // Calculate end time
+            let meeting_start = DateTime::parse_from_rfc3339(start)
+                .map_err(|e| anyhow!("Invalid start time '{}': {}", start, e))?;
+            let meeting_end = meeting_start + ChronoDuration::minutes(meeting_duration);
+
+            // Build invite payload
+            let mut payload = serde_json::json!({
+                "subject": subject,
+                "start": start,
+                "end": meeting_end.to_rfc3339(),
+                "required_attendees": resolved_emails,
+            });
+
+            if let Some(ref loc) = args.location {
+                payload["location"] = serde_json::json!(loc);
+            }
+            if let Some(ref body) = args.body {
+                payload["body"] = serde_json::json!(body);
+            }
+
+            let invite_result = client
+                .calendar_invite(&account, payload)
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if ctx.common.json || ctx.common.yaml {
+                emit_output(&ctx.common, &invite_result)?;
+            } else {
+                let start_time = extract_time(start).unwrap_or_default();
+                let end_time_str = extract_time(&meeting_end.to_rfc3339())
+                    .unwrap_or_else(|| meeting_end.format("%H:%M").to_string());
+                println!("Meeting created: {}", subject);
+                println!("  When: {} {}-{} ({}m)", &start[..10], start_time, end_time_str, meeting_duration);
+                println!("  With: {}", display_names.join(", "));
+                if let Some(ref loc) = args.location {
+                    println!("  Where: {}", loc);
+                }
             }
         }
     }
