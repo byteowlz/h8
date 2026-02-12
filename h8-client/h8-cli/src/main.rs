@@ -892,6 +892,9 @@ struct PplCommonArgs {
     /// View mode: list, gantt, or compact (default from config)
     #[arg(short = 'V', long = "view", value_enum)]
     view: Option<AgendaView>,
+    /// Interactive mode: select a slot and create a meeting (only in terminal)
+    #[arg(short = 'i', long)]
+    interactive: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -3958,6 +3961,16 @@ fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
 
             if ctx.common.json || ctx.common.yaml || !io::stdout().is_terminal() {
                 emit_output(&ctx.common, &result)?;
+            } else if args.interactive && io::stdout().is_terminal() {
+                // Interactive mode: let user select a slot and create meeting
+                let label = display_names.join(", ");
+                let slots: Vec<FreeSlotItem> =
+                    serde_json::from_value(result.clone()).context("parsing free slots")?;
+                if slots.is_empty() {
+                    println!("No common free slots found for {}", label);
+                    return Ok(());
+                }
+                interactive_schedule_meeting(ctx, &account, &client, &label, &slots, &resolved_emails)?;
             } else {
                 let label = display_names.join(", ");
                 render_free_slots_for_person(&label, &result, ctx, view)?;
@@ -4311,6 +4324,226 @@ fn extract_time(dt_str: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Interactive meeting scheduling from common free slots.
+fn interactive_schedule_meeting(
+    ctx: &RuntimeContext,
+    account: &str,
+    client: &ServiceClient,
+    label: &str,
+    slots: &[FreeSlotItem],
+    attendee_emails: &[String],
+) -> Result<()> {
+    use owo_colors::OwoColorize;
+    use std::io::{self, Write};
+
+    if slots.is_empty() {
+        println!("No common free slots found for {}", label);
+        return Ok(());
+    }
+
+    let tz = ctx
+        .config
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .unwrap_or(chrono_tz::UTC);
+
+    // Build a flat list of valid slots for selection
+    let mut selectable_slots: Vec<(String, String, i64, String)> = Vec::new(); // (start, end, duration, display)
+    let today = Local::now().with_timezone(&tz).date_naive();
+
+    // Group by date for display
+    let mut slots_by_date: std::collections::BTreeMap<String, Vec<&FreeSlotItem>> =
+        std::collections::BTreeMap::new();
+
+    for item in slots {
+        let date_str = item.date.clone().unwrap_or_else(|| {
+            item.start
+                .as_deref()
+                .map(|s| {
+                    if s.len() >= 10 {
+                        s[..10].to_string()
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "Unknown".to_string())
+        });
+        slots_by_date.entry(date_str).or_default().push(item);
+    }
+
+    println!("\n{}", format!("Common free slots for: {}", label).bold());
+    println!("{}", "\u{2500}".repeat(60));
+
+    let mut slot_num = 0;
+    for (date_str, day_slots) in &slots_by_date {
+        let date_label = if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+            let weekday = date.format("%a").to_string();
+            if date == today {
+                format!("{} {} (Today)", weekday, date_str)
+            } else if date == today.succ_opt().unwrap_or(today) {
+                format!("{} {} (Tomorrow)", weekday, date_str)
+            } else {
+                format!("{} {}", weekday, date_str)
+            }
+        } else {
+            date_str.clone()
+        };
+
+        println!("\n  {}", date_label.cyan().bold());
+
+        for slot in day_slots {
+            if let (Some(start), Some(end)) = (&slot.start, &slot.end) {
+                let start_time = extract_time(start).unwrap_or_else(|| "??:??".to_string());
+                let end_time = extract_time(end).unwrap_or_else(|| "??:??".to_string());
+                let duration = slot.duration_minutes.unwrap_or(0);
+
+                let duration_str = if duration >= 60 {
+                    let hours = duration / 60;
+                    let mins = duration % 60;
+                    if mins > 0 {
+                        format!("{}h {}m", hours, mins)
+                    } else {
+                        format!("{}h", hours)
+                    }
+                } else {
+                    format!("{}m", duration)
+                };
+
+                slot_num += 1;
+                selectable_slots.push((
+                    start.clone(),
+                    end.clone(),
+                    duration,
+                    format!("{} {}-{} ({})" , date_str, start_time, end_time, duration_str),
+                ));
+
+                println!(
+                    "    [{}] {}-{}  {}",
+                    slot_num.to_string().yellow().bold(),
+                    start_time,
+                    end_time,
+                    duration_str.dimmed()
+                );
+            }
+        }
+    }
+
+    if selectable_slots.is_empty() {
+        println!("\n(no valid free slots found)");
+        return Ok(());
+    }
+
+    // Prompt user to select
+    print!("\n{} ", "Select slot (1-{}), or 'c' to cancel:".replace("{}", &selectable_slots.len().to_string()).cyan());
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    if input.eq_ignore_ascii_case("c") || input.eq_ignore_ascii_case("cancel") {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let selection: usize = match input.parse::<usize>() {
+        Ok(n) if n > 0 && n <= selectable_slots.len() => n - 1,
+        _ => {
+            println!("Invalid selection.");
+            return Ok(());
+        }
+    };
+
+    let (start, _end, max_duration, _display) = &selectable_slots[selection];
+
+    // Ask for duration
+    print!("{} ", format!("Duration in minutes (max {}m, default 30):", max_duration).cyan());
+    io::stdout().flush()?;
+
+    let mut duration_input = String::new();
+    io::stdin().read_line(&mut duration_input)?;
+    let duration_input = duration_input.trim();
+
+    let duration: i64 = if duration_input.is_empty() {
+        30
+    } else {
+        match duration_input.parse::<i64>() {
+            Ok(n) if n > 0 && n <= *max_duration => n,
+            Ok(n) if n > *max_duration => {
+                println!("Duration too long, using max: {}m", max_duration);
+                *max_duration
+            }
+            _ => {
+                println!("Invalid duration, using default: 30m");
+                30
+            }
+        }
+    };
+
+    // Calculate meeting end time based on duration
+    let meeting_start = DateTime::parse_from_rfc3339(start)
+        .map_err(|e| anyhow!("Invalid start time: {}", e))?;
+    let meeting_end = meeting_start + ChronoDuration::minutes(duration);
+
+    // Ask for subject
+    print!("{} ", "Meeting subject:".cyan());
+    io::stdout().flush()?;
+
+    let mut subject = String::new();
+    io::stdin().read_line(&mut subject)?;
+    let subject = subject.trim();
+
+    if subject.is_empty() {
+        println!("Cancelled - subject required.");
+        return Ok(());
+    }
+
+    // Confirm
+    let start_time = extract_time(start).unwrap_or_else(|| start.clone());
+    let end_time_str = extract_time(&meeting_end.to_rfc3339()).unwrap_or_else(|| meeting_end.format("%H:%M").to_string());
+
+    println!("\n{}", "Meeting Details:".bold());
+    println!("  Subject: {}", subject);
+    println!("  When: {} {}-{}", &start[..10], start_time, end_time_str);
+    println!("  Duration: {}m", duration);
+    println!("  Attendees: {}", label);
+
+    print!("\n{} ", "Create meeting? (y/n):".cyan());
+    io::stdout().flush()?;
+
+    let mut confirm = String::new();
+    io::stdin().read_line(&mut confirm)?;
+
+    if !confirm.trim().eq_ignore_ascii_case("y") && !confirm.trim().eq_ignore_ascii_case("yes") {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    // Create the meeting invite
+    let payload = serde_json::json!({
+        "subject": subject,
+        "start": start,
+        "end": meeting_end.to_rfc3339(),
+        "required_attendees": attendee_emails,
+    });
+
+    let result = client.calendar_invite(account, payload)?;
+
+    println!("\n{}", "Meeting created!".green().bold());
+
+    // Display attendees from response if available
+    if let Some(req) = result.get("required_attendees").and_then(|v| v.as_array()) {
+        if !req.is_empty() {
+            let emails: Vec<&str> = req.iter().filter_map(|v| v.as_str()).collect();
+            if !emails.is_empty() {
+                println!("  Invites sent to: {}", emails.join(", "));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn handle_config(ctx: &RuntimeContext, command: ConfigCommand) -> Result<()> {
