@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "h8"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -831,13 +831,14 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "terminal_size",
+ "toml_edit",
  "walkdir",
  "which",
 ]
 
 [[package]]
 name = "h8-core"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -861,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "h8-tui"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "chrono",
