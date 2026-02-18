@@ -852,6 +852,11 @@ enum PplCommand {
     ///   1. List slots:  h8 ppl schedule alice bob -w 2 --json
     ///   2. Book a slot: h8 ppl schedule alice bob -w 2 --slot 1 -s "Review" --meeting-duration 45
     Schedule(PplScheduleArgs),
+    /// Manage person aliases in config
+    Alias {
+        #[command(subcommand)]
+        command: AliasCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -932,6 +937,55 @@ struct PplScheduleArgs {
     /// Meeting body/description
     #[arg(short = 'b', long)]
     body: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum AliasCommand {
+    /// List all person aliases
+    #[command(alias = "ls")]
+    List,
+    /// Add a person alias
+    Add(AliasAddArgs),
+    /// Remove a person alias
+    #[command(alias = "rm")]
+    Remove(AliasRemoveArgs),
+    /// Search cached email addresses
+    Search(AliasSearchArgs),
+    /// Interactively pick from recent email addresses and create aliases
+    Pick(AliasPickArgs),
+}
+
+#[derive(Debug, Args)]
+struct AliasAddArgs {
+    /// Alias name (e.g., alice)
+    name: String,
+    /// Email address (e.g., alice@example.com)
+    email: String,
+}
+
+#[derive(Debug, Args)]
+struct AliasRemoveArgs {
+    /// Alias name to remove
+    name: String,
+}
+
+#[derive(Debug, Args)]
+struct AliasSearchArgs {
+    /// Search query (matches name or email)
+    query: String,
+    /// Maximum results
+    #[arg(short = 'n', long, default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Debug, Args)]
+struct AliasPickArgs {
+    /// Number of recent addresses to show
+    #[arg(short = 'n', long, default_value_t = 20)]
+    limit: usize,
+    /// Show most frequently used instead of most recent
+    #[arg(long)]
+    frequent: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -4164,8 +4218,349 @@ fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
                 }
             }
         }
+        PplCommand::Alias { command } => {
+            handle_alias(ctx, command)?;
+        }
     }
     Ok(())
+}
+
+/// Read the config.toml as a toml_edit Document for in-place editing.
+fn read_config_document(ctx: &RuntimeContext) -> Result<(toml_edit::DocumentMut, PathBuf)> {
+    let config_path = ctx.paths.global_config.clone();
+    let content = fs::read_to_string(&config_path)
+        .with_context(|| format!("reading config: {}", config_path.display()))?;
+    let doc: toml_edit::DocumentMut = content
+        .parse()
+        .map_err(|e| anyhow!("parsing config.toml: {e}"))?;
+    Ok((doc, config_path))
+}
+
+/// Write a toml_edit Document back to disk.
+fn write_config_document(doc: &toml_edit::DocumentMut, path: &std::path::Path) -> Result<()> {
+    fs::write(path, doc.to_string())
+        .with_context(|| format!("writing config: {}", path.display()))
+}
+
+/// Handle alias subcommands.
+fn handle_alias(ctx: &RuntimeContext, cmd: AliasCommand) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    match cmd {
+        AliasCommand::List => {
+            if ctx.config.people.is_empty() {
+                println!("No aliases configured.");
+                println!("Add one with: h8 ppl alias add <name> <email>");
+                return Ok(());
+            }
+
+            if ctx.common.json || ctx.common.yaml {
+                emit_output(&ctx.common, &ctx.config.people)?;
+                return Ok(());
+            }
+
+            // Sort by name for display
+            let mut entries: Vec<_> = ctx.config.people.iter().collect();
+            entries.sort_by_key(|(k, _)| k.to_lowercase());
+
+            println!("{}", "Person Aliases".bold());
+            println!("{}", "\u{2500}".repeat(50));
+            for (name, email) in &entries {
+                println!("  {:<16} {}", name.green(), email);
+            }
+            println!("\n{} alias(es) configured", entries.len());
+        }
+        AliasCommand::Add(args) => {
+            let (mut doc, config_path) = read_config_document(ctx)?;
+
+            // Ensure [people] table exists
+            if doc.get("people").is_none() {
+                doc["people"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+
+            let name_lower = args.name.to_lowercase();
+
+            // Check for existing value
+            let existing_email = doc["people"]
+                .as_table()
+                .and_then(|t| t.get(&name_lower))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            if let Some(ref existing) = existing_email {
+                if existing == &args.email {
+                    println!("Alias '{}' already set to {}", name_lower, args.email);
+                    return Ok(());
+                }
+            }
+
+            // Set the value
+            let people = doc["people"]
+                .as_table_mut()
+                .ok_or_else(|| anyhow!("[people] is not a table in config.toml"))?;
+            people[&name_lower] = toml_edit::value(&args.email);
+            write_config_document(&doc, &config_path)?;
+
+            if let Some(existing) = existing_email {
+                println!("Updated: {} -> {} (was: {})", name_lower, args.email, existing);
+            } else {
+                println!("Added: {} -> {}", name_lower, args.email);
+            }
+        }
+        AliasCommand::Remove(args) => {
+            let (mut doc, config_path) = read_config_document(ctx)?;
+
+            let people = doc["people"]
+                .as_table_mut()
+                .ok_or_else(|| anyhow!("[people] section not found in config.toml"))?;
+
+            let name_lower = args.name.to_lowercase();
+
+            // Case-insensitive search for the key
+            let key_to_remove = people
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&name_lower))
+                .map(|(k, _)| k.to_string());
+
+            if let Some(key) = key_to_remove {
+                let email = people[&key].as_str().unwrap_or("?").to_string();
+                people.remove(&key);
+                write_config_document(&doc, &config_path)?;
+                println!("Removed: {} (was: {})", key, email);
+            } else {
+                return Err(anyhow!("alias '{}' not found", args.name));
+            }
+        }
+        AliasCommand::Search(args) => {
+            let account = effective_account(ctx);
+            let db_path = ctx.paths.sync_db_path(&account);
+
+            if !db_path.exists() {
+                return Err(anyhow!("no address cache - run 'h8 mail sync' first"));
+            }
+
+            let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+            let addresses = db
+                .search_addresses(Some(&args.query).unwrap(), args.limit)
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if addresses.is_empty() {
+                println!("No addresses found matching \"{}\"", args.query);
+                return Ok(());
+            }
+
+            if ctx.common.json || ctx.common.yaml {
+                emit_output(&ctx.common, &serde_json::to_value(&addresses)?)?;
+                return Ok(());
+            }
+
+            // Show results, highlight which ones already have aliases
+            let existing: std::collections::HashMap<String, String> = ctx
+                .config
+                .people
+                .iter()
+                .map(|(k, v)| (v.to_lowercase(), k.clone()))
+                .collect();
+
+            for addr in &addresses {
+                let name_part = addr.name.as_deref().unwrap_or("");
+                let alias_tag = if let Some(alias) = existing.get(&addr.email.to_lowercase()) {
+                    format!(" [alias: {}]", alias.green())
+                } else {
+                    String::new()
+                };
+
+                if name_part.is_empty() {
+                    println!("  {}{}", addr.email, alias_tag);
+                } else {
+                    println!("  {} <{}>{}", name_part, addr.email, alias_tag);
+                }
+            }
+        }
+        AliasCommand::Pick(args) => {
+            if !io::stdout().is_terminal() {
+                return Err(anyhow!("pick requires an interactive terminal"));
+            }
+
+            let account = effective_account(ctx);
+            let db_path = ctx.paths.sync_db_path(&account);
+
+            if !db_path.exists() {
+                return Err(anyhow!("no address cache - run 'h8 mail sync' first"));
+            }
+
+            let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+            let addresses = if args.frequent {
+                db.frequent_addresses(args.limit).map_err(|e| anyhow!("{e}"))?
+            } else {
+                db.frequent_addresses(args.limit).map_err(|e| anyhow!("{e}"))?
+            };
+
+            if addresses.is_empty() {
+                println!("No cached addresses. Run 'h8 mail sync' first.");
+                return Ok(());
+            }
+
+            // Build existing alias lookup (email -> alias)
+            let existing: std::collections::HashMap<String, String> = ctx
+                .config
+                .people
+                .iter()
+                .map(|(k, v)| (v.to_lowercase(), k.clone()))
+                .collect();
+
+            // Filter out addresses that already have aliases
+            let unaliased: Vec<_> = addresses
+                .iter()
+                .filter(|a| !existing.contains_key(&a.email.to_lowercase()))
+                .collect();
+
+            if unaliased.is_empty() {
+                println!("All frequently used addresses already have aliases.");
+                return Ok(());
+            }
+
+            println!("\n{}", "Recent contacts without aliases:".bold());
+            println!("{}", "\u{2500}".repeat(60));
+
+            for (i, addr) in unaliased.iter().enumerate() {
+                let name_part = addr.name.as_deref().unwrap_or("");
+                let count_info = format!("sent:{} recv:{}", addr.send_count, addr.receive_count);
+                if name_part.is_empty() {
+                    println!(
+                        "  [{}] {:<40} ({})",
+                        (i + 1).to_string().yellow().bold(),
+                        addr.email,
+                        count_info.dimmed()
+                    );
+                } else {
+                    println!(
+                        "  [{}] {} <{}>  ({})",
+                        (i + 1).to_string().yellow().bold(),
+                        name_part,
+                        addr.email,
+                        count_info.dimmed()
+                    );
+                }
+            }
+
+            // Interactive loop: pick addresses to alias
+            let (mut doc, config_path) = read_config_document(ctx)?;
+
+            // Ensure [people] table exists
+            if doc.get("people").is_none() {
+                doc["people"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+
+            let mut added = 0;
+
+            loop {
+                print!("\n{} ", "Select (1-N), or 'q' to quit:".cyan());
+                io::stdout().flush()?;
+
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                let input = input.trim();
+
+                if input.eq_ignore_ascii_case("q")
+                    || input.eq_ignore_ascii_case("quit")
+                    || input.eq_ignore_ascii_case("done")
+                    || input.is_empty()
+                {
+                    break;
+                }
+
+                let idx: usize = match input.parse::<usize>() {
+                    Ok(n) if n > 0 && n <= unaliased.len() => n - 1,
+                    _ => {
+                        println!("Invalid selection. Enter 1-{} or 'q'.", unaliased.len());
+                        continue;
+                    }
+                };
+
+                let addr = &unaliased[idx];
+                let suggested = suggest_alias(addr);
+
+                print!(
+                    "{} ",
+                    format!("Alias for {} (default: '{}'):", addr.email, suggested).cyan()
+                );
+                io::stdout().flush()?;
+
+                let mut alias_input = String::new();
+                io::stdin().read_line(&mut alias_input)?;
+                let alias = alias_input.trim();
+                let alias = if alias.is_empty() {
+                    suggested.clone()
+                } else {
+                    alias.to_lowercase()
+                };
+
+                if alias.is_empty() {
+                    println!("Skipped.");
+                    continue;
+                }
+
+                let people = doc["people"]
+                    .as_table_mut()
+                    .ok_or_else(|| anyhow!("[people] is not a table"))?;
+
+                if people.contains_key(&alias) {
+                    let existing = people[&alias].as_str().unwrap_or("?");
+                    println!(
+                        "Alias '{}' already exists (-> {}). Choose a different name.",
+                        alias, existing
+                    );
+                    continue;
+                }
+
+                people[&alias] = toml_edit::value(&addr.email);
+                added += 1;
+                println!("  {} {} -> {}", "+".green().bold(), alias.green(), addr.email);
+            }
+
+            if added > 0 {
+                write_config_document(&doc, &config_path)?;
+                println!("\nSaved {} new alias(es) to {}", added, config_path.display());
+            } else {
+                println!("\nNo aliases added.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Suggest an alias name from an address entry.
+fn suggest_alias(addr: &h8_core::types::AddressEntry) -> String {
+    // Try to derive from display name
+    if let Some(ref name) = addr.name {
+        let name = name.trim();
+        if !name.is_empty() {
+            // Use first name, lowercased
+            let first = name.split_whitespace().next().unwrap_or(name);
+            let clean: String = first
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-')
+                .collect();
+            if !clean.is_empty() {
+                return clean.to_lowercase();
+            }
+        }
+    }
+
+    // Fall back to email local part
+    if let Some(local) = addr.email.split('@').next() {
+        let clean: String = local
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '.')
+            .collect();
+        if !clean.is_empty() {
+            return clean.to_lowercase();
+        }
+    }
+
+    String::new()
 }
 
 /// Render another person's agenda in a human-readable format.

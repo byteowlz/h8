@@ -27,5 +27,6 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 tempfile = "3"
 terminal_size = "0.4"
+toml_edit = "0.22"
 walkdir = "2"
 which = "7"
