@@ -4402,7 +4402,7 @@ fn handle_alias(ctx: &RuntimeContext, cmd: AliasCommand) -> Result<()> {
             }
 
             // Build existing alias lookup (email -> alias)
-            let existing: std::collections::HashMap<String, String> = ctx
+            let existing_aliases: std::collections::HashMap<String, String> = ctx
                 .config
                 .people
                 .iter()
@@ -4412,7 +4412,7 @@ fn handle_alias(ctx: &RuntimeContext, cmd: AliasCommand) -> Result<()> {
             // Filter out addresses that already have aliases
             let unaliased: Vec<_> = addresses
                 .iter()
-                .filter(|a| !existing.contains_key(&a.email.to_lowercase()))
+                .filter(|a| !existing_aliases.contains_key(&a.email.to_lowercase()))
                 .collect();
 
             if unaliased.is_empty() {
@@ -4420,31 +4420,36 @@ fn handle_alias(ctx: &RuntimeContext, cmd: AliasCommand) -> Result<()> {
                 return Ok(());
             }
 
-            println!("\n{}", "Recent contacts without aliases:".bold());
-            println!("{}", "\u{2500}".repeat(60));
+            // Build display items for the multi-select
+            let items: Vec<String> = unaliased
+                .iter()
+                .map(|addr| {
+                    let name_part = addr.name.as_deref().unwrap_or("");
+                    let total = addr.send_count + addr.receive_count;
+                    if name_part.is_empty() {
+                        format!("{:<45} ({} msgs)", addr.email, total)
+                    } else {
+                        format!("{} <{}>  ({} msgs)", name_part, addr.email, total)
+                    }
+                })
+                .collect();
 
-            for (i, addr) in unaliased.iter().enumerate() {
-                let name_part = addr.name.as_deref().unwrap_or("");
-                let count_info = format!("sent:{} recv:{}", addr.send_count, addr.receive_count);
-                if name_part.is_empty() {
-                    println!(
-                        "  [{}] {:<40} ({})",
-                        (i + 1).to_string().yellow().bold(),
-                        addr.email,
-                        count_info.dimmed()
-                    );
-                } else {
-                    println!(
-                        "  [{}] {} <{}>  ({})",
-                        (i + 1).to_string().yellow().bold(),
-                        name_part,
-                        addr.email,
-                        count_info.dimmed()
-                    );
+            // Multi-select with arrow keys + space
+            let selections = dialoguer::MultiSelect::new()
+                .with_prompt("Select contacts to alias (Space to toggle, Enter to confirm)")
+                .items(&items)
+                .interact_opt()
+                .map_err(|e| anyhow!("selection cancelled: {e}"))?;
+
+            let selections = match selections {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    println!("No contacts selected.");
+                    return Ok(());
                 }
-            }
+            };
 
-            // Interactive loop: pick addresses to alias
+            // Now prompt for alias names for each selected address
             let (mut doc, config_path) = read_config_document(ctx)?;
 
             // Ensure [people] table exists
@@ -4454,50 +4459,27 @@ fn handle_alias(ctx: &RuntimeContext, cmd: AliasCommand) -> Result<()> {
 
             let mut added = 0;
 
-            loop {
-                print!("\n{} ", "Select (1-N), or 'q' to quit:".cyan());
-                io::stdout().flush()?;
-
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                let input = input.trim();
-
-                if input.eq_ignore_ascii_case("q")
-                    || input.eq_ignore_ascii_case("quit")
-                    || input.eq_ignore_ascii_case("done")
-                    || input.is_empty()
-                {
-                    break;
-                }
-
-                let idx: usize = match input.parse::<usize>() {
-                    Ok(n) if n > 0 && n <= unaliased.len() => n - 1,
-                    _ => {
-                        println!("Invalid selection. Enter 1-{} or 'q'.", unaliased.len());
-                        continue;
-                    }
-                };
-
+            println!();
+            for &idx in &selections {
                 let addr = &unaliased[idx];
                 let suggested = suggest_alias(addr);
 
-                print!(
-                    "{} ",
-                    format!("Alias for {} (default: '{}'):", addr.email, suggested).cyan()
-                );
-                io::stdout().flush()?;
-
-                let mut alias_input = String::new();
-                io::stdin().read_line(&mut alias_input)?;
-                let alias = alias_input.trim();
-                let alias = if alias.is_empty() {
-                    suggested.clone()
+                let prompt = if addr.name.is_some() {
+                    format!("Alias for {} <{}>", addr.name.as_deref().unwrap_or(""), addr.email)
                 } else {
-                    alias.to_lowercase()
+                    format!("Alias for {}", addr.email)
                 };
 
+                let alias = dialoguer::Input::<String>::new()
+                    .with_prompt(&prompt)
+                    .default(suggested)
+                    .interact_text()
+                    .map_err(|e| anyhow!("input cancelled: {e}"))?;
+
+                let alias = alias.trim().to_lowercase();
+
                 if alias.is_empty() {
-                    println!("Skipped.");
+                    println!("  Skipped {}", addr.email);
                     continue;
                 }
 
@@ -4506,10 +4488,10 @@ fn handle_alias(ctx: &RuntimeContext, cmd: AliasCommand) -> Result<()> {
                     .ok_or_else(|| anyhow!("[people] is not a table"))?;
 
                 if people.contains_key(&alias) {
-                    let existing = people[&alias].as_str().unwrap_or("?");
+                    let existing_val = people[&alias].as_str().unwrap_or("?");
                     println!(
-                        "Alias '{}' already exists (-> {}). Choose a different name.",
-                        alias, existing
+                        "  Alias '{}' already exists (-> {}), skipping.",
+                        alias, existing_val
                     );
                     continue;
                 }
