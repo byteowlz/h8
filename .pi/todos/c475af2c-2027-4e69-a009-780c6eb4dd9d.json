@@ -3,33 +3,33 @@
     {
       "id": "1",
       "content": "Add round_minutes config to [trip] and implement duration rounding",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "high"
     },
     {
       "id": "2",
       "content": "Pass transit journey details through from service to CLI",
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
       "id": "3",
       "content": "Use actual train departure/arrival times for transit trip timeline",
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
       "id": "4",
       "content": "Include train leg details in calendar events and JSON output",
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
       "id": "5",
       "content": "Test, commit, push",
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     }
   ],
-  "updated_at": "2026-03-02T13:18:18.075Z"
+  "updated_at": "2026-03-02T14:16:25.566Z"
 }
