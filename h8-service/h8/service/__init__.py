@@ -24,7 +24,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 
-from h8 import auth, calendar, contacts, free, mail, people
+from h8 import auth, calendar, contacts, free, mail, people, resolve, resources
 from h8.config import get_config, resolve_person_alias
 from exchangelib.errors import UnauthorizedError
 
@@ -955,6 +955,16 @@ async def ppl_agenda(
         target_email = resolve_person_alias(person)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # Validate the target email resolves to a real mailbox (trx-bf2h)
+    is_valid = await safe_call_with_retry(
+        resolve.validate_email, email, acct, target_email
+    )
+    if not is_valid:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Email '{target_email}' does not resolve to a valid mailbox. "
+            f"Use 'h8 addr resolve <query>' to search the directory.",
+        )
     return await safe_call_with_retry(
         people.get_person_agenda,
         email,
@@ -981,6 +991,16 @@ async def ppl_free(
         target_email = resolve_person_alias(person)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # Validate the target email resolves to a real mailbox (trx-bf2h)
+    is_valid = await safe_call_with_retry(
+        resolve.validate_email, email, acct, target_email
+    )
+    if not is_valid:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Email '{target_email}' does not resolve to a valid mailbox. "
+            f"Use 'h8 addr resolve <query>' to search the directory.",
+        )
     return await safe_call_with_retry(
         people.get_person_free_slots,
         email,
@@ -1014,6 +1034,21 @@ async def ppl_common(payload: CommonFreeRequest, account: Optional[str] = None):
         raise HTTPException(
             status_code=400, detail="At least 2 people are required for common slots"
         )
+    # Validate all target emails resolve to real mailboxes (trx-bf2h)
+    invalid_emails = []
+    for target_email in target_emails:
+        is_valid = await safe_call_with_retry(
+            resolve.validate_email, email, acct, target_email
+        )
+        if not is_valid:
+            invalid_emails.append(target_email)
+    if invalid_emails:
+        raise HTTPException(
+            status_code=404,
+            detail=f"The following email(s) do not resolve to valid mailboxes: "
+            f"{', '.join(invalid_emails)}. "
+            f"Use 'h8 addr resolve <query>' to search the directory.",
+        )
     return await safe_call_with_retry(
         people.find_common_free_slots,
         email,
@@ -1023,6 +1058,138 @@ async def ppl_common(payload: CommonFreeRequest, account: Optional[str] = None):
         payload.duration,
         payload.limit,
     )
+
+
+# Resource group endpoints
+
+
+class ResourceItem(BaseModel):
+    """A single resource in a group."""
+
+    alias: str
+    email: str
+    desc: Optional[str] = None
+
+
+class ResourceFreeRequest(BaseModel):
+    """Request model for querying resource availability."""
+
+    resources: List[ResourceItem]
+    from_date: Optional[str] = None
+    to_date: Optional[str] = None
+    days: int = 1
+    start_hour: Optional[int] = None
+    end_hour: Optional[int] = None
+
+
+class ResourceFreeWindowRequest(BaseModel):
+    """Request model for checking resource availability in a specific time window."""
+
+    resources: List[ResourceItem]
+    from_date: str
+    to_date: str
+
+
+class ResourceAgendaRequest(BaseModel):
+    """Request model for querying resource bookings."""
+
+    resources: List[ResourceItem]
+    from_date: Optional[str] = None
+    to_date: Optional[str] = None
+    days: int = 1
+
+
+@app.post("/resource/free")
+async def resource_free(payload: ResourceFreeRequest, account: Optional[str] = None):
+    """Check free slots for each resource in a group."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    resource_list = [r.model_dump() for r in payload.resources]
+    return await safe_call_with_retry(
+        resources.resource_free,
+        email,
+        acct,
+        resource_list,
+        payload.from_date,
+        payload.to_date,
+        payload.days,
+        payload.start_hour,
+        payload.end_hour,
+    )
+
+
+@app.post("/resource/free-window")
+async def resource_free_window(
+    payload: ResourceFreeWindowRequest, account: Optional[str] = None
+):
+    """Check if each resource is available during a specific time window."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    resource_list = [r.model_dump() for r in payload.resources]
+    return await safe_call_with_retry(
+        resources.resource_free_window,
+        email,
+        acct,
+        resource_list,
+        payload.from_date,
+        payload.to_date,
+    )
+
+
+@app.post("/resource/agenda")
+async def resource_agenda(
+    payload: ResourceAgendaRequest, account: Optional[str] = None
+):
+    """Get bookings/events for each resource in a group."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    resource_list = [r.model_dump() for r in payload.resources]
+    return await safe_call_with_retry(
+        resources.resource_agenda,
+        email,
+        acct,
+        resource_list,
+        payload.from_date,
+        payload.to_date,
+        payload.days,
+    )
+
+
+# Address / GAL resolve endpoints
+
+
+@app.get("/addr/resolve")
+async def addr_resolve(
+    q: str,
+    account: Optional[str] = None,
+):
+    """Resolve a name or email against the Global Address List (GAL).
+
+    Uses EWS ResolveNames to find mailboxes including resource rooms,
+    equipment, and distribution lists.
+    """
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        resolve.resolve_names, email, acct, q
+    )
+
+
+@app.get("/addr/validate")
+async def addr_validate(
+    email_addr: str,
+    account: Optional[str] = None,
+):
+    """Validate whether an email address resolves to a real mailbox.
+
+    Returns {"valid": true/false, "email": "..."}.
+    """
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    is_valid = await safe_call_with_retry(
+        resolve.validate_email, email, acct, email_addr
+    )
+    return {"valid": is_valid, "email": email_addr}
 
 
 def main() -> None:
