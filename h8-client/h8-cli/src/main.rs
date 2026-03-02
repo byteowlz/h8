@@ -56,6 +56,7 @@ fn try_main() -> Result<()> {
         Command::Completions { shell } => handle_completions(shell),
         Command::Service { command } => handle_service(&ctx, command),
         Command::Which(args) => handle_natural_resource(&ctx, args),
+        Command::Book(args) => handle_book(&ctx, args),
     }
 }
 
@@ -175,6 +176,17 @@ enum Command {
     ///   h8 cars free 20.03
     #[command(alias = "is")]
     Which(NaturalResourceArgs),
+    /// Book a resource (room, car, etc.)
+    ///
+    /// Interactive: shows available resources and lets you pick one.
+    /// Programmatic: use --json to get available resources, --select to book directly.
+    ///
+    /// Examples:
+    ///   h8 book room today 12-14
+    ///   h8 book car tomorrow 9-12
+    ///   h8 book room friday 14-16 --select 02-41 --subject "Team Sync"
+    ///   h8 book room today 12-14 --json
+    Book(BookArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -958,6 +970,25 @@ struct NaturalResourceArgs {
     /// Natural language query (e.g., "cars are free tomorrow", "bmw free friday")
     #[arg(trailing_var_arg = true, required = true)]
     query: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct BookArgs {
+    /// Resource group name or individual alias (e.g., "room", "car", "bmw")
+    resource: String,
+    /// Time specification: date and time range
+    /// Examples: "today 12-14", "friday 9-12", "tomorrow 14-16"
+    #[arg(trailing_var_arg = true)]
+    when: Vec<String>,
+    /// Directly select a resource alias (skip interactive selection)
+    #[arg(long)]
+    select: Option<String>,
+    /// Meeting subject (required for booking, prompted interactively if not given)
+    #[arg(short = 's', long)]
+    subject: Option<String>,
+    /// Duration in minutes (defaults to full window)
+    #[arg(short = 'd', long)]
+    duration: Option<u32>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -5073,6 +5104,384 @@ fn handle_resource_remove(ctx: &RuntimeContext, args: ResourceRemoveArgs) -> Res
         args.alias,
         args.group
     );
+
+    Ok(())
+}
+
+fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    // Strip global flags from trailing_var_arg
+    let (ctx, when_cleaned) = strip_global_flags(ctx, &args.when);
+    let ctx = &ctx;
+
+    let account = effective_account(ctx);
+    let client = ctx.service_client()?;
+
+    if ctx.config.resources.is_empty() {
+        return Err(anyhow!(
+            "No resource groups configured. Add [resources.<group>] sections to config.toml"
+        ));
+    }
+
+    // Resolve "room" -> "rooms", "car" -> "cars" etc. (singular/plural)
+    let resource_input = args.resource.to_lowercase();
+    let (group_name, resources) = if let Some((_name, group)) = ctx.config.resource_group(&resource_input) {
+        (resource_input.clone(), resource_group_to_json(group))
+    } else {
+        // Try singular -> plural
+        let plural = format!("{}s", resource_input);
+        if let Some((_name, group)) = ctx.config.resource_group(&plural) {
+            (plural, resource_group_to_json(group))
+        } else if let Some((grp, alias, email, desc)) = ctx.config.find_resource_by_alias(&resource_input) {
+            // Single resource alias
+            (grp, vec![serde_json::json!({ "alias": alias, "email": email, "desc": desc })])
+        } else {
+            return Err(anyhow!(
+                "Unknown resource group or alias '{}'. Available groups: {}",
+                resource_input,
+                ctx.config.resource_group_names().join(", ")
+            ));
+        }
+    };
+
+    // Parse when text - must contain a time range
+    let when_text = if when_cleaned.is_empty() {
+        return Err(anyhow!("Time range required. Example: h8 book {} today 12-14", resource_input));
+    } else {
+        when_cleaned.join(" ")
+    };
+
+    let hour_range = parse_hour_range(&when_text);
+    let time_of_day = if hour_range.is_none() {
+        parse_time_of_day(&when_text)
+    } else {
+        None
+    };
+
+    if hour_range.is_none() && time_of_day.is_none() {
+        return Err(anyhow!(
+            "Time range required. Examples:\n  h8 book {} today 12-14\n  h8 book {} friday afternoon\n  h8 book {} tomorrow 9:00-11:30",
+            resource_input, resource_input, resource_input
+        ));
+    }
+
+    let (start_h, start_m, end_h, end_m) = if let Some((_, sh, sm, eh, em)) = &hour_range {
+        (*sh, *sm, *eh, *em)
+    } else if let Some((_, sh, eh)) = &time_of_day {
+        (*sh, 0, *eh, 0)
+    } else {
+        unreachable!()
+    };
+
+    // Parse date
+    let date_text = if let Some((ref remaining, ..)) = hour_range {
+        if remaining.trim().is_empty() { "today".to_string() } else { remaining.clone() }
+    } else if let Some((ref remaining, ..)) = time_of_day {
+        if remaining.trim().is_empty() { "today".to_string() } else { remaining.clone() }
+    } else {
+        "today".to_string()
+    };
+
+    let tz = ctx.config.timezone.parse::<chrono_tz::Tz>().unwrap_or(chrono_tz::UTC);
+    let target_date = if let Some((date, _)) = parse_single_date(&date_text) {
+        date
+    } else {
+        Local::now().with_timezone(&tz).date_naive()
+    };
+
+    let window_start = format!("{}T{:02}:{:02}:00", target_date.format("%Y-%m-%d"), start_h, start_m);
+    let window_end = format!("{}T{:02}:{:02}:00", target_date.format("%Y-%m-%d"), end_h, end_m);
+
+    // Query availability
+    let result = client
+        .resource_free_window(&account, &resources, &window_start, &window_end)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    let entries = result.as_array().ok_or_else(|| anyhow!("unexpected response"))?;
+
+    let available: Vec<&Value> = entries.iter().filter(|e| e["available"].as_bool() == Some(true)).collect();
+    let date_display = target_date.format("%A %Y-%m-%d").to_string();
+
+    // JSON mode: output availability and exit
+    if ctx.common.json || ctx.common.yaml {
+        let output = serde_json::json!({
+            "group": group_name,
+            "date": target_date.format("%Y-%m-%d").to_string(),
+            "window_start": window_start,
+            "window_end": window_end,
+            "resources": entries,
+            "available_count": available.len(),
+        });
+        emit_output(&ctx.common, &output)?;
+
+        // If --select was given in JSON mode, also book and output the result
+        if let Some(ref selected_alias) = args.select {
+            let subject = args.subject.as_deref().ok_or_else(|| {
+                anyhow!("--subject is required when using --select in JSON mode")
+            })?;
+            return book_resource(ctx, &client, &account, entries, selected_alias, subject, &window_start, &window_end, args.duration);
+        }
+        return Ok(());
+    }
+
+    // Non-JSON: interactive or direct booking
+    if available.is_empty() {
+        println!("\nNo {} available {} {:02}:{:02}-{:02}:{:02}",
+            group_name, date_display, start_h, start_m, end_h, end_m);
+
+        // Show which are booked
+        for entry in entries {
+            let alias = entry["alias"].as_str().unwrap_or("?");
+            let desc = entry["desc"].as_str();
+            let label = if let Some(d) = desc { format!("{} ({})", alias, d) } else { alias.to_string() };
+            println!("  {:<35} -- booked", label);
+        }
+        return Ok(());
+    }
+
+    // Direct selection via --select
+    if let Some(ref selected_alias) = args.select {
+        let subject = args.subject.as_deref().ok_or_else(|| {
+            anyhow!("--subject is required when using --select")
+        })?;
+        return book_resource(ctx, &client, &account, entries, selected_alias, subject, &window_start, &window_end, args.duration);
+    }
+
+    // Interactive selection
+    if !io::stdout().is_terminal() {
+        return Err(anyhow!(
+            "Interactive mode requires a terminal. Use --json to get availability, or --select <alias> --subject <text> to book directly."
+        ));
+    }
+
+    println!(
+        "\n{} available {} {:02}:{:02}-{:02}:{:02}:\n",
+        capitalize(&group_name),
+        date_display,
+        start_h, start_m, end_h, end_m,
+    );
+
+    // Show all resources with availability status
+    let mut selectable: Vec<(usize, &Value)> = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let alias = entry["alias"].as_str().unwrap_or("?");
+        let desc = entry["desc"].as_str();
+        let is_available = entry["available"].as_bool() == Some(true);
+        let label = if let Some(d) = desc { format!("{} ({})", alias, d) } else { alias.to_string() };
+
+        if is_available {
+            selectable.push((i, entry));
+            println!(
+                "  [{}] {:<35} {}",
+                selectable.len().to_string().yellow().bold(),
+                label,
+                "available".green()
+            );
+        } else {
+            println!(
+                "      {:<35} {}",
+                label,
+                "booked".red().dimmed()
+            );
+        }
+    }
+
+    if selectable.is_empty() {
+        return Ok(());
+    }
+
+    // Prompt for selection
+    print!(
+        "\n{} ",
+        format!("Select resource (1-{}), or 'c' to cancel:", selectable.len()).cyan()
+    );
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    if input.eq_ignore_ascii_case("c") || input.eq_ignore_ascii_case("cancel") || input.is_empty() {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let sel_idx: usize = match input.parse::<usize>() {
+        Ok(n) if n > 0 && n <= selectable.len() => n - 1,
+        _ => {
+            println!("Invalid selection.");
+            return Ok(());
+        }
+    };
+
+    let (_orig_idx, selected_entry) = selectable[sel_idx];
+    let alias = selected_entry["alias"].as_str().unwrap_or("?");
+    let email = selected_entry["email"].as_str().unwrap_or("?");
+    let desc = selected_entry["desc"].as_str();
+
+    // Get subject
+    let subject = if let Some(ref s) = args.subject {
+        s.clone()
+    } else {
+        print!("{} ", "Meeting subject:".cyan());
+        io::stdout().flush()?;
+        let mut subj = String::new();
+        io::stdin().read_line(&mut subj)?;
+        let subj = subj.trim().to_string();
+        if subj.is_empty() {
+            println!("Cancelled - subject required.");
+            return Ok(());
+        }
+        subj
+    };
+
+    // Calculate actual times
+    let (book_start, book_end) = if let Some(dur) = args.duration {
+        let end = format!(
+            "{}T{:02}:{:02}:00",
+            target_date.format("%Y-%m-%d"),
+            start_h + dur / 60,
+            start_m + dur % 60
+        );
+        (window_start.clone(), end)
+    } else {
+        (window_start.clone(), window_end.clone())
+    };
+
+    // Confirm
+    let label = if let Some(d) = desc { format!("{} ({})", alias, d) } else { alias.to_string() };
+    let start_time = format!("{:02}:{:02}", start_h, start_m);
+    let end_time = if let Some(dur) = args.duration {
+        let total_min = start_h * 60 + start_m + dur;
+        format!("{:02}:{:02}", total_min / 60, total_min % 60)
+    } else {
+        format!("{:02}:{:02}", end_h, end_m)
+    };
+
+    println!("\n{}", "Booking:".bold());
+    println!("  Resource: {}", label);
+    println!("  Subject:  {}", subject);
+    println!("  When:     {} {}-{}", target_date, start_time, end_time);
+
+    print!("\n{} ", "Confirm? (y/n):".cyan());
+    io::stdout().flush()?;
+
+    let mut confirm = String::new();
+    io::stdin().read_line(&mut confirm)?;
+    if !confirm.trim().eq_ignore_ascii_case("y") {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    // Create the calendar event with the resource as location
+    let payload = serde_json::json!({
+        "subject": subject,
+        "start": book_start,
+        "end": book_end,
+        "location": label,
+        "required_attendees": [email],
+    });
+
+    let result = client
+        .calendar_invite(&account, payload)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    println!("{} Booked {} for \"{}\" on {} {}-{}",
+        "+".green().bold(), label, subject, target_date, start_time, end_time);
+
+    debug!("Calendar invite result: {:?}", result);
+
+    Ok(())
+}
+
+/// Book a specific resource by alias (programmatic path).
+fn book_resource(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    entries: &[Value],
+    alias: &str,
+    subject: &str,
+    window_start: &str,
+    window_end: &str,
+    duration: Option<u32>,
+) -> Result<()> {
+    // Find the resource
+    let entry = entries
+        .iter()
+        .find(|e| {
+            e["alias"]
+                .as_str()
+                .map(|a| a.eq_ignore_ascii_case(alias))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            let available: Vec<&str> = entries
+                .iter()
+                .filter_map(|e| e["alias"].as_str())
+                .collect();
+            anyhow!(
+                "Unknown resource '{}'. Available: {}",
+                alias,
+                available.join(", ")
+            )
+        })?;
+
+    if entry["available"].as_bool() != Some(true) {
+        let desc = entry["desc"].as_str();
+        let label = if let Some(d) = desc { format!("{} ({})", alias, d) } else { alias.to_string() };
+        return Err(anyhow!("{} is not available in this time window", label));
+    }
+
+    let email = entry["email"].as_str().unwrap_or("?");
+    let desc = entry["desc"].as_str();
+    let label = if let Some(d) = desc { format!("{} ({})", alias, d) } else { alias.to_string() };
+
+    // Calculate end time if duration specified
+    let book_end = if let Some(dur) = duration {
+        // Parse window_start to adjust
+        if let Ok(start_dt) = DateTime::parse_from_rfc3339(&format!("{}+01:00", window_start)) {
+            (start_dt + ChronoDuration::minutes(dur as i64)).to_rfc3339()
+        } else {
+            window_end.to_string()
+        }
+    } else {
+        window_end.to_string()
+    };
+
+    let payload = serde_json::json!({
+        "subject": subject,
+        "start": window_start,
+        "end": book_end,
+        "location": label,
+        "required_attendees": [email],
+    });
+
+    let result = client
+        .calendar_invite(account, payload)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    if ctx.common.json || ctx.common.yaml {
+        let output = serde_json::json!({
+            "booked": true,
+            "resource": alias,
+            "email": email,
+            "subject": subject,
+            "start": window_start,
+            "end": book_end,
+            "result": result,
+        });
+        emit_output(&ctx.common, &output)?;
+    } else {
+        use owo_colors::OwoColorize;
+        println!(
+            "{} Booked {} for \"{}\"",
+            "+".green().bold(),
+            label,
+            subject
+        );
+    }
 
     Ok(())
 }

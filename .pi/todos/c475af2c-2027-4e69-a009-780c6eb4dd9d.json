@@ -2,46 +2,28 @@
   "todos": [
     {
       "id": "1",
-      "content": "trx-ybfm.1: Add ResourceEntry config (string or table with email+desc) to Rust AppConfig",
+      "content": "Add Book command to CLI with args",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "2",
-      "content": "trx-ybfm: Add /resource/free Python endpoint using per-resource free/busy queries",
+      "content": "Implement handle_book: query available resources, interactive selection or --json output",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "3",
-      "content": "trx-ybfm: Add /resource/agenda Python endpoint for resource bookings",
+      "content": "Implement programmatic booking: --select <alias> --subject <subject> creates calendar event",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "4",
-      "content": "trx-ybfm: Add resource_* client methods in Rust service.rs",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "5",
-      "content": "trx-ybfm: Add 'h8 resource' CLI subcommands (free, list, agenda)",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "6",
-      "content": "trx-ybfm.2: Add natural language resource query parsing + top-level catch-all",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "7",
-      "content": "Compile, test, close issues",
-      "status": "completed",
+      "content": "Compile, test, commit",
+      "status": "in_progress",
       "priority": "high"
     }
   ],
-  "updated_at": "2026-03-02T09:18:20.912Z"
+  "updated_at": "2026-03-02T11:58:46.427Z"
 }
