@@ -1214,6 +1214,35 @@ impl RuntimeContext {
     }
 }
 
+/// Strip global flags (--json, --yaml, --quiet etc.) that got captured by
+/// `trailing_var_arg` and apply them to the context.
+///
+/// clap's `trailing_var_arg` consumes everything after positional args, including
+/// global flags like `--json`. This function filters them out of the word list
+/// and returns a potentially-modified context with those flags enabled.
+fn strip_global_flags(ctx: &RuntimeContext, words: &[String]) -> (RuntimeContext, Vec<String>) {
+    let mut common = ctx.common.clone();
+    let mut filtered = Vec::with_capacity(words.len());
+
+    for word in words {
+        match word.as_str() {
+            "--json" => common.json = true,
+            "--yaml" => common.yaml = true,
+            "--quiet" | "-q" => common.quiet = true,
+            "--verbose" | "-v" => common.verbose += 1,
+            "--debug" => common.debug = true,
+            _ => filtered.push(word.clone()),
+        }
+    }
+
+    let new_ctx = RuntimeContext {
+        common,
+        paths: ctx.paths.clone(),
+        config: ctx.config.clone(),
+    };
+    (new_ctx, filtered)
+}
+
 fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
     let account = effective_account(ctx);
     let client = ctx.service_client()?;
@@ -4075,6 +4104,15 @@ fn parse_time_of_day(text: &str) -> Option<(String, u32, u32)> {
 }
 
 fn handle_resource_free(ctx: &RuntimeContext, args: ResourceFreeArgs) -> Result<()> {
+    // Strip global flags that trailing_var_arg may have captured
+    let (ctx, when_cleaned) = strip_global_flags(ctx, &args.when);
+    let ctx = &ctx;
+    let args = ResourceFreeArgs {
+        group: args.group,
+        when: when_cleaned,
+        all: args.all,
+    };
+
     let account = effective_account(ctx);
     let client = ctx.service_client()?;
 
@@ -4296,6 +4334,14 @@ fn handle_resource_free(ctx: &RuntimeContext, args: ResourceFreeArgs) -> Result<
 }
 
 fn handle_resource_agenda(ctx: &RuntimeContext, args: ResourceAgendaArgs) -> Result<()> {
+    // Strip global flags that trailing_var_arg may have captured
+    let (ctx, when_cleaned) = strip_global_flags(ctx, &args.when);
+    let ctx = &ctx;
+    let args = ResourceAgendaArgs {
+        group: args.group,
+        when: when_cleaned,
+    };
+
     let account = effective_account(ctx);
     let client = ctx.service_client()?;
 
@@ -4527,7 +4573,10 @@ enum NaturalResourceTarget {
 }
 
 fn handle_natural_resource(ctx: &RuntimeContext, args: NaturalResourceArgs) -> Result<()> {
-    let query_text = args.query.join(" ");
+    // Strip global flags that trailing_var_arg may have captured
+    let (ctx, query_cleaned) = strip_global_flags(ctx, &args.query);
+    let ctx = &ctx;
+    let query_text = query_cleaned.join(" ");
 
     if ctx.config.resources.is_empty() {
         return Err(anyhow!(
