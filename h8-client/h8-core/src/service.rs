@@ -457,6 +457,74 @@ impl ServiceClient {
         self.get("/calendar/invites", &params)
     }
 
+    /// Query free slots for each resource in a group.
+    pub fn resource_free(
+        &self,
+        account: &str,
+        resources: &[Value],
+        from_date: Option<&str>,
+        to_date: Option<&str>,
+        days: i64,
+        start_hour: Option<u8>,
+        end_hour: Option<u8>,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "resources": resources,
+            "from_date": from_date,
+            "to_date": to_date,
+            "days": days,
+            "start_hour": start_hour,
+            "end_hour": end_hour,
+        });
+        self.post_json(&format!("/resource/free?account={}", account), payload)
+    }
+
+    /// Check if each resource is free during a specific time window.
+    pub fn resource_free_window(
+        &self,
+        account: &str,
+        resources: &[Value],
+        from_date: &str,
+        to_date: &str,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "resources": resources,
+            "from_date": from_date,
+            "to_date": to_date,
+        });
+        self.post_json(&format!("/resource/free-window?account={}", account), payload)
+    }
+
+    /// Get bookings/events for each resource in a group.
+    pub fn resource_agenda(
+        &self,
+        account: &str,
+        resources: &[Value],
+        from_date: Option<&str>,
+        to_date: Option<&str>,
+        days: i64,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "resources": resources,
+            "from_date": from_date,
+            "to_date": to_date,
+            "days": days,
+        });
+        self.post_json(&format!("/resource/agenda?account={}", account), payload)
+    }
+
+    /// Resolve a name or email against the Global Address List (GAL).
+    pub fn addr_resolve(&self, account: &str, query: &str) -> Result<Value> {
+        let params = [("account", account), ("q", query)];
+        self.get("/addr/resolve", &params)
+    }
+
+    /// Validate whether an email address resolves to a real mailbox.
+    pub fn addr_validate(&self, account: &str, email_addr: &str) -> Result<Value> {
+        let params = [("account", account), ("email_addr", email_addr)];
+        self.get("/addr/validate", &params)
+    }
+
     /// Respond to a meeting invite (accept/decline/tentative).
     pub fn calendar_rsvp(
         &self,

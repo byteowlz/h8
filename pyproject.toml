@@ -21,7 +21,6 @@ test = [
 ]
 
 [project.scripts]
-h8 = "h8.cli:main"
 h8-service = "h8.service:main"
 
 [tool.uv]

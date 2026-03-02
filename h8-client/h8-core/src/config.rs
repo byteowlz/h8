@@ -63,6 +63,45 @@ impl Default for CalendarConfig {
     }
 }
 
+/// A resource entry in a resource group.
+///
+/// Supports two config formats:
+/// - Simple string: `vw1 = "resource@example.com"` (email only)
+/// - Inline table: `vw1 = { email = "resource@example.com", desc = "VW ID7" }`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ResourceEntry {
+    /// Simple email string.
+    Simple(String),
+    /// Table with email and optional description.
+    Detailed {
+        email: String,
+        #[serde(default)]
+        desc: Option<String>,
+    },
+}
+
+impl ResourceEntry {
+    /// Get the email address.
+    pub fn email(&self) -> &str {
+        match self {
+            ResourceEntry::Simple(e) => e,
+            ResourceEntry::Detailed { email, .. } => email,
+        }
+    }
+
+    /// Get the optional description.
+    pub fn desc(&self) -> Option<&str> {
+        match self {
+            ResourceEntry::Simple(_) => None,
+            ResourceEntry::Detailed { desc, .. } => desc.as_deref(),
+        }
+    }
+}
+
+/// A resource group maps alias names to ResourceEntry values.
+pub type ResourceGroup = std::collections::HashMap<String, ResourceEntry>;
+
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -84,6 +123,9 @@ pub struct AppConfig {
     /// People aliases (name -> email).
     #[serde(default)]
     pub people: std::collections::HashMap<String, String>,
+    /// Resource groups (group_name -> { alias -> email/entry }).
+    #[serde(default)]
+    pub resources: std::collections::HashMap<String, ResourceGroup>,
 }
 
 impl Default for AppConfig {
@@ -96,6 +138,7 @@ impl Default for AppConfig {
             mail: MailConfig::default(),
             calendar: CalendarConfig::default(),
             people: std::collections::HashMap::new(),
+            resources: std::collections::HashMap::new(),
         }
     }
 }
@@ -213,6 +256,64 @@ impl AppConfig {
                 available.join(", ")
             ))
         }
+    }
+
+    /// Get a resource group by name (case-insensitive).
+    pub fn resource_group(&self, name: &str) -> Option<(&str, &ResourceGroup)> {
+        for (group_name, group) in &self.resources {
+            if group_name.eq_ignore_ascii_case(name) {
+                return Some((group_name, group));
+            }
+        }
+        None
+    }
+
+    /// Resolve a resource alias within a group. Returns (email, desc).
+    pub fn resolve_resource(
+        &self,
+        group_name: &str,
+        alias: &str,
+    ) -> std::result::Result<(String, Option<String>), String> {
+        let (_, group) = self.resource_group(group_name).ok_or_else(|| {
+            let available: Vec<&str> = self.resources.keys().map(|s| s.as_str()).collect();
+            if available.is_empty() {
+                format!("unknown resource group '{}' (no groups configured in [resources])", group_name)
+            } else {
+                format!("unknown resource group '{}' (available: {})", group_name, available.join(", "))
+            }
+        })?;
+        for (entry_alias, entry) in group {
+            if entry_alias.eq_ignore_ascii_case(alias) {
+                return Ok((entry.email().to_string(), entry.desc().map(|s| s.to_string())));
+            }
+        }
+        let available: Vec<&str> = group.keys().map(|s| s.as_str()).collect();
+        Err(format!(
+            "unknown resource '{}' in group '{}' (available: {})",
+            alias, group_name, available.join(", ")
+        ))
+    }
+
+    /// Find which resource group contains a given alias. Returns (group_name, alias, email, desc).
+    pub fn find_resource_by_alias(&self, alias: &str) -> Option<(String, String, String, Option<String>)> {
+        for (group_name, group) in &self.resources {
+            for (entry_alias, entry) in group {
+                if entry_alias.eq_ignore_ascii_case(alias) {
+                    return Some((
+                        group_name.clone(),
+                        entry_alias.clone(),
+                        entry.email().to_string(),
+                        entry.desc().map(|s| s.to_string()),
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Get all resource group names.
+    pub fn resource_group_names(&self) -> Vec<&str> {
+        self.resources.keys().map(|s| s.as_str()).collect()
     }
 
     /// Load configuration from paths with environment overlay.
