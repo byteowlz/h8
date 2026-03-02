@@ -10,14 +10,18 @@ uv run pytest tests/  # Python tests
 
 ## Architecture
 ```
-h8-service/           Python FastAPI (exchangelib for EWS)
+h8-service/           Python FastAPI (exchangelib for EWS, routing APIs)
   h8/contacts.py      Contact CRUD functions
   h8/mail.py          Mail operations
   h8/calendar.py      Calendar operations
+  h8/resolve.py       EWS ResolveNames for GAL search + email validation
+  h8/resources.py     Resource availability via EWS
+  h8/routing.py       Geocoding (Nominatim), car routing (OSRM), transit (DB HAFAS)
   h8/service/__init__.py  FastAPI routes (add endpoints here)
 
 h8-client/            Rust workspace
   h8-core/src/
+    config.rs         Config types: AppConfig, TripConfig, Location, ResourceEntry, etc.
     service.rs        HTTP client (add client methods here)
     types.rs          Shared types
   h8-cli/src/main.rs  CLI commands (commands + handlers)
@@ -65,6 +69,11 @@ let remote_id = id_gen.resolve(&args.id)?.unwrap_or_else(|| args.id.clone());
 
 **Service calls**: Always use `client.method().map_err(|e| anyhow!("{e}"))?`
 
+**Trailing var arg + flags**: Commands using `trailing_var_arg = true` (resource free/agenda,
+natural language queries, trip) must strip global flags (`--json`, `--yaml`) and command-specific
+flags from the captured words. Use `strip_global_flags()` for global flags. For trip, use
+`parse_trip_flags()` which extracts `--car`, `--transit`, `--book`, `--create`, `--sap`, etc.
+
 ## CLI Commands Reference
 
 | Command | Description |
@@ -81,6 +90,44 @@ let remote_id = id_gen.resolve(&args.id)?.unwrap_or_else(|| args.id.clone());
 | `h8 agenda` | Today's calendar |
 | `h8 ppl schedule A B -w N --json` | List common free slots (step 1) |
 | `h8 ppl schedule A B --slot N -s "Subj" -m 45` | Book a slot (step 2) |
+| `h8 addr search "query"` | Search Global Address List |
+| `h8 addr resolve "query"` | Resolve name via EWS ResolveNames |
+| `h8 resource list` | List all resource groups and aliases |
+| `h8 resource free <group> [when]` | Check resource group availability |
+| `h8 resource agenda <group> [when]` | View resource group bookings |
+| `h8 resource setup [group] [-q query]` | Interactive: search GAL, add resources |
+| `h8 resource remove <group> <alias>` | Remove a resource alias from config |
+| `h8 which <group> are free [when]` | Natural language resource query |
+| `h8 is the <alias> free [when]` | Natural language single resource check |
+| `h8 book <group> <when> [--select <alias> --subject <text>]` | Book a resource |
+| `h8 trip <dest> <when> --car/--transit` | Plan business trip with routing |
+| `h8 trip <dest> <when> --car --book` | Plan trip + book a car |
+| `h8 trip <dest> <when> --car --create` | Plan trip + create calendar events |
+| `h8 trip <dest> <when> --car --sap --json` | Trip plan as SAP-compatible JSON |
+
+## Config Sections
+
+| Section | Purpose |
+|---------|---------|
+| `account`, `timezone`, `service_url` | Core settings |
+| `[calendar]` | Display preferences (default_view) |
+| `[free_slots]` | Working hours, weekend exclusion |
+| `[mail]` | Pager, editor, signature, compose settings |
+| `[people]` | Name-to-email aliases for ppl commands |
+| `[resources.<group>]` | Bookable resource groups (cars, rooms, etc.) |
+| `[trip]` | Default origin, buffer, routing providers, country |
+| `[trip.locations.<alias>]` | Named locations with coordinates and station |
+
+## Routing Providers
+
+| Provider | Mode | Coverage | API Key |
+|----------|------|----------|---------|
+| OSRM | car | Worldwide | None (free) |
+| Nominatim | geocoding | Worldwide | None (free) |
+| DB HAFAS | transit | Germany | None (free) |
+| OpenRouteService | car | Worldwide | Required |
+
+Transit providers are pluggable -- add new ones in `h8/routing.py` and register in `route_transit()`.
 
 ## Issue Tracking
 ```bash

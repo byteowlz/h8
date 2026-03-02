@@ -1,59 +1,41 @@
 {
   "todos": [
     {
-      "id": "1",
-      "content": "Design trip architecture: config, routing providers, data flow",
+      "id": "s1",
+      "content": "Update examples/config.schema.json with resources + trip sections",
       "status": "completed",
       "priority": "high"
     },
     {
-      "id": "2",
-      "content": "Add [trip] config section: locations (aliases), routing providers (car/train)",
+      "id": "s2",
+      "content": "Update examples/config.toml with resources + trip examples",
       "status": "completed",
       "priority": "high"
     },
     {
-      "id": "3",
-      "content": "Implement Python routing service: OSRM for car, DB HAFAS for train",
+      "id": "s3",
+      "content": "Copy schema to byteowlz/schemas repo",
       "status": "completed",
       "priority": "high"
     },
     {
-      "id": "4",
-      "content": "Add /trip/route endpoint to h8-service",
+      "id": "s4",
+      "content": "Update README.md with resource, book, trip commands",
       "status": "completed",
       "priority": "high"
     },
     {
-      "id": "5",
-      "content": "Add Rust client methods for trip routing",
+      "id": "s5",
+      "content": "Update AGENTS.md with new commands reference",
       "status": "completed",
       "priority": "high"
     },
     {
-      "id": "6",
-      "content": "Implement h8 trip command: interactive and programmatic modes",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "7",
-      "content": "Create trip JSON schema for SAP export",
-      "status": "completed",
-      "priority": "medium"
-    },
-    {
-      "id": "8",
-      "content": "Calendar event creation with travel blocks",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "9",
-      "content": "Compile, test, commit",
+      "id": "s6",
+      "content": "Commit and push",
       "status": "in_progress",
       "priority": "high"
     }
   ],
-  "updated_at": "2026-03-02T12:25:02.927Z"
+  "updated_at": "2026-03-02T12:42:14.748Z"
 }
