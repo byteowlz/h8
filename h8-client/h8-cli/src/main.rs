@@ -57,6 +57,7 @@ fn try_main() -> Result<()> {
         Command::Service { command } => handle_service(&ctx, command),
         Command::Which(args) => handle_natural_resource(&ctx, args),
         Command::Book(args) => handle_book(&ctx, args),
+        Command::Trip(args) => handle_trip(&ctx, args),
     }
 }
 
@@ -187,6 +188,19 @@ enum Command {
     ///   h8 book room friday 14-16 --select 02-41 --subject "Team Sync"
     ///   h8 book room today 12-14 --json
     Book(BookArgs),
+    /// Plan a business trip: calculate travel, check resources, create calendar events
+    ///
+    /// Calculates travel time from your configured origin to the destination,
+    /// optionally books a car, and creates calendar events for the full trip
+    /// (travel to, meeting, travel back).
+    ///
+    /// Examples:
+    ///   h8 trip Berlin friday 9-12 --car
+    ///   h8 trip Munich tomorrow 14-16 --transit
+    ///   h8 trip "Hamburg Hbf" monday 10-15 --car --book
+    ///   h8 trip Berlin friday 9-12 --car --json
+    ///   h8 trip Berlin friday 9-12 --car --from home
+    Trip(TripArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -989,6 +1003,66 @@ struct BookArgs {
     /// Duration in minutes (defaults to full window)
     #[arg(short = 'd', long)]
     duration: Option<u32>,
+}
+
+#[derive(Debug, Args)]
+struct TripArgs {
+    /// Destination (city, address, or configured location alias)
+    destination: String,
+    /// Date and time range of the business at the destination
+    /// Examples: "friday 9-12", "tomorrow 14-16", "20.03 10-15"
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    when: Vec<String>,
+}
+
+/// Flags extracted from TripArgs trailing var arg.
+#[derive(Debug, Default)]
+struct TripFlags {
+    car: bool,
+    transit: bool,
+    from: Option<String>,
+    book: bool,
+    select: Option<String>,
+    subject: Option<String>,
+    create: bool,
+    sap: bool,
+}
+
+/// Parse trip-specific flags out of the trailing var arg words.
+///
+/// Returns (cleaned when words, extracted flags).
+fn parse_trip_flags(words: &[String]) -> (Vec<String>, TripFlags) {
+    let mut flags = TripFlags::default();
+    let mut cleaned = Vec::new();
+    let mut iter = words.iter().peekable();
+
+    while let Some(word) = iter.next() {
+        match word.as_str() {
+            "--car" => flags.car = true,
+            "--transit" => flags.transit = true,
+            "--book" => flags.book = true,
+            "--create" => flags.create = true,
+            "--sap" => flags.sap = true,
+            "--from" | "-f" => {
+                if let Some(val) = iter.next() {
+                    flags.from = Some(val.clone());
+                }
+            }
+            "--select" => {
+                if let Some(val) = iter.next() {
+                    flags.select = Some(val.clone());
+                }
+            }
+            "--subject" | "-s" => {
+                if let Some(val) = iter.next() {
+                    flags.subject = Some(val.clone());
+                }
+            }
+            _ => cleaned.push(word.clone()),
+        }
+    }
+
+    (cleaned, flags)
 }
 
 #[derive(Debug, Subcommand)]
@@ -5104,6 +5178,496 @@ fn handle_resource_remove(ctx: &RuntimeContext, args: ResourceRemoveArgs) -> Res
         args.alias,
         args.group
     );
+
+    Ok(())
+}
+
+fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    // Strip global flags and trip-specific flags from trailing_var_arg
+    let (ctx, global_cleaned) = strip_global_flags(ctx, &args.when);
+    let ctx = &ctx;
+    let (when_cleaned, flags) = parse_trip_flags(&global_cleaned);
+
+    let client = ctx.service_client()?;
+    let account = effective_account(ctx);
+    let tz = ctx
+        .config
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .unwrap_or(chrono_tz::UTC);
+
+    // Determine transport mode
+    let mode = if flags.transit {
+        "transit"
+    } else if flags.car {
+        "car"
+    } else {
+        return Err(anyhow!("Specify transport mode: --car or --transit"));
+    };
+
+    // Parse when: need date + time range
+    let when_text = if when_cleaned.is_empty() {
+        return Err(anyhow!(
+            "Time range required. Example: h8 trip {} friday 9-12 --car",
+            args.destination
+        ));
+    } else {
+        when_cleaned.join(" ")
+    };
+
+    let hour_range = parse_hour_range(&when_text);
+    let time_of_day = if hour_range.is_none() {
+        parse_time_of_day(&when_text)
+    } else {
+        None
+    };
+
+    if hour_range.is_none() && time_of_day.is_none() {
+        return Err(anyhow!(
+            "Time range required. Examples:\n  h8 trip {} friday 9-12 --car\n  h8 trip {} tomorrow afternoon --transit",
+            args.destination, args.destination
+        ));
+    }
+
+    let (meeting_start_h, meeting_start_m, meeting_end_h, meeting_end_m) =
+        if let Some((_, sh, sm, eh, em)) = &hour_range {
+            (*sh, *sm, *eh, *em)
+        } else if let Some((_, sh, eh)) = &time_of_day {
+            (*sh, 0, *eh, 0)
+        } else {
+            unreachable!()
+        };
+
+    // Parse date
+    let date_text = if let Some((ref remaining, ..)) = hour_range {
+        if remaining.trim().is_empty() {
+            "today".to_string()
+        } else {
+            remaining.clone()
+        }
+    } else if let Some((ref remaining, ..)) = time_of_day {
+        if remaining.trim().is_empty() {
+            "today".to_string()
+        } else {
+            remaining.clone()
+        }
+    } else {
+        "today".to_string()
+    };
+
+    let target_date = if let Some((date, _)) = parse_single_date(&date_text) {
+        date
+    } else {
+        Local::now().with_timezone(&tz).date_naive()
+    };
+
+    // Resolve origin location
+    let origin_alias = flags
+        .from
+        .as_deref()
+        .unwrap_or(&ctx.config.trip.default_origin);
+    let origin = ctx.config.trip.resolve_location(origin_alias).ok_or_else(|| {
+        let available: Vec<&str> = ctx.config.trip.locations.keys().map(|s| s.as_str()).collect();
+        if available.is_empty() {
+            anyhow!(
+                "No origin location '{}' configured. Add [trip.locations.{}] to config.toml with address, lat, lon",
+                origin_alias, origin_alias
+            )
+        } else {
+            anyhow!(
+                "Unknown origin '{}'. Available: {}",
+                origin_alias,
+                available.join(", ")
+            )
+        }
+    })?;
+
+    // Resolve destination: check configured locations first, then geocode
+    let (dest_lat, dest_lon, dest_name) =
+        if let Some(loc) = ctx.config.trip.resolve_location(&args.destination) {
+            (loc.lat, loc.lon, loc.address.clone())
+        } else {
+            // Geocode the destination
+            if !ctx.common.quiet {
+                eprint!("Geocoding \"{}\"... ", args.destination);
+            }
+            let geo_result = client
+                .trip_geocode(&args.destination, ctx.config.trip.country.as_deref())
+                .map_err(|e| anyhow!("Geocoding failed: {e}"))?;
+            if !ctx.common.quiet {
+                eprintln!(
+                    "{}",
+                    geo_result["display_name"]
+                        .as_str()
+                        .unwrap_or("found")
+                );
+            }
+            (
+                geo_result["lat"].as_f64().ok_or_else(|| anyhow!("missing lat"))?,
+                geo_result["lon"].as_f64().ok_or_else(|| anyhow!("missing lon"))?,
+                geo_result["display_name"]
+                    .as_str()
+                    .unwrap_or(&args.destination)
+                    .to_string(),
+            )
+        };
+
+    // Calculate route
+    if !ctx.common.quiet {
+        eprint!("Calculating {} route... ", mode);
+    }
+
+    let origin_station = origin.station.as_deref();
+    // For transit, try to derive station name from destination if not a configured location
+    let dest_station_name: Option<String> = if mode == "transit" {
+        if let Some(loc) = ctx.config.trip.resolve_location(&args.destination) {
+            loc.station.clone()
+        } else {
+            Some(args.destination.clone())
+        }
+    } else {
+        None
+    };
+
+    let route_result = client
+        .trip_route(
+            origin.lat,
+            origin.lon,
+            dest_lat,
+            dest_lon,
+            mode,
+            origin_station,
+            dest_station_name.as_deref(),
+            Some(&ctx.config.trip.transit_provider),
+            None,
+        )
+        .map_err(|e| anyhow!("Routing failed: {e}"))?;
+
+    let travel_minutes = route_result["duration_minutes"]
+        .as_i64()
+        .ok_or_else(|| anyhow!("missing duration_minutes"))? as u32;
+    let distance_km = route_result["distance_km"].as_f64();
+    let buffer = ctx.config.trip.buffer_minutes;
+
+    if !ctx.common.quiet {
+        eprintln!("done");
+    }
+
+    // Calculate full trip timeline
+    let meeting_start = target_date
+        .and_hms_opt(meeting_start_h, meeting_start_m, 0)
+        .ok_or_else(|| anyhow!("invalid meeting start time"))?;
+    let meeting_end = target_date
+        .and_hms_opt(meeting_end_h, meeting_end_m, 0)
+        .ok_or_else(|| anyhow!("invalid meeting end time"))?;
+
+    let depart_at = meeting_start
+        - chrono::Duration::minutes((travel_minutes + buffer) as i64);
+    let arrive_back = meeting_end
+        + chrono::Duration::minutes((travel_minutes + buffer) as i64);
+
+    let meeting_duration_min =
+        (meeting_end - meeting_start).num_minutes();
+
+    // Format times
+    let fmt_time = |ndt: chrono::NaiveDateTime| -> String {
+        ndt.format("%H:%M").to_string()
+    };
+    let fmt_datetime = |ndt: chrono::NaiveDateTime| -> String {
+        ndt.format("%Y-%m-%dT%H:%M:%S").to_string()
+    };
+
+    // Build trip data
+    let trip_data = serde_json::json!({
+        "destination": dest_name,
+        "destination_lat": dest_lat,
+        "destination_lon": dest_lon,
+        "origin": origin.address,
+        "origin_alias": origin_alias,
+        "date": target_date.format("%Y-%m-%d").to_string(),
+        "mode": mode,
+        "travel_duration_minutes": travel_minutes,
+        "buffer_minutes": buffer,
+        "distance_km": distance_km,
+        "timeline": {
+            "depart": fmt_datetime(depart_at),
+            "meeting_start": fmt_datetime(meeting_start),
+            "meeting_end": fmt_datetime(meeting_end),
+            "arrive_back": fmt_datetime(arrive_back),
+        },
+        "meeting": {
+            "start": fmt_datetime(meeting_start),
+            "end": fmt_datetime(meeting_end),
+            "duration_minutes": meeting_duration_min,
+        },
+        "route": route_result,
+    });
+
+    // JSON mode: output trip plan
+    if ctx.common.json || ctx.common.yaml {
+        emit_output(&ctx.common, &trip_data)?;
+        return Ok(());
+    }
+
+    // Interactive display
+    let date_display = target_date.format("%A, %Y-%m-%d").to_string();
+    let travel_display = if let Some(km) = distance_km {
+        format!("{}h{:02}m ({:.0} km)", travel_minutes / 60, travel_minutes % 60, km)
+    } else {
+        format!("{}h{:02}m", travel_minutes / 60, travel_minutes % 60)
+    };
+
+    println!();
+    println!("{}", format!("Trip to {}", dest_name).bold());
+    println!("{}", "\u{2500}".repeat(60));
+    println!("  Date:       {}", date_display);
+    println!("  From:       {} ({})", origin.address, origin_alias);
+    println!("  Transport:  {}", mode);
+    println!("  Travel:     {}", travel_display);
+    println!("  Buffer:     {} min", buffer);
+    println!();
+    println!("  {}", "Timeline:".bold());
+    println!(
+        "    {} Depart from {}",
+        fmt_time(depart_at).yellow().bold(),
+        origin_alias
+    );
+    println!(
+        "    {} Arrive at {}",
+        fmt_time(meeting_start).to_string().dimmed(),
+        args.destination
+    );
+    println!(
+        "    {} Meeting ({} min)",
+        format!("{}-{}", fmt_time(meeting_start), fmt_time(meeting_end))
+            .green()
+            .bold(),
+        meeting_duration_min
+    );
+    println!(
+        "    {} Depart from {}",
+        fmt_time(meeting_end).to_string().dimmed(),
+        args.destination
+    );
+    println!(
+        "    {} Back at {}",
+        fmt_time(arrive_back).yellow().bold(),
+        origin_alias
+    );
+
+    // Car booking
+    if mode == "car" && (flags.book || flags.select.is_some()) {
+        println!();
+
+        // Check car availability for the full trip window
+        let car_group = ctx.config.resource_group("cars");
+        if car_group.is_none() {
+            println!(
+                "{}",
+                "No [resources.cars] group configured - skipping car booking".yellow()
+            );
+        } else {
+            let (_, group) = car_group.unwrap();
+            let resources = resource_group_to_json(group);
+
+            let window_start = fmt_datetime(depart_at);
+            let window_end = fmt_datetime(arrive_back);
+
+            let avail = client
+                .resource_free_window(&account, &resources, &window_start, &window_end)
+                .map_err(|e| anyhow!("Car availability check failed: {e}"))?;
+
+            let entries = avail
+                .as_array()
+                .ok_or_else(|| anyhow!("unexpected availability response"))?;
+
+            let available: Vec<&Value> = entries
+                .iter()
+                .filter(|e| e["available"].as_bool() == Some(true))
+                .collect();
+
+            if available.is_empty() {
+                println!("{}", "No cars available for the full trip window".red());
+            } else if let Some(ref selected) = flags.select {
+                // Direct car selection
+                let subject = flags
+                    .subject
+                    .as_deref()
+                    .unwrap_or("Business Trip");
+                book_resource(
+                    ctx,
+                    &client,
+                    &account,
+                    entries,
+                    selected,
+                    subject,
+                    &window_start,
+                    &window_end,
+                    None,
+                )?;
+            } else {
+                // Interactive car selection
+                println!("{}", "Available cars:".bold());
+                let mut selectable: Vec<(usize, &Value)> = Vec::new();
+                for (i, entry) in entries.iter().enumerate() {
+                    let alias = entry["alias"].as_str().unwrap_or("?");
+                    let desc = entry["desc"].as_str();
+                    let is_avail = entry["available"].as_bool() == Some(true);
+                    let label = if let Some(d) = desc {
+                        format!("{} ({})", alias, d)
+                    } else {
+                        alias.to_string()
+                    };
+
+                    if is_avail {
+                        selectable.push((i, entry));
+                        println!(
+                            "  [{}] {}  {}",
+                            selectable.len().to_string().yellow().bold(),
+                            label,
+                            "available".green()
+                        );
+                    } else {
+                        println!("      {}  {}", label, "booked".red().dimmed());
+                    }
+                }
+
+                if !selectable.is_empty() && io::stdout().is_terminal() {
+                    print!(
+                        "\n{} ",
+                        format!(
+                            "Book a car? (1-{}, or 'n' to skip):",
+                            selectable.len()
+                        )
+                        .cyan()
+                    );
+                    io::stdout().flush()?;
+
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    let input = input.trim();
+
+                    if !input.eq_ignore_ascii_case("n")
+                        && !input.eq_ignore_ascii_case("no")
+                        && !input.is_empty()
+                    {
+                        if let Ok(n) = input.parse::<usize>() {
+                            if n > 0 && n <= selectable.len() {
+                                let (_, entry) = selectable[n - 1];
+                                let alias =
+                                    entry["alias"].as_str().unwrap_or("?");
+                                let subject = if let Some(ref s) = flags.subject {
+                                    s.clone()
+                                } else {
+                                    format!("Business Trip - {}", args.destination)
+                                };
+                                book_resource(
+                                    ctx,
+                                    &client,
+                                    &account,
+                                    entries,
+                                    alias,
+                                    &subject,
+                                    &window_start,
+                                    &window_end,
+                                    None,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Calendar event creation
+    if flags.create {
+        println!();
+        let subject = flags
+            .subject
+            .clone()
+            .unwrap_or_else(|| format!("Business Trip - {}", args.destination));
+
+        // Travel to
+        let travel_to_payload = serde_json::json!({
+            "subject": format!("Travel to {}", args.destination),
+            "start": fmt_datetime(depart_at),
+            "end": fmt_datetime(meeting_start),
+            "location": origin.address,
+        });
+        client
+            .calendar_create(&account, travel_to_payload)
+            .map_err(|e| anyhow!("Failed to create travel-to event: {e}"))?;
+        println!(
+            "  {} Created: Travel to {} ({}-{})",
+            "+".green().bold(),
+            args.destination,
+            fmt_time(depart_at),
+            fmt_time(meeting_start)
+        );
+
+        // Meeting
+        let meeting_payload = serde_json::json!({
+            "subject": subject,
+            "start": fmt_datetime(meeting_start),
+            "end": fmt_datetime(meeting_end),
+            "location": dest_name,
+        });
+        client
+            .calendar_create(&account, meeting_payload)
+            .map_err(|e| anyhow!("Failed to create meeting event: {e}"))?;
+        println!(
+            "  {} Created: {} ({}-{})",
+            "+".green().bold(),
+            subject,
+            fmt_time(meeting_start),
+            fmt_time(meeting_end)
+        );
+
+        // Travel back
+        let travel_back_payload = serde_json::json!({
+            "subject": format!("Travel from {}", args.destination),
+            "start": fmt_datetime(meeting_end),
+            "end": fmt_datetime(arrive_back),
+            "location": dest_name,
+        });
+        client
+            .calendar_create(&account, travel_back_payload)
+            .map_err(|e| anyhow!("Failed to create travel-back event: {e}"))?;
+        println!(
+            "  {} Created: Travel from {} ({}-{})",
+            "+".green().bold(),
+            args.destination,
+            fmt_time(meeting_end),
+            fmt_time(arrive_back)
+        );
+    }
+
+    // SAP export
+    if flags.sap {
+        let sap_data = serde_json::json!({
+            "trip_type": "business_trip",
+            "destination": dest_name,
+            "origin": origin.address,
+            "date": target_date.format("%Y-%m-%d").to_string(),
+            "transport_mode": mode,
+            "distance_km": distance_km,
+            "travel_duration_minutes": travel_minutes,
+            "depart_time": fmt_datetime(depart_at),
+            "meeting_start": fmt_datetime(meeting_start),
+            "meeting_end": fmt_datetime(meeting_end),
+            "return_time": fmt_datetime(arrive_back),
+            "total_duration_minutes": (arrive_back - depart_at).num_minutes(),
+        });
+        if ctx.common.json || ctx.common.yaml {
+            emit_output(&ctx.common, &sap_data)?;
+        } else {
+            println!("\n{}", "SAP Export Data:".bold());
+            println!("{}", serde_json::to_string_pretty(&sap_data)?);
+        }
+    }
 
     Ok(())
 }

@@ -1,0 +1,376 @@
+"""Routing providers for trip planning.
+
+Supports:
+- OSRM (Open Source Routing Machine) for car routing (free, no API key, global)
+- Nominatim (OpenStreetMap) for geocoding (free, no API key, global)
+- Deutsche Bahn HAFAS for train routing in Germany (via public API)
+- Extensible for other transit providers (SBB, SNCF, Amtrak, etc.)
+"""
+
+import logging
+import math
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+# --- Geocoding (Nominatim / OSM, worldwide) ---
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_HEADERS = {"User-Agent": "h8-trip-planner/1.0"}
+
+
+@dataclass
+class GeoLocation:
+    """A geocoded location with coordinates."""
+
+    lat: float
+    lon: float
+    display_name: str
+    address: str
+
+
+async def geocode(
+    query: str, country: Optional[str] = None
+) -> Optional[GeoLocation]:
+    """Geocode an address or place name to coordinates using Nominatim (global).
+
+    Args:
+        query: Address, city, or place name.
+        country: Optional ISO 3166-1 alpha-2 country code to bias results
+                 (e.g., "de", "us", "ch"). None searches worldwide.
+    """
+    params: dict = {
+        "q": query,
+        "format": "json",
+        "limit": 1,
+        "addressdetails": 1,
+    }
+    if country:
+        params["countrycodes"] = country
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            NOMINATIM_URL, params=params, headers=NOMINATIM_HEADERS
+        )
+        resp.raise_for_status()
+        results = resp.json()
+
+    if not results:
+        return None
+
+    r = results[0]
+    return GeoLocation(
+        lat=float(r["lat"]),
+        lon=float(r["lon"]),
+        display_name=r.get("display_name", query),
+        address=query,
+    )
+
+
+# --- Car Routing (OSRM) ---
+
+OSRM_URL = "https://router.project-osrm.org/route/v1/driving"
+
+
+@dataclass
+class CarRoute:
+    """Car routing result."""
+
+    duration_seconds: float
+    distance_meters: float
+    duration_minutes: int
+    distance_km: float
+
+
+async def route_car_osrm(
+    origin_lon: float,
+    origin_lat: float,
+    dest_lon: float,
+    dest_lat: float,
+) -> Optional[CarRoute]:
+    """Get driving route from OSRM (public, free, no API key)."""
+    url = f"{OSRM_URL}/{origin_lon},{origin_lat};{dest_lon},{dest_lat}"
+    params = {"overview": "false"}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+
+    if data.get("code") != "Ok" or not data.get("routes"):
+        return None
+
+    route = data["routes"][0]
+    duration = route["duration"]
+    distance = route["distance"]
+
+    return CarRoute(
+        duration_seconds=duration,
+        distance_meters=distance,
+        duration_minutes=math.ceil(duration / 60),
+        distance_km=round(distance / 1000, 1),
+    )
+
+
+# --- Public Transit Routing ---
+
+# Transit providers: pluggable backends for different countries/networks.
+# Each provider implements station search + journey search.
+
+
+@dataclass
+class TransitLeg:
+    """A single leg of a public transit journey."""
+
+    line: str  # e.g. "ICE 945", "S3", "Bus 42"
+    departure_station: str
+    arrival_station: str
+    departure_time: str  # ISO format
+    arrival_time: str  # ISO format
+    duration_minutes: int
+    platform: Optional[str] = None
+    mode: Optional[str] = None  # "train", "bus", "subway", etc.
+
+
+@dataclass
+class TransitJourney:
+    """A complete transit journey with one or more legs."""
+
+    legs: list[TransitLeg]
+    total_duration_minutes: int
+    departure_time: str
+    arrival_time: str
+    changes: int
+    provider: str  # Which provider found this journey
+
+
+# --- Deutsche Bahn HAFAS provider ---
+
+DB_HAFAS_URL = "https://v6.db.transport.rest"
+
+
+async def _db_search_station(query: str) -> Optional[dict]:
+    """Search for a train station by name using DB HAFAS."""
+    params = {"query": query, "results": 1, "stops": "true", "addresses": "false"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{DB_HAFAS_URL}/locations", params=params)
+            resp.raise_for_status()
+            results = resp.json()
+        if results:
+            return results[0]
+    except (httpx.HTTPError, httpx.TimeoutException) as e:
+        logger.warning("DB HAFAS station search failed: %s", e)
+    return None
+
+
+async def _db_route_transit(
+    origin_station: str,
+    dest_station: str,
+    departure: Optional[datetime] = None,
+    results: int = 3,
+) -> list[TransitJourney]:
+    """Search for connections via Deutsche Bahn HAFAS.
+
+    Falls back gracefully if the API is unavailable.
+    """
+    origin = await _db_search_station(origin_station)
+    dest = await _db_search_station(dest_station)
+
+    if not origin or not dest:
+        logger.warning(
+            "Could not resolve stations: origin=%s dest=%s",
+            origin_station,
+            dest_station,
+        )
+        return []
+
+    origin_id = origin.get("id")
+    dest_id = dest.get("id")
+    if not origin_id or not dest_id:
+        return []
+
+    params: dict = {"from": origin_id, "to": dest_id, "results": results}
+    if departure:
+        params["departure"] = departure.isoformat()
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(f"{DB_HAFAS_URL}/journeys", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except (httpx.HTTPError, httpx.TimeoutException) as e:
+        logger.warning("DB HAFAS journey search failed: %s", e)
+        return []
+
+    return _parse_hafas_journeys(data, provider="db")
+
+
+def _parse_hafas_journeys(data: dict, provider: str) -> list[TransitJourney]:
+    """Parse HAFAS-format journey responses (shared by DB, SBB, etc.)."""
+    journeys = []
+    for j in data.get("journeys", []):
+        legs = []
+        for leg in j.get("legs", []):
+            if leg.get("walking"):
+                continue
+            line = leg.get("line", {})
+            line_name = line.get("name", "")
+            dep_station = leg.get("origin", {}).get("name", "?")
+            arr_station = leg.get("destination", {}).get("name", "?")
+            dep_time = leg.get("departure", "")
+            arr_time = leg.get("arrival", "")
+            platform = leg.get("departurePlatform")
+            line_mode = line.get("mode")
+
+            dur_min = 0
+            if dep_time and arr_time:
+                try:
+                    dt_dep = datetime.fromisoformat(dep_time.replace("Z", "+00:00"))
+                    dt_arr = datetime.fromisoformat(arr_time.replace("Z", "+00:00"))
+                    dur_min = int((dt_arr - dt_dep).total_seconds() / 60)
+                except (ValueError, TypeError):
+                    pass
+
+            legs.append(
+                TransitLeg(
+                    line=line_name,
+                    departure_station=dep_station,
+                    arrival_station=arr_station,
+                    departure_time=dep_time,
+                    arrival_time=arr_time,
+                    duration_minutes=dur_min,
+                    platform=platform,
+                    mode=line_mode,
+                )
+            )
+
+        if not legs:
+            continue
+
+        total_dep = legs[0].departure_time
+        total_arr = legs[-1].arrival_time
+        total_dur = 0
+        if total_dep and total_arr:
+            try:
+                dt_dep = datetime.fromisoformat(total_dep.replace("Z", "+00:00"))
+                dt_arr = datetime.fromisoformat(total_arr.replace("Z", "+00:00"))
+                total_dur = int((dt_arr - dt_dep).total_seconds() / 60)
+            except (ValueError, TypeError):
+                pass
+
+        journeys.append(
+            TransitJourney(
+                legs=legs,
+                total_duration_minutes=total_dur,
+                departure_time=total_dep,
+                arrival_time=total_arr,
+                changes=max(0, len(legs) - 1),
+                provider=provider,
+            )
+        )
+
+    return journeys
+
+
+# --- Transit provider registry ---
+
+# Map of provider name -> route function.
+# Add new providers here (SBB, SNCF, etc.).
+TRANSIT_PROVIDERS: dict[str, type] = {}
+
+
+async def route_transit(
+    origin_station: str,
+    dest_station: str,
+    provider: str = "db",
+    departure: Optional[datetime] = None,
+    results: int = 3,
+) -> list[TransitJourney]:
+    """Route via public transit using the specified provider.
+
+    Supported providers:
+    - "db": Deutsche Bahn (Germany)
+    - More to come: "sbb" (Switzerland), "sncf" (France), etc.
+    """
+    if provider == "db":
+        return await _db_route_transit(origin_station, dest_station, departure, results)
+    else:
+        logger.error("Unknown transit provider: %s (available: db)", provider)
+        return []
+
+
+# --- Unified routing interface ---
+
+
+@dataclass
+class RouteResult:
+    """Unified route result for any transport mode."""
+
+    mode: str  # "car" or "transit"
+    duration_minutes: int
+    distance_km: Optional[float]
+    # Car-specific
+    car_route: Optional[CarRoute] = None
+    # Transit-specific
+    transit_journeys: Optional[list[TransitJourney]] = None
+
+
+async def calculate_route(
+    origin_lat: float,
+    origin_lon: float,
+    dest_lat: float,
+    dest_lon: float,
+    mode: str = "car",
+    origin_station: Optional[str] = None,
+    dest_station: Optional[str] = None,
+    transit_provider: str = "db",
+    departure: Optional[datetime] = None,
+) -> Optional[RouteResult]:
+    """Calculate a route using the appropriate provider.
+
+    Args:
+        origin_lat, origin_lon: Origin coordinates (global).
+        dest_lat, dest_lon: Destination coordinates (global).
+        mode: "car" or "transit".
+        origin_station: Station name for transit routing.
+        dest_station: Station name for transit routing.
+        transit_provider: Transit provider name (e.g., "db", "sbb").
+        departure: Desired departure time (for transit timetables).
+
+    Returns:
+        RouteResult or None if routing failed.
+    """
+    if mode == "car":
+        route = await route_car_osrm(origin_lon, origin_lat, dest_lon, dest_lat)
+        if not route:
+            return None
+        return RouteResult(
+            mode="car",
+            duration_minutes=route.duration_minutes,
+            distance_km=route.distance_km,
+            car_route=route,
+        )
+    elif mode == "transit":
+        if not origin_station or not dest_station:
+            logger.error("Transit routing requires station names")
+            return None
+        journeys = await route_transit(
+            origin_station, dest_station, transit_provider, departure
+        )
+        if not journeys:
+            return None
+        first = journeys[0]
+        return RouteResult(
+            mode="transit",
+            duration_minutes=first.total_duration_minutes,
+            distance_km=None,
+            transit_journeys=journeys,
+        )
+    else:
+        logger.error("Unknown routing mode: %s (available: car, transit)", mode)
+        return None

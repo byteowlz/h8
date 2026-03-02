@@ -525,6 +525,50 @@ impl ServiceClient {
         self.get("/addr/validate", &params)
     }
 
+    /// Geocode an address or place name to coordinates (worldwide).
+    pub fn trip_geocode(&self, query: &str, country: Option<&str>) -> Result<Value> {
+        let mut payload = serde_json::json!({ "query": query });
+        if let Some(c) = country {
+            payload["country"] = serde_json::json!(c);
+        }
+        self.post_json("/trip/geocode", payload)
+    }
+
+    /// Calculate a route between two coordinate pairs.
+    pub fn trip_route(
+        &self,
+        origin_lat: f64,
+        origin_lon: f64,
+        dest_lat: f64,
+        dest_lon: f64,
+        mode: &str,
+        origin_station: Option<&str>,
+        dest_station: Option<&str>,
+        transit_provider: Option<&str>,
+        departure: Option<&str>,
+    ) -> Result<Value> {
+        let mut payload = serde_json::json!({
+            "origin_lat": origin_lat,
+            "origin_lon": origin_lon,
+            "dest_lat": dest_lat,
+            "dest_lon": dest_lon,
+            "mode": mode,
+        });
+        if let Some(s) = origin_station {
+            payload["origin_station"] = serde_json::json!(s);
+        }
+        if let Some(s) = dest_station {
+            payload["dest_station"] = serde_json::json!(s);
+        }
+        if let Some(p) = transit_provider {
+            payload["transit_provider"] = serde_json::json!(p);
+        }
+        if let Some(d) = departure {
+            payload["departure"] = serde_json::json!(d);
+        }
+        self.post_json("/trip/route", payload)
+    }
+
     /// Respond to a meeting invite (accept/decline/tentative).
     pub fn calendar_rsvp(
         &self,

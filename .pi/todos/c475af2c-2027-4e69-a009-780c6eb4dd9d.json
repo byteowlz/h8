@@ -2,28 +2,58 @@
   "todos": [
     {
       "id": "1",
-      "content": "Add Book command to CLI with args",
+      "content": "Design trip architecture: config, routing providers, data flow",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "2",
-      "content": "Implement handle_book: query available resources, interactive selection or --json output",
+      "content": "Add [trip] config section: locations (aliases), routing providers (car/train)",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "3",
-      "content": "Implement programmatic booking: --select <alias> --subject <subject> creates calendar event",
+      "content": "Implement Python routing service: OSRM for car, DB HAFAS for train",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "4",
+      "content": "Add /trip/route endpoint to h8-service",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "5",
+      "content": "Add Rust client methods for trip routing",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "6",
+      "content": "Implement h8 trip command: interactive and programmatic modes",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "7",
+      "content": "Create trip JSON schema for SAP export",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "8",
+      "content": "Calendar event creation with travel blocks",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "9",
       "content": "Compile, test, commit",
       "status": "in_progress",
       "priority": "high"
     }
   ],
-  "updated_at": "2026-03-02T11:58:46.427Z"
+  "updated_at": "2026-03-02T12:25:02.927Z"
 }
