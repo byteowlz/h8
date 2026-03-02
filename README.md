@@ -2,7 +2,7 @@
 
 # h8
 
-Rust CLI for MS365 Exchange Web Services (EWS) covering calendar, mail, contacts, and free-slot search. Works when Graph or IMAP are blocked but EWS is available.
+Rust CLI for MS365 Exchange Web Services (EWS) covering calendar, mail, contacts, free-slot search, resource management, booking, and business trip planning. Works when Graph or IMAP are blocked but EWS is available.
 
 ## Requirements
 
@@ -23,8 +23,8 @@ h8's Python service calls `oama access <email>` to get fresh tokens as needed.
 
 ## Architecture
 
-- A Python service (FastAPI) talks to EWS via `exchangelib`, refreshes data periodically, and caches it locally.
-- The Rust CLI calls the local service for all calendar/mail/contact/free-slot operations.
+- A Python service (FastAPI) talks to EWS via `exchangelib`, handles geocoding and routing via public APIs (Nominatim, OSRM), and caches data locally.
+- The Rust CLI calls the local service for all calendar/mail/contact/resource/routing operations.
 
 ## Setup
 
@@ -32,17 +32,17 @@ h8's Python service calls `oama access <email>` to get fresh tokens as needed.
 # Install Rust CLI and Python deps
 just install
 
-# Install the Python service globally (enables `h8 service start` from anywhere)
+# Install the Python service globally (enables `h8-service start` from anywhere)
 cd ~/path/to/h8
 uv tool install -e .
 
 # Start the Python service
-h8 service start   # runs in background, logs to ~/.local/state/h8/service.log
+h8-service start   # runs in background, logs to ~/.local/state/h8/service.log
 
 # Check status / stop
-h8 service status
-h8 service stop
-h8 service restart
+h8-service status
+h8-service stop
+h8-service restart
 ```
 
 ## Configuration
@@ -52,22 +52,31 @@ Default path: `$XDG_CONFIG_HOME/h8/config.toml` (or `~/.config/h8/config.toml`).
 ```toml
 account = "your.email@example.com"
 timezone = "Europe/Berlin"
-service_url = "http://127.0.0.1:8787"
-
-[calendar]
-default_view = "list"  # list, gantt, or compact
-
-[free_slots]
-start_hour = 9
-end_hour = 17
-exclude_weekends = true
 
 [people]
-Roman = "roman.kowalski@example.com"
-Alice = "alice.smith@example.com"
+alice = "alice.smith@example.com"
+bob = "bob.jones@example.com"
+
+[resources.cars]
+car1 = { email = "resource.car1@example.com", desc = "Toyota Camry" }
+car2 = "resource.car2@example.com"
+
+[resources.rooms]
+conf-a = { email = "room.conf-a@example.com", desc = "Conference Room A" }
+
+[trip]
+default_origin = "work"
+buffer_minutes = 15
+transit_provider = "db"
+
+[trip.locations.work]
+address = "123 Main St, City"
+lat = 51.5074
+lon = -0.1278
+station = "London Paddington"
 ```
 
-See `examples/config.toml` for a fuller template.
+See `examples/config.toml` for a full template with all options.
 
 ## Logging
 
@@ -76,35 +85,141 @@ See `examples/config.toml` for a fuller template.
 
 ## Usage
 
+### Calendar
+
 ```bash
-# Calendar
-h8 calendar list --days 7
-h8 cal ls --days 3  # alias for calendar list
-echo '{"subject":"1:1","start":"2025-01-15T10:00:00+01:00","end":"2025-01-15T10:30:00+01:00"}' | h8 calendar create
-h8 calendar delete --id "<event-id>"
-h8 agenda  # today's timeline view in your configured timezone
-
-# Mail
-h8 mail list --folder inbox --limit 10 --unread
-h8 mail get --id "<message-id>"
-echo '{"to":["user@example.com"],"subject":"Hello","body":"Hi there"}' | h8 mail send
-h8 mail fetch --folder inbox --output ~/Mail/work --format maildir
-
-# Contacts
-h8 contacts list --search john --limit 25
-h8 contacts get --id "<contact-id>"
-echo '{"display_name":"John Doe","email":"john@example.com"}' | h8 contacts create
-
-# Free slots
-h8 free --weeks 2 --duration 60
-
-# Other people's calendars (requires [people] aliases in config or full email)
-h8 ppl agenda Roman --days 7          # View Roman's calendar
-h8 ppl free Roman --weeks 2           # Find Roman's free slots
-h8 ppl common Roman Alice --weeks 2   # Find common free slots between Roman and Alice
+h8 agenda                              # today's timeline view
+h8 cal show today                      # today's events
+h8 cal show tomorrow                   # tomorrow's events
+h8 cal show friday                     # events on Friday
+h8 cal show "next week"                # next week's events
+h8 cal show kw30                       # calendar week 30
+h8 cal add friday 2pm Team Sync        # natural language event creation
+h8 cal add 'tomorrow 10am-11am Review' # with time range
+h8 cal delete <id>                     # delete event
+h8 cal search "standup"                # search events
 ```
 
-Add `--json` for machine-readable output. Use `--account` to target another mailbox. Ensure the Python service is running first.
+### Mail
+
+```bash
+h8 mail list                           # inbox, last 20
+h8 mail list today                     # today's emails
+h8 mail list -u                        # unread only
+h8 mail list -f sent -l 50             # sent folder, 50 items
+h8 mail read <id>                      # view in pager
+h8 mail compose                        # opens editor, saves draft
+h8 mail send <draft-id>                # send a draft
+h8 mail reply <id>                     # reply to sender
+h8 mail reply <id> --all               # reply all
+h8 mail forward <id>                   # forward
+h8 mail search "meeting notes"         # search
+h8 mail attachments <id>               # list attachments
+h8 mail attachments <id> -d 0 -o ./    # download first attachment
+```
+
+### Contacts
+
+```bash
+h8 contacts list                       # list contacts
+h8 contacts list -s "alice"            # search
+h8 contacts get --id <id>              # view details
+h8 contacts update --id <id> --phone "+1 555 1234"
+```
+
+### People
+
+```bash
+h8 ppl agenda alice                    # view alice's calendar
+h8 ppl free alice --weeks 2            # find alice's free slots
+h8 ppl common alice bob --weeks 2      # common free slots
+h8 ppl schedule alice bob -w 2 --json  # list schedulable slots
+```
+
+### Address Book (GAL)
+
+```bash
+h8 addr search "john smith"            # search Global Address List
+h8 addr resolve meeting-room           # resolve name via EWS
+```
+
+### Resources
+
+Manage shared bookable resources (rooms, cars, equipment) defined in `[resources.*]` config sections.
+
+```bash
+h8 resource list                       # list all resource groups
+h8 resource free cars tomorrow         # check car availability
+h8 resource free rooms friday 14-16    # room availability in time window
+h8 resource agenda cars monday         # view car bookings
+h8 resource setup rooms                # interactive: search GAL, add resources
+h8 resource remove cars old-car        # remove a resource alias
+```
+
+Natural language queries:
+
+```bash
+h8 which cars are free                 # today
+h8 which rooms are free friday 13-15   # specific window
+h8 is the bmw free tomorrow            # single resource check
+```
+
+### Booking
+
+Book resources interactively or programmatically:
+
+```bash
+h8 book room today 12-14               # interactive: pick from available rooms
+h8 book car tomorrow 9-12              # interactive: pick from available cars
+h8 book room friday 14-16 --select conf-a --subject "Team Sync"  # direct booking
+h8 book room today 12-14 --json        # JSON output of availability
+```
+
+### Trip Planning
+
+Plan business trips with automatic travel time calculation, car booking, and calendar creation. Uses free global routing services (OSRM for driving, Nominatim for geocoding).
+
+```bash
+# Plan a trip (shows timeline)
+h8 trip Berlin friday 9-12 --car
+h8 trip Munich tomorrow 14-16 --transit
+h8 trip "New York" monday 9-17 --car   # works worldwide
+
+# From a different origin
+h8 trip Berlin friday 9-12 --car --from home
+
+# Book a car for the trip
+h8 trip Berlin friday 9-12 --car --book
+
+# Create calendar events (travel-to, meeting, travel-back)
+h8 trip Berlin friday 9-12 --car --create --subject "Client Meeting"
+
+# Programmatic / JSON output
+h8 trip Berlin friday 9-12 --car --json
+
+# SAP-compatible export
+h8 trip Berlin friday 9-12 --car --sap --json
+```
+
+### Free Slots
+
+```bash
+h8 free                                # your free slots this week
+h8 free -w 2 -d 60                     # 2 weeks, 60-min slots
+h8 ppl free alice                      # someone's free slots
+h8 ppl common alice bob                # common free time
+```
+
+### Availability
+
+```bash
+h8 free                                # your free slots
+h8 ppl agenda alice                    # someone's calendar
+h8 ppl free alice                      # their free slots
+h8 ppl common alice bob                # common free time
+```
+
+All commands support `--json` and `--yaml` for machine-readable output. Use `--account` to target another mailbox.
 
 ## License
 
