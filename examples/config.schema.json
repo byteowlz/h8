@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/byteowlz/h8/schemas/config.schema.json",
   "title": "h8 configuration",
-  "description": "Configuration schema for h8 - email and calendar CLI",
+  "description": "Configuration schema for h8 - email, calendar, resources, and trip planning CLI",
   "type": "object",
   "properties": {
     "$schema": {
@@ -88,9 +88,7 @@
         "sync_folders": {
           "type": "array",
           "description": "Folders to sync",
-          "items": {
-            "type": "string"
-          },
+          "items": { "type": "string" },
           "default": ["inbox", "sent", "drafts"]
         },
         "signature": {
@@ -133,10 +131,133 @@
       },
       "examples": [
         {
-          "Roman": "roman.kowalski@example.com",
-          "Alice": "alice.smith@example.com"
+          "alice": "alice.smith@example.com",
+          "bob": "bob.jones@example.com"
         }
       ]
+    },
+    "resources": {
+      "type": "object",
+      "description": "Resource groups for shared bookable resources (rooms, cars, equipment). Each key is a group name containing alias-to-resource mappings.",
+      "additionalProperties": {
+        "type": "object",
+        "description": "A resource group (e.g., cars, rooms). Each key is an alias.",
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Simple format: email address only",
+              "format": "email"
+            },
+            {
+              "type": "object",
+              "description": "Detailed format: email and optional description",
+              "required": ["email"],
+              "properties": {
+                "email": {
+                  "type": "string",
+                  "format": "email",
+                  "description": "Exchange resource mailbox email"
+                },
+                "desc": {
+                  "type": "string",
+                  "description": "Human-readable description of the resource"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "examples": [
+        {
+          "cars": {
+            "car1": { "email": "resource.car1@example.com", "desc": "Toyota Camry" },
+            "car2": "resource.car2@example.com"
+          },
+          "rooms": {
+            "main": { "email": "room.main@example.com", "desc": "Main Conference Room" }
+          }
+        }
+      ]
+    },
+    "trip": {
+      "type": "object",
+      "description": "Trip planning configuration for business travel",
+      "properties": {
+        "default_origin": {
+          "type": "string",
+          "description": "Default origin location alias (must match a key in trip.locations)",
+          "default": "work"
+        },
+        "buffer_minutes": {
+          "type": "integer",
+          "description": "Buffer minutes to add before and after calculated travel time",
+          "minimum": 0,
+          "default": 15
+        },
+        "car_provider": {
+          "type": "string",
+          "description": "Car routing provider",
+          "enum": ["osrm", "openrouteservice"],
+          "default": "osrm"
+        },
+        "transit_provider": {
+          "type": "string",
+          "description": "Public transit routing provider",
+          "enum": ["db"],
+          "default": "db"
+        },
+        "country": {
+          "type": ["string", "null"],
+          "description": "ISO 3166-1 alpha-2 country code to bias geocoding results. Null for worldwide search.",
+          "examples": ["de", "us", "ch", "at"],
+          "default": null
+        },
+        "openrouteservice_key": {
+          "type": ["string", "null"],
+          "description": "API key for OpenRouteService (only needed if car_provider = openrouteservice)",
+          "default": null
+        },
+        "locations": {
+          "type": "object",
+          "description": "Named locations with coordinates for trip origin/destination. Keys are aliases (e.g., work, home).",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["address", "lat", "lon"],
+            "properties": {
+              "address": {
+                "type": "string",
+                "description": "Human-readable address"
+              },
+              "lat": {
+                "type": "number",
+                "description": "Latitude",
+                "minimum": -90,
+                "maximum": 90
+              },
+              "lon": {
+                "type": "number",
+                "description": "Longitude",
+                "minimum": -180,
+                "maximum": 180
+              },
+              "station": {
+                "type": "string",
+                "description": "Nearest train/transit station name (for transit routing)"
+              }
+            },
+            "additionalProperties": false
+          },
+          "examples": [
+            {
+              "work": { "address": "123 Main St, City", "lat": 51.5, "lon": -0.1, "station": "London Paddington" },
+              "home": { "address": "456 Oak Ave, Suburb", "lat": 51.4, "lon": -0.2 }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

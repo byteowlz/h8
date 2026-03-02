@@ -59,8 +59,53 @@ include_signature = true
 
 # People aliases for calendar commands
 # Map short names to full email addresses for use with 'h8 ppl' commands
-# Example: h8 ppl free Roman -> looks up Roman's free slots
+# Example: h8 ppl free alice -> looks up alice's free slots
 [people]
-# Roman = "roman.kowalski@example.com"
-# Alice = "alice.smith@example.com"
-# Bob = "bob.jones@example.com"
+# alice = "alice.smith@example.com"
+# bob = "bob.jones@example.com"
+
+# Resource groups for shared bookable resources
+# Each [resources.<group>] section defines a group (cars, rooms, equipment, etc.)
+# Resources can be simple (email only) or detailed (email + description)
+[resources.cars]
+# car1 = "resource.car1@example.com"
+# car2 = { email = "resource.car2@example.com", desc = "Toyota Camry, ABC-1234" }
+
+[resources.rooms]
+# conf-a = { email = "room.conf-a@example.com", desc = "Conference Room A (10 seats)" }
+# conf-b = { email = "room.conf-b@example.com", desc = "Conference Room B (6 seats)" }
+
+# Trip planning configuration
+[trip]
+# Default origin location alias (must match a key in [trip.locations.*])
+default_origin = "work"
+
+# Buffer minutes to add before/after calculated travel time
+buffer_minutes = 15
+
+# Car routing provider: "osrm" (free, global, no API key)
+car_provider = "osrm"
+
+# Public transit provider: "db" (Deutsche Bahn, Germany)
+# More providers planned: "sbb" (Switzerland), "sncf" (France), etc.
+transit_provider = "db"
+
+# Optional country code (ISO 3166-1 alpha-2) to bias geocoding results
+# Set to null or omit for worldwide search
+# country = "de"
+
+# OpenRouteService API key (only if car_provider = "openrouteservice")
+# openrouteservice_key = "your-api-key"
+
+# Named locations for trip origins/destinations
+# Each location needs address, lat, lon; station is optional (for transit)
+[trip.locations.work]
+address = "123 Main St, Your City"
+lat = 51.5074
+lon = -0.1278
+station = "London Paddington"
+
+[trip.locations.home]
+address = "456 Oak Ave, Your Suburb"
+lat = 51.4
+lon = -0.2
