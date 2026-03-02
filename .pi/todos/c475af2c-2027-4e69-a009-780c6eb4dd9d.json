@@ -1,41 +1,35 @@
 {
   "todos": [
     {
-      "id": "s1",
-      "content": "Update examples/config.schema.json with resources + trip sections",
-      "status": "completed",
+      "id": "1",
+      "content": "Add round_minutes config to [trip] and implement duration rounding",
+      "status": "in_progress",
       "priority": "high"
     },
     {
-      "id": "s2",
-      "content": "Update examples/config.toml with resources + trip examples",
-      "status": "completed",
+      "id": "2",
+      "content": "Pass transit journey details through from service to CLI",
+      "status": "pending",
       "priority": "high"
     },
     {
-      "id": "s3",
-      "content": "Copy schema to byteowlz/schemas repo",
-      "status": "completed",
+      "id": "3",
+      "content": "Use actual train departure/arrival times for transit trip timeline",
+      "status": "pending",
       "priority": "high"
     },
     {
-      "id": "s4",
-      "content": "Update README.md with resource, book, trip commands",
-      "status": "completed",
+      "id": "4",
+      "content": "Include train leg details in calendar events and JSON output",
+      "status": "pending",
       "priority": "high"
     },
     {
-      "id": "s5",
-      "content": "Update AGENTS.md with new commands reference",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "s6",
-      "content": "Commit and push",
-      "status": "completed",
+      "id": "5",
+      "content": "Test, commit, push",
+      "status": "pending",
       "priority": "high"
     }
   ],
-  "updated_at": "2026-03-02T12:42:29.434Z"
+  "updated_at": "2026-03-02T13:18:18.075Z"
 }
