@@ -126,14 +126,17 @@ async def route_car_osrm(
 class TransitLeg:
     """A single leg of a public transit journey."""
 
-    line: str  # e.g. "ICE 945", "S3", "Bus 42"
+    line: str  # e.g. "ICE 945", "S3", "Bus 42", or "" for walking
     departure_station: str
     arrival_station: str
     departure_time: str  # ISO format
     arrival_time: str  # ISO format
     duration_minutes: int
     platform: Optional[str] = None
-    mode: Optional[str] = None  # "train", "bus", "subway", etc.
+    arrival_platform: Optional[str] = None
+    mode: Optional[str] = None  # "train", "bus", "subway", "walking", etc.
+    walking: bool = False
+    distance_meters: Optional[int] = None  # for walking legs
 
 
 @dataclass
@@ -216,30 +219,60 @@ async def _db_route_transit(
     origin_station: str,
     dest_station: str,
     departure: Optional[datetime] = None,
+    arrival: Optional[datetime] = None,
     results: int = 3,
+    origin_lat: Optional[float] = None,
+    origin_lon: Optional[float] = None,
+    dest_lat: Optional[float] = None,
+    dest_lon: Optional[float] = None,
 ) -> list[TransitJourney]:
     """Search for connections via Deutsche Bahn HAFAS.
 
-    Falls back gracefully if the API is unavailable.
+    When coordinates are provided alongside station names, HAFAS routes
+    door-to-door including walking/bus legs for the last mile.
+
+    Args:
+        origin_station: Origin station name or address label.
+        dest_station: Destination station name or address label.
+        departure: Find connections departing at/after this time.
+        arrival: Find connections arriving at/before this time.
+        origin_lat/lon: Origin coordinates (enables door-to-door routing).
+        dest_lat/lon: Destination coordinates (enables door-to-door routing).
     """
-    origin = await _db_search_station(origin_station)
-    dest = await _db_search_station(dest_station)
+    # Build origin parameter: prefer coordinates (door-to-door), fall back to station ID
+    from_params: dict = {}
+    if origin_lat is not None and origin_lon is not None:
+        from_params = {
+            "from.latitude": origin_lat,
+            "from.longitude": origin_lon,
+            "from.address": origin_station,
+        }
+    else:
+        origin = await _db_search_station(origin_station)
+        if not origin or not origin.get("id"):
+            logger.warning("Could not resolve origin station: %s", origin_station)
+            return []
+        from_params = {"from": origin["id"]}
 
-    if not origin or not dest:
-        logger.warning(
-            "Could not resolve stations: origin=%s dest=%s",
-            origin_station,
-            dest_station,
-        )
-        return []
+    # Build destination parameter
+    to_params: dict = {}
+    if dest_lat is not None and dest_lon is not None:
+        to_params = {
+            "to.latitude": dest_lat,
+            "to.longitude": dest_lon,
+            "to.address": dest_station,
+        }
+    else:
+        dest = await _db_search_station(dest_station)
+        if not dest or not dest.get("id"):
+            logger.warning("Could not resolve destination station: %s", dest_station)
+            return []
+        to_params = {"to": dest["id"]}
 
-    origin_id = origin.get("id")
-    dest_id = dest.get("id")
-    if not origin_id or not dest_id:
-        return []
-
-    params: dict = {"from": origin_id, "to": dest_id, "results": results}
-    if departure:
+    params: dict = {**from_params, **to_params, "results": results}
+    if arrival:
+        params["arrival"] = arrival.isoformat()
+    elif departure:
         params["departure"] = departure.isoformat()
 
     import asyncio
@@ -299,21 +332,19 @@ async def _db_route_transit(
 
 
 def _parse_hafas_journeys(data: dict, provider: str) -> list[TransitJourney]:
-    """Parse HAFAS-format journey responses (shared by DB, SBB, etc.)."""
+    """Parse HAFAS-format journey responses (shared by DB, SBB, etc.).
+
+    Includes walking legs, platform changes, and last-mile routing.
+    """
     journeys = []
     for j in data.get("journeys", []):
         legs = []
         for leg in j.get("legs", []):
-            if leg.get("walking"):
-                continue
-            line = leg.get("line", {})
-            line_name = line.get("name", "")
+            is_walking = bool(leg.get("walking"))
             dep_station = leg.get("origin", {}).get("name", "?")
             arr_station = leg.get("destination", {}).get("name", "?")
             dep_time = leg.get("departure", "")
             arr_time = leg.get("arrival", "")
-            platform = leg.get("departurePlatform")
-            line_mode = line.get("mode")
 
             dur_min = 0
             if dep_time and arr_time:
@@ -324,18 +355,44 @@ def _parse_hafas_journeys(data: dict, provider: str) -> list[TransitJourney]:
                 except (ValueError, TypeError):
                     pass
 
-            legs.append(
-                TransitLeg(
-                    line=line_name,
-                    departure_station=dep_station,
-                    arrival_station=arr_station,
-                    departure_time=dep_time,
-                    arrival_time=arr_time,
-                    duration_minutes=dur_min,
-                    platform=platform,
-                    mode=line_mode,
+            if is_walking:
+                # Skip zero-duration platform transfers (same station)
+                distance = leg.get("distance")
+                if dur_min == 0 and (distance is None or distance < 50):
+                    continue
+                legs.append(
+                    TransitLeg(
+                        line="",
+                        departure_station=dep_station,
+                        arrival_station=arr_station,
+                        departure_time=dep_time,
+                        arrival_time=arr_time,
+                        duration_minutes=dur_min,
+                        mode="walking",
+                        walking=True,
+                        distance_meters=distance,
+                    )
                 )
-            )
+            else:
+                line = leg.get("line", {})
+                line_name = line.get("name", "")
+                platform = leg.get("departurePlatform")
+                arr_platform = leg.get("arrivalPlatform")
+                line_mode = line.get("mode")
+
+                legs.append(
+                    TransitLeg(
+                        line=line_name,
+                        departure_station=dep_station,
+                        arrival_station=arr_station,
+                        departure_time=dep_time,
+                        arrival_time=arr_time,
+                        duration_minutes=dur_min,
+                        platform=platform,
+                        arrival_platform=arr_platform,
+                        mode=line_mode,
+                    )
+                )
 
         if not legs:
             continue
@@ -351,13 +408,17 @@ def _parse_hafas_journeys(data: dict, provider: str) -> list[TransitJourney]:
             except (ValueError, TypeError):
                 pass
 
+        # Count changes: number of non-walking legs minus 1
+        transport_legs = [l for l in legs if not l.walking]
+        num_changes = max(0, len(transport_legs) - 1)
+
         journeys.append(
             TransitJourney(
                 legs=legs,
                 total_duration_minutes=total_dur,
                 departure_time=total_dep,
                 arrival_time=total_arr,
-                changes=max(0, len(legs) - 1),
+                changes=num_changes,
                 provider=provider,
             )
         )
@@ -377,16 +438,23 @@ async def route_transit(
     dest_station: str,
     provider: str = "db",
     departure: Optional[datetime] = None,
+    arrival: Optional[datetime] = None,
     results: int = 3,
+    origin_lat: Optional[float] = None,
+    origin_lon: Optional[float] = None,
+    dest_lat: Optional[float] = None,
+    dest_lon: Optional[float] = None,
 ) -> list[TransitJourney]:
     """Route via public transit using the specified provider.
 
-    Supported providers:
-    - "db": Deutsche Bahn (Germany)
-    - More to come: "sbb" (Switzerland), "sncf" (France), etc.
+    When coordinates are provided, enables door-to-door routing including
+    walking/bus legs for the last mile.
     """
     if provider == "db":
-        return await _db_route_transit(origin_station, dest_station, departure, results)
+        return await _db_route_transit(
+            origin_station, dest_station, departure, arrival, results,
+            origin_lat, origin_lon, dest_lat, dest_lon,
+        )
     else:
         logger.error("Unknown transit provider: %s (available: db)", provider)
         return []
@@ -418,6 +486,7 @@ async def calculate_route(
     dest_station: Optional[str] = None,
     transit_provider: str = "db",
     departure: Optional[datetime] = None,
+    arrival: Optional[datetime] = None,
 ) -> Optional[RouteResult]:
     """Calculate a route using the appropriate provider.
 
@@ -429,6 +498,7 @@ async def calculate_route(
         dest_station: Station name for transit routing.
         transit_provider: Transit provider name (e.g., "db", "sbb").
         departure: Desired departure time (for transit timetables).
+        arrival: Desired arrival time (find connections arriving by this time).
 
     Returns:
         RouteResult or None if routing failed.
@@ -448,7 +518,9 @@ async def calculate_route(
             logger.error("Transit routing requires station names")
             return None
         journeys = await route_transit(
-            origin_station, dest_station, transit_provider, departure
+            origin_station, dest_station, transit_provider, departure, arrival,
+            origin_lat=origin_lat, origin_lon=origin_lon,
+            dest_lat=dest_lat, dest_lon=dest_lon,
         )
         if not journeys:
             return None

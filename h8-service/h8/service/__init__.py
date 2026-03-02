@@ -1210,6 +1210,7 @@ class RouteRequest(BaseModel):
     dest_station: Optional[str] = None  # For transit routing
     transit_provider: str = "db"  # "db", "sbb", etc.
     departure: Optional[str] = None  # ISO datetime
+    arrival: Optional[str] = None  # ISO datetime (find connections arriving by this time)
 
 
 @app.post("/trip/geocode")
@@ -1235,11 +1236,17 @@ async def trip_route(payload: RouteRequest):
     from datetime import datetime as dt
 
     departure = None
+    arrival = None
     if payload.departure:
         try:
             departure = dt.fromisoformat(payload.departure)
         except ValueError:
             raise HTTPException(400, f"Invalid departure datetime: {payload.departure}")
+    if payload.arrival:
+        try:
+            arrival = dt.fromisoformat(payload.arrival)
+        except ValueError:
+            raise HTTPException(400, f"Invalid arrival datetime: {payload.arrival}")
 
     result = await routing.calculate_route(
         origin_lat=payload.origin_lat,
@@ -1251,6 +1258,7 @@ async def trip_route(payload: RouteRequest):
         dest_station=payload.dest_station,
         transit_provider=payload.transit_provider,
         departure=departure,
+        arrival=arrival,
     )
     if not result:
         raise HTTPException(
@@ -1279,12 +1287,15 @@ async def trip_route(payload: RouteRequest):
                     {
                         "line": leg.line,
                         "mode": leg.mode,
+                        "walking": leg.walking,
                         "departure_station": leg.departure_station,
                         "arrival_station": leg.arrival_station,
                         "departure_time": leg.departure_time,
                         "arrival_time": leg.arrival_time,
                         "duration_minutes": leg.duration_minutes,
                         "platform": leg.platform,
+                        "arrival_platform": leg.arrival_platform,
+                        "distance_meters": leg.distance_meters,
                     }
                     for leg in j.legs
                 ],

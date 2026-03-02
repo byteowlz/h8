@@ -546,6 +546,7 @@ impl ServiceClient {
         dest_station: Option<&str>,
         transit_provider: Option<&str>,
         departure: Option<&str>,
+        arrival: Option<&str>,
     ) -> Result<Value> {
         let mut payload = serde_json::json!({
             "origin_lat": origin_lat,
@@ -565,6 +566,9 @@ impl ServiceClient {
         }
         if let Some(d) = departure {
             payload["departure"] = serde_json::json!(d);
+        }
+        if let Some(a) = arrival {
+            payload["arrival"] = serde_json::json!(a);
         }
         self.post_json("/trip/route", payload)
     }
