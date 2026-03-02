@@ -102,6 +102,75 @@ impl ResourceEntry {
 /// A resource group maps alias names to ResourceEntry values.
 pub type ResourceGroup = std::collections::HashMap<String, ResourceEntry>;
 
+/// A named location with coordinates for trip planning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Location {
+    /// Human-readable address.
+    pub address: String,
+    /// Latitude.
+    pub lat: f64,
+    /// Longitude.
+    pub lon: f64,
+    /// Optional train station name (for DB routing).
+    #[serde(default)]
+    pub station: Option<String>,
+}
+
+/// Trip planning configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TripConfig {
+    /// Default origin alias (e.g., "work").
+    pub default_origin: String,
+    /// Buffer minutes to add before/after calculated travel time.
+    pub buffer_minutes: u32,
+    /// Car routing provider: "osrm" (free, global, default) or "openrouteservice".
+    pub car_provider: String,
+    /// Transit routing provider: "db" (Deutsche Bahn), "sbb" (Swiss), etc.
+    pub transit_provider: String,
+    /// Optional country code (ISO 3166-1 alpha-2) to bias geocoding results.
+    /// None = worldwide search. E.g., "de", "us", "ch".
+    #[serde(default)]
+    pub country: Option<String>,
+    /// OpenRouteService API key (only needed if car_provider = "openrouteservice").
+    #[serde(default)]
+    pub openrouteservice_key: Option<String>,
+    /// Named locations (alias -> Location).
+    #[serde(default)]
+    pub locations: std::collections::HashMap<String, Location>,
+}
+
+impl Default for TripConfig {
+    fn default() -> Self {
+        Self {
+            default_origin: "work".to_string(),
+            buffer_minutes: 15,
+            car_provider: "osrm".to_string(),
+            transit_provider: "db".to_string(),
+            country: None,
+            openrouteservice_key: None,
+            locations: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl TripConfig {
+    /// Resolve a location alias or return None.
+    pub fn resolve_location(&self, alias: &str) -> Option<&Location> {
+        for (name, loc) in &self.locations {
+            if name.eq_ignore_ascii_case(alias) {
+                return Some(loc);
+            }
+        }
+        None
+    }
+
+    /// Get the default origin location.
+    pub fn default_origin_location(&self) -> Option<&Location> {
+        self.resolve_location(&self.default_origin)
+    }
+}
+
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -120,6 +189,9 @@ pub struct AppConfig {
     /// Calendar display configuration.
     #[serde(default)]
     pub calendar: CalendarConfig,
+    /// Trip planning configuration.
+    #[serde(default)]
+    pub trip: TripConfig,
     /// People aliases (name -> email).
     #[serde(default)]
     pub people: std::collections::HashMap<String, String>,
@@ -137,6 +209,7 @@ impl Default for AppConfig {
             free_slots: FreeSlotsConfig::default(),
             mail: MailConfig::default(),
             calendar: CalendarConfig::default(),
+            trip: TripConfig::default(),
             people: std::collections::HashMap::new(),
             resources: std::collections::HashMap::new(),
         }
