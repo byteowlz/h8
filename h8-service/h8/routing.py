@@ -153,18 +153,62 @@ class TransitJourney:
 DB_HAFAS_URL = "https://v6.db.transport.rest"
 
 
-async def _db_search_station(query: str) -> Optional[dict]:
-    """Search for a train station by name using DB HAFAS."""
-    params = {"query": query, "results": 1, "stops": "true", "addresses": "false"}
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{DB_HAFAS_URL}/locations", params=params)
-            resp.raise_for_status()
-            results = resp.json()
+async def _db_search_station(query: str, retries: int = 2) -> Optional[dict]:
+    """Search for a train station by name using DB HAFAS.
+
+    Retries on 5xx errors since the public API is intermittently unavailable.
+    """
+    import asyncio
+
+    params = {"query": query, "results": 3, "stops": "true", "addresses": "false"}
+    max_attempts = retries + 1
+    for attempt in range(max_attempts):
+        resp = None
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.get(f"{DB_HAFAS_URL}/locations", params=params)
+        except (httpx.TimeoutException, httpx.HTTPError) as e:
+            if attempt < max_attempts - 1:
+                wait = 2 ** attempt
+                logger.warning(
+                    "DB HAFAS station search error for '%s': %s, retrying in %ds (attempt %d/%d)...",
+                    query, type(e).__name__, wait, attempt + 1, max_attempts,
+                )
+                await asyncio.sleep(wait)
+                continue
+            logger.warning(
+                "DB HAFAS station search failed for '%s' after %d attempts: %s",
+                query, max_attempts, e,
+            )
+            return None
+
+        if resp.status_code >= 500:
+            if attempt < max_attempts - 1:
+                wait = 2 ** attempt
+                logger.warning(
+                    "DB HAFAS returned %d for '%s', retrying in %ds (attempt %d/%d)...",
+                    resp.status_code, query, wait, attempt + 1, max_attempts,
+                )
+                await asyncio.sleep(wait)
+                continue
+            logger.warning(
+                "DB HAFAS returned %d for '%s' after %d attempts",
+                resp.status_code, query, max_attempts,
+            )
+            return None
+
+        if resp.status_code >= 400:
+            logger.warning("DB HAFAS station search returned %d for '%s'", resp.status_code, query)
+            return None
+
+        results = resp.json()
+        for r in results:
+            if r.get("type") == "station":
+                return r
         if results:
             return results[0]
-    except (httpx.HTTPError, httpx.TimeoutException) as e:
-        logger.warning("DB HAFAS station search failed: %s", e)
+        return None
+
     return None
 
 
@@ -198,13 +242,57 @@ async def _db_route_transit(
     if departure:
         params["departure"] = departure.isoformat()
 
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(f"{DB_HAFAS_URL}/journeys", params=params)
+    import asyncio
+
+    data = None
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(f"{DB_HAFAS_URL}/journeys", params=params)
+        except httpx.TimeoutException:
+            if attempt < max_attempts - 1:
+                logger.warning(
+                    "DB HAFAS journey search timed out, retrying (attempt %d/%d)...",
+                    attempt + 1, max_attempts,
+                )
+                await asyncio.sleep(2 ** attempt)
+                continue
+            logger.warning(
+                "DB HAFAS journey search timed out: %s -> %s (after %d attempts)",
+                origin_station, dest_station, max_attempts,
+            )
+            return []
+        except httpx.HTTPError as e:
+            logger.warning(
+                "DB HAFAS journey search failed (%s -> %s): %s",
+                origin_station, dest_station, e,
+            )
+            return []
+
+        if resp.status_code >= 500:
+            if attempt < max_attempts - 1:
+                logger.warning(
+                    "DB HAFAS returned %d, retrying in %ds (attempt %d/%d)...",
+                    resp.status_code, 2 ** attempt, attempt + 1, max_attempts,
+                )
+                await asyncio.sleep(2 ** attempt)
+                continue
+            logger.warning(
+                "DB HAFAS returned %d after %d attempts", resp.status_code, max_attempts
+            )
+            return []
+
+        try:
             resp.raise_for_status()
-            data = resp.json()
-    except (httpx.HTTPError, httpx.TimeoutException) as e:
-        logger.warning("DB HAFAS journey search failed: %s", e)
+        except httpx.HTTPError as e:
+            logger.warning("DB HAFAS journey search error: %s", e)
+            return []
+
+        data = resp.json()
+        break
+
+    if data is None:
         return []
 
     return _parse_hafas_journeys(data, provider="db")

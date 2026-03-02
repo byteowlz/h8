@@ -1039,7 +1039,7 @@ fn parse_trip_flags(words: &[String]) -> (Vec<String>, TripFlags) {
     while let Some(word) = iter.next() {
         match word.as_str() {
             "--car" => flags.car = true,
-            "--transit" => flags.transit = true,
+            "--transit" | "--train" => flags.transit = true,
             "--book" => flags.book = true,
             "--create" => flags.create = true,
             "--sap" => flags.sap = true,
@@ -5343,7 +5343,17 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
             Some(&ctx.config.trip.transit_provider),
             None,
         )
-        .map_err(|e| anyhow!("Routing failed: {e}"))?;
+        .map_err(|e| {
+            if mode == "transit" {
+                anyhow!(
+                    "Transit routing failed (the DB HAFAS API may be temporarily unavailable).\n\
+                     Try again in a moment, or use --car instead.\n\
+                     Details: {e}"
+                )
+            } else {
+                anyhow!("Routing failed: {e}")
+            }
+        })?;
 
     let travel_minutes = route_result["duration_minutes"]
         .as_i64()
