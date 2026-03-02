@@ -47,13 +47,15 @@ fn try_main() -> Result<()> {
         Command::Mail { command } => handle_mail(&ctx, command),
         Command::Agenda(args) => handle_agenda(&ctx, args),
         Command::Contacts { command } => handle_contacts(&ctx, command),
-        Command::Addr(args) => handle_addr(&ctx, args),
+        Command::Addr { command } => handle_addr(&ctx, command),
         Command::Free(cmd) => handle_free(&ctx, cmd),
+        Command::Resource { command } => handle_resource(&ctx, command),
         Command::Ppl { command } => handle_ppl(&ctx, command),
         Command::Config { command } => handle_config(&ctx, command),
         Command::Init(cmd) => handle_init(&ctx, cmd),
         Command::Completions { shell } => handle_completions(shell),
         Command::Service { command } => handle_service(&ctx, command),
+        Command::Which(args) => handle_natural_resource(&ctx, args),
     }
 }
 
@@ -129,10 +131,19 @@ enum Command {
         #[command(subcommand)]
         command: ContactsCommand,
     },
-    /// Search cached email addresses (from sent/received mail)
+    /// Address operations (search cached, resolve from GAL)
     #[command(alias = "address")]
-    Addr(AddrArgs),
+    Addr {
+        #[command(subcommand)]
+        command: AddrCommand,
+    },
     Free(FreeCommand),
+    /// Resource group operations (rooms, cars, equipment)
+    #[command(alias = "res")]
+    Resource {
+        #[command(subcommand)]
+        command: ResourceCommand,
+    },
     /// Other people's calendar operations
     #[command(alias = "people")]
     Ppl {
@@ -153,6 +164,17 @@ enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Natural language resource query ("which cars are free tomorrow")
+    ///
+    /// Examples:
+    ///   h8 which cars are free
+    ///   h8 which cars are free on tuesday
+    ///   h8 which rooms are free tomorrow afternoon
+    ///   h8 which cars are free friday 13-15
+    ///   h8 is the bmw free tomorrow
+    ///   h8 cars free 20.03
+    #[command(alias = "is")]
+    Which(NaturalResourceArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -826,8 +848,20 @@ struct FreeCommand {
     view: Option<AgendaView>,
 }
 
+#[derive(Debug, Subcommand)]
+enum AddrCommand {
+    /// Search cached email addresses (from sent/received mail)
+    #[command(alias = "ls")]
+    Search(AddrSearchArgs),
+    /// Resolve a name or email against the Global Address List (GAL)
+    ///
+    /// Uses EWS ResolveNames to find mailboxes including resource rooms,
+    /// equipment, and distribution lists that are not in your contacts.
+    Resolve(AddrResolveArgs),
+}
+
 #[derive(Debug, Args)]
-struct AddrArgs {
+struct AddrSearchArgs {
     /// Search query (matches email or name)
     query: Option<String>,
     /// Maximum results
@@ -836,6 +870,94 @@ struct AddrArgs {
     /// Show most frequently used (ignore query)
     #[arg(long)]
     frequent: bool,
+}
+
+#[derive(Debug, Args)]
+struct AddrResolveArgs {
+    /// Search query (partial name, email prefix, etc.)
+    query: String,
+    /// Maximum results to display
+    #[arg(short = 'l', long, default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Debug, Subcommand)]
+enum ResourceCommand {
+    /// Check resource availability (which are free?)
+    ///
+    /// Examples:
+    ///   h8 resource free cars tomorrow
+    ///   h8 resource free rooms friday 13-15
+    ///   h8 resource free --all "next week"
+    Free(ResourceFreeArgs),
+    /// Show resource bookings/events
+    ///
+    /// Examples:
+    ///   h8 resource agenda cars tomorrow
+    ///   h8 resource agenda rooms friday
+    Agenda(ResourceAgendaArgs),
+    /// List configured resource groups
+    #[command(alias = "ls")]
+    List,
+    /// Interactively add resources from the Global Address List
+    ///
+    /// Searches the GAL for resource mailboxes (rooms, cars, equipment),
+    /// lets you pick which ones to add, and saves them to a resource group
+    /// in config.toml.
+    ///
+    /// Examples:
+    ///   h8 resource setup             # search and create a new group
+    ///   h8 resource setup cars        # add resources to existing "cars" group
+    ///   h8 resource setup --query "resource.m-em"  # pre-fill search query
+    Setup(ResourceSetupArgs),
+    /// Remove a resource from a group
+    #[command(alias = "rm")]
+    Remove(ResourceRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+struct ResourceFreeArgs {
+    /// Resource group name (e.g., "cars", "rooms") or --all for all groups
+    group: Option<String>,
+    /// Time specification (natural language: tomorrow, friday, "next week", 20.03)
+    #[arg(trailing_var_arg = true)]
+    when: Vec<String>,
+    /// Query all resource groups
+    #[arg(long)]
+    all: bool,
+}
+
+#[derive(Debug, Args)]
+struct ResourceAgendaArgs {
+    /// Resource group name (e.g., "cars", "rooms")
+    group: String,
+    /// Time specification (natural language)
+    #[arg(trailing_var_arg = true)]
+    when: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct ResourceSetupArgs {
+    /// Target group name (e.g., "cars", "rooms"). Prompts if not given.
+    group: Option<String>,
+    /// Pre-fill the GAL search query
+    #[arg(short = 'q', long)]
+    query: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ResourceRemoveArgs {
+    /// Resource group name
+    group: String,
+    /// Resource alias to remove
+    alias: String,
+}
+
+#[derive(Debug, Args)]
+struct NaturalResourceArgs {
+    /// Natural language query (e.g., "cars are free tomorrow", "bmw free friday")
+    #[arg(trailing_var_arg = true, required = true)]
+    query: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -3791,7 +3913,14 @@ fn handle_contacts(ctx: &RuntimeContext, cmd: ContactsCommand) -> Result<()> {
     Ok(())
 }
 
-fn handle_addr(ctx: &RuntimeContext, args: AddrArgs) -> Result<()> {
+fn handle_addr(ctx: &RuntimeContext, command: AddrCommand) -> Result<()> {
+    match command {
+        AddrCommand::Search(args) => handle_addr_search(ctx, args),
+        AddrCommand::Resolve(args) => handle_addr_resolve(ctx, args),
+    }
+}
+
+fn handle_addr_search(ctx: &RuntimeContext, args: AddrSearchArgs) -> Result<()> {
     let account = effective_account(ctx);
     let db_path = ctx.paths.sync_db_path(&account);
 
@@ -3832,6 +3961,1080 @@ fn handle_addr(ctx: &RuntimeContext, args: AddrArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_addr_resolve(ctx: &RuntimeContext, args: AddrResolveArgs) -> Result<()> {
+    let account = effective_account(ctx);
+    let client = ctx.service_client()?;
+
+    let result = client
+        .addr_resolve(&account, &args.query)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    let empty = vec![];
+    let entries = result.as_array().unwrap_or(&empty);
+
+    if entries.is_empty() {
+        println!("No results found for \"{}\"", args.query);
+        return Ok(());
+    }
+
+    // Respect limit
+    let limited: Vec<&Value> = entries.iter().take(args.limit).collect();
+
+    if ctx.common.json || ctx.common.yaml {
+        let limited_val: Vec<Value> = limited.into_iter().cloned().collect();
+        emit_output(&ctx.common, &serde_json::to_value(&limited_val)?)?;
+    } else {
+        for entry in &limited {
+            let name = entry["name"].as_str().unwrap_or("");
+            let email = entry["email"].as_str().unwrap_or("?");
+            let mbox_type = entry["mailbox_type"].as_str().unwrap_or("");
+            if name.is_empty() {
+                println!("{:<45} [{}]", email, mbox_type);
+            } else {
+                println!("{} <{}>  [{}]", name, email, mbox_type);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Resource Handlers
+// =============================================================================
+
+fn handle_resource(ctx: &RuntimeContext, command: ResourceCommand) -> Result<()> {
+    match command {
+        ResourceCommand::Free(args) => handle_resource_free(ctx, args),
+        ResourceCommand::Agenda(args) => handle_resource_agenda(ctx, args),
+        ResourceCommand::List => handle_resource_list(ctx),
+        ResourceCommand::Setup(args) => handle_resource_setup(ctx, args),
+        ResourceCommand::Remove(args) => handle_resource_remove(ctx, args),
+    }
+}
+
+/// Build a JSON array of resource items from a config resource group.
+fn resource_group_to_json(group: &h8_core::ResourceGroup) -> Vec<Value> {
+    group
+        .iter()
+        .map(|(alias, entry)| {
+            serde_json::json!({
+                "alias": alias,
+                "email": entry.email(),
+                "desc": entry.desc(),
+            })
+        })
+        .collect()
+}
+
+/// Parse a time range like "13-15", "13:00-15:00", "9-12" from within text.
+/// Returns (remaining_text, start_hour, start_min, end_hour, end_min) or None.
+fn parse_hour_range(text: &str) -> Option<(String, u32, u32, u32, u32)> {
+    use regex::Regex;
+    let re = Regex::new(r"(\d{1,2})(?::(\d{2}))?\s*[-–]\s*(\d{1,2})(?::(\d{2}))?").unwrap();
+    if let Some(caps) = re.captures(text) {
+        let start_h: u32 = caps.get(1)?.as_str().parse().ok()?;
+        let start_m: u32 = caps.get(2).map_or(0, |m| m.as_str().parse().unwrap_or(0));
+        let end_h: u32 = caps.get(3)?.as_str().parse().ok()?;
+        let end_m: u32 = caps.get(4).map_or(0, |m| m.as_str().parse().unwrap_or(0));
+
+        // Sanity check: valid hours
+        if start_h < 24 && end_h < 24 && start_h < end_h {
+            let remaining = text.replace(caps.get(0)?.as_str(), "").trim().to_string();
+            return Some((remaining, start_h, start_m, end_h, end_m));
+        }
+    }
+    None
+}
+
+/// Parse time-of-day keywords: "morning" -> 9-12, "afternoon" -> 12-17, "evening" -> 17-20.
+fn parse_time_of_day(text: &str) -> Option<(String, u32, u32)> {
+    let text_lower = text.to_lowercase();
+    let patterns = [
+        ("morning", "morgens", "vormittag", 9, 12),
+        ("afternoon", "nachmittag", "nachmittags", 12, 17),
+        ("evening", "abend", "abends", 17, 20),
+    ];
+    for (en, de1, de2, start, end) in patterns {
+        for keyword in [en, de1, de2] {
+            if text_lower.contains(keyword) {
+                let remaining = regex::RegexBuilder::new(&format!(r"\b{}\b", regex::escape(keyword)))
+                    .case_insensitive(true)
+                    .build()
+                    .unwrap()
+                    .replace(&text, "")
+                    .trim()
+                    .to_string();
+                return Some((remaining, start, end));
+            }
+        }
+    }
+    None
+}
+
+fn handle_resource_free(ctx: &RuntimeContext, args: ResourceFreeArgs) -> Result<()> {
+    let account = effective_account(ctx);
+    let client = ctx.service_client()?;
+
+    if ctx.config.resources.is_empty() {
+        return Err(anyhow!(
+            "No resource groups configured. Add [resources.<group>] sections to config.toml"
+        ));
+    }
+
+    // Determine which groups to query
+    let groups_to_query: Vec<(String, Vec<Value>)> = if args.all {
+        ctx.config
+            .resources
+            .iter()
+            .map(|(name, group)| (name.clone(), resource_group_to_json(group)))
+            .collect()
+    } else {
+        let group_name = args.group.as_deref().ok_or_else(|| {
+            anyhow!(
+                "Specify a resource group or use --all. Available: {}",
+                ctx.config.resource_group_names().join(", ")
+            )
+        })?;
+        let (_canon_name, group) = ctx.config.resource_group(group_name).ok_or_else(|| {
+            anyhow!(
+                "Unknown resource group '{}'. Available: {}",
+                group_name,
+                ctx.config.resource_group_names().join(", ")
+            )
+        })?;
+        vec![(group_name.to_string(), resource_group_to_json(group))]
+    };
+
+    // Parse the when text
+    let when_text = if args.when.is_empty() {
+        "today".to_string()
+    } else {
+        args.when.join(" ")
+    };
+
+    // Check for hour range in the when text (e.g., "friday 13-15")
+    let hour_range = parse_hour_range(&when_text);
+    let time_of_day = if hour_range.is_none() {
+        parse_time_of_day(&when_text)
+    } else {
+        None
+    };
+
+    // Determine the date text after removing time range / time-of-day
+    let date_text = if let Some((ref remaining, ..)) = hour_range {
+        remaining.clone()
+    } else if let Some((ref remaining, ..)) = time_of_day {
+        remaining.clone()
+    } else {
+        when_text.clone()
+    };
+
+    let date_text = if date_text.trim().is_empty() {
+        "today".to_string()
+    } else {
+        date_text
+    };
+
+    // Parse the date
+    let tz = ctx
+        .config
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .unwrap_or(chrono_tz::UTC);
+
+    let (from_date_str, to_date_str, description) = parse_date_range_expr(&date_text);
+
+    // If we have a specific time window (hour range or time-of-day), use free-window endpoint
+    let is_window_query = hour_range.is_some() || time_of_day.is_some();
+
+    if is_window_query {
+        let (start_h, start_m, end_h, end_m) = if let Some((_, sh, sm, eh, em)) = hour_range {
+            (sh, sm, eh, em)
+        } else if let Some((_, sh, eh)) = time_of_day {
+            (sh, 0, eh, 0)
+        } else {
+            unreachable!()
+        };
+
+        // Parse the target date
+        let target_date = if let Some((date, _desc)) = parse_single_date(&date_text) {
+            date
+        } else {
+            Local::now().with_timezone(&tz).date_naive()
+        };
+
+        let window_start = format!(
+            "{}T{:02}:{:02}:00",
+            target_date.format("%Y-%m-%d"),
+            start_h,
+            start_m
+        );
+        let window_end = format!(
+            "{}T{:02}:{:02}:00",
+            target_date.format("%Y-%m-%d"),
+            end_h,
+            end_m
+        );
+
+        for (group_name, resources) in &groups_to_query {
+            let result = client
+                .resource_free_window(&account, resources, &window_start, &window_end)
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if ctx.common.json || ctx.common.yaml {
+                let output = serde_json::json!({
+                    "group": group_name,
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "resources": result,
+                });
+                emit_output(&ctx.common, &output)?;
+            } else {
+                println!(
+                    "\n{} available {} {:02}:{:02}-{:02}:{:02}:\n",
+                    capitalize(group_name),
+                    description,
+                    start_h,
+                    start_m,
+                    end_h,
+                    end_m,
+                );
+                if let Some(entries) = result.as_array() {
+                    for entry in entries {
+                        let alias = entry["alias"].as_str().unwrap_or("?");
+                        let desc = entry["desc"].as_str();
+                        let available = entry["available"].as_bool().unwrap_or(false);
+                        let label = if let Some(d) = desc {
+                            format!("{} ({})", alias, d)
+                        } else {
+                            alias.to_string()
+                        };
+                        if available {
+                            println!("  {:<35} -- available", label);
+                        } else {
+                            println!("  {:<35} -- booked", label);
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // General free query (show free slots per resource)
+        for (group_name, resources) in &groups_to_query {
+            let result = client
+                .resource_free(
+                    &account,
+                    resources,
+                    Some(&from_date_str),
+                    Some(&to_date_str),
+                    1,
+                    None,
+                    None,
+                )
+                .map_err(|e| anyhow!("{e}"))?;
+
+            if ctx.common.json || ctx.common.yaml {
+                let output = serde_json::json!({
+                    "group": group_name,
+                    "from": from_date_str,
+                    "to": to_date_str,
+                    "resources": result,
+                });
+                emit_output(&ctx.common, &output)?;
+            } else {
+                println!(
+                    "\n{} available {} ({}):\n",
+                    capitalize(group_name),
+                    description,
+                    from_date_str,
+                );
+                if let Some(entries) = result.as_array() {
+                    for entry in entries {
+                        let alias = entry["alias"].as_str().unwrap_or("?");
+                        let desc = entry["desc"].as_str();
+                        let slots = entry["free_slots"].as_array();
+
+                        let label = if let Some(d) = desc {
+                            format!("{} ({})", alias, d)
+                        } else {
+                            alias.to_string()
+                        };
+
+                        print!("  {}", label);
+
+                        if let Some(slots) = slots {
+                            if slots.is_empty() {
+                                println!("\n    -- no availability --");
+                            } else {
+                                println!();
+                                let slot_strs: Vec<String> = slots
+                                    .iter()
+                                    .filter_map(|s| {
+                                        let start = s["start"].as_str()?;
+                                        let end = s["end"].as_str()?;
+                                        // Extract HH:MM from ISO datetime
+                                        let start_time = &start[11..16];
+                                        let end_time = &end[11..16];
+                                        Some(format!("{} - {}", start_time, end_time))
+                                    })
+                                    .collect();
+                                println!("    {}", slot_strs.join(", "));
+                            }
+                        } else {
+                            println!("\n    -- no availability --");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_resource_agenda(ctx: &RuntimeContext, args: ResourceAgendaArgs) -> Result<()> {
+    let account = effective_account(ctx);
+    let client = ctx.service_client()?;
+
+    let (_canon_name, group) = ctx.config.resource_group(&args.group).ok_or_else(|| {
+        anyhow!(
+            "Unknown resource group '{}'. Available: {}",
+            args.group,
+            ctx.config.resource_group_names().join(", ")
+        )
+    })?;
+
+    let resources = resource_group_to_json(group);
+
+    let when_text = if args.when.is_empty() {
+        "today".to_string()
+    } else {
+        args.when.join(" ")
+    };
+
+    let (from_date_str, to_date_str, description) = parse_date_range_expr(&when_text);
+
+    let result = client
+        .resource_agenda(
+            &account,
+            &resources,
+            Some(&from_date_str),
+            Some(&to_date_str),
+            1,
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+
+    if ctx.common.json || ctx.common.yaml {
+        let output = serde_json::json!({
+            "group": args.group,
+            "from": from_date_str,
+            "to": to_date_str,
+            "resources": result,
+        });
+        emit_output(&ctx.common, &output)?;
+    } else {
+        println!(
+            "\n{} bookings {} ({}):\n",
+            capitalize(&args.group),
+            description,
+            from_date_str,
+        );
+        if let Some(entries) = result.as_array() {
+            for entry in entries {
+                let alias = entry["alias"].as_str().unwrap_or("?");
+                let desc = entry["desc"].as_str();
+                let events = entry["events"].as_array();
+
+                let label = if let Some(d) = desc {
+                    format!("{} ({})", alias, d)
+                } else {
+                    alias.to_string()
+                };
+
+                print!("  {}", label);
+
+                if let Some(events) = events {
+                    if events.is_empty() {
+                        println!("\n    -- no bookings --");
+                    } else {
+                        println!();
+                        for ev in events {
+                            let start = ev["start"].as_str().unwrap_or("?");
+                            let end = ev["end"].as_str().unwrap_or("?");
+                            let subject = ev["subject"].as_str().unwrap_or("");
+                            let status = ev["status"].as_str().unwrap_or("");
+                            let start_time = if start.len() >= 16 {
+                                &start[11..16]
+                            } else {
+                                start
+                            };
+                            let end_time = if end.len() >= 16 { &end[11..16] } else { end };
+                            if subject.is_empty() {
+                                println!("    {} - {} [{}]", start_time, end_time, status);
+                            } else {
+                                println!(
+                                    "    {} - {} {} [{}]",
+                                    start_time, end_time, subject, status
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    println!("\n    -- no data --");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_resource_list(ctx: &RuntimeContext) -> Result<()> {
+    if ctx.config.resources.is_empty() {
+        println!("No resource groups configured.");
+        println!("Add [resources.<group>] sections to config.toml");
+        return Ok(());
+    }
+
+    if ctx.common.json || ctx.common.yaml {
+        let output: Value = ctx
+            .config
+            .resources
+            .iter()
+            .map(|(group_name, group)| {
+                let items: Vec<Value> = group
+                    .iter()
+                    .map(|(alias, entry)| {
+                        serde_json::json!({
+                            "alias": alias,
+                            "email": entry.email(),
+                            "desc": entry.desc(),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "group": group_name,
+                    "resources": items,
+                })
+            })
+            .collect();
+        emit_output(&ctx.common, &output)?;
+    } else {
+        for (group_name, group) in &ctx.config.resources {
+            println!("{}:", group_name);
+            for (alias, entry) in group {
+                if let Some(desc) = entry.desc() {
+                    println!("  {:<15} {} ({})", alias, entry.email(), desc);
+                } else {
+                    println!("  {:<15} {}", alias, entry.email());
+                }
+            }
+            println!();
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse natural language resource query.
+///
+/// Extracts resource group/alias and time spec from freeform text like:
+/// - "which cars are free tomorrow"
+/// - "bmw free friday 13-15"
+/// - "any room available next week"
+/// - "cars tuesday"
+///
+/// Returns (group_or_alias, time_words) where group_or_alias identifies
+/// either a resource group name or a specific resource alias.
+fn parse_natural_resource_query(
+    text: &str,
+    config: &AppConfig,
+) -> Option<(NaturalResourceTarget, Vec<String>)> {
+    // Normalize and tokenize
+    let text_lower = text.to_lowercase();
+
+    // Remove filler words
+    let filler_re = regex::RegexBuilder::new(
+        r"\b(which|are|is|the|a|an|any|free|frei|available|verfügbar|on|am|um|at)\b",
+    )
+    .case_insensitive(true)
+    .build()
+    .unwrap();
+    let cleaned = filler_re.replace_all(&text_lower, " ");
+    let cleaned = regex::Regex::new(r"\s+")
+        .unwrap()
+        .replace_all(&cleaned, " ");
+    let cleaned = cleaned.trim().to_string();
+
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+
+    // Try to match a resource group name (could be multi-word but typically single)
+    for (group_name, _group) in &config.resources {
+        let gn_lower = group_name.to_lowercase();
+        // Also try singular form (e.g., "car" -> "cars")
+        let singular = gn_lower.trim_end_matches('s');
+
+        for (idx, word) in words.iter().enumerate() {
+            if *word == gn_lower || *word == singular {
+                let time_words: Vec<String> = words
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != idx)
+                    .map(|(_, w)| w.to_string())
+                    .collect();
+                return Some((
+                    NaturalResourceTarget::Group(group_name.clone()),
+                    time_words,
+                ));
+            }
+        }
+    }
+
+    // Try to match a specific resource alias
+    for (group_name, group) in &config.resources {
+        for (alias, _entry) in group {
+            let alias_lower = alias.to_lowercase();
+            for (idx, word) in words.iter().enumerate() {
+                if *word == alias_lower {
+                    let time_words: Vec<String> = words
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != idx)
+                        .map(|(_, w)| w.to_string())
+                        .collect();
+                    return Some((
+                        NaturalResourceTarget::Single {
+                            group: group_name.clone(),
+                            alias: alias.clone(),
+                        },
+                        time_words,
+                    ));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[derive(Debug)]
+enum NaturalResourceTarget {
+    Group(String),
+    Single { group: String, alias: String },
+}
+
+fn handle_natural_resource(ctx: &RuntimeContext, args: NaturalResourceArgs) -> Result<()> {
+    let query_text = args.query.join(" ");
+
+    if ctx.config.resources.is_empty() {
+        return Err(anyhow!(
+            "No resource groups configured. Add [resources.<group>] sections to config.toml"
+        ));
+    }
+
+    let (target, time_words) = parse_natural_resource_query(&query_text, &ctx.config)
+        .ok_or_else(|| {
+            anyhow!(
+                "Could not identify a resource group or alias in: \"{}\"\nAvailable groups: {}",
+                query_text,
+                ctx.config.resource_group_names().join(", ")
+            )
+        })?;
+
+    let when_text = if time_words.is_empty() {
+        "today".to_string()
+    } else {
+        time_words.join(" ")
+    };
+
+    match target {
+        NaturalResourceTarget::Group(group_name) => {
+            // Delegate to resource free with the parsed group and time
+            let group_arg = Some(group_name);
+            let when_parts: Vec<String> = when_text.split_whitespace().map(|s| s.to_string()).collect();
+            handle_resource_free(
+                ctx,
+                ResourceFreeArgs {
+                    group: group_arg,
+                    when: when_parts,
+                    all: false,
+                },
+            )
+        }
+        NaturalResourceTarget::Single { group, alias } => {
+            // Query just the single resource
+            let account = effective_account(ctx);
+            let client = ctx.service_client()?;
+
+            let (email, desc) = ctx
+                .config
+                .resolve_resource(&group, &alias)
+                .map_err(|e| anyhow!("{e}"))?;
+
+            let resources = vec![serde_json::json!({
+                "alias": alias,
+                "email": email,
+                "desc": desc,
+            })];
+
+            // Check for hour range
+            let hour_range = parse_hour_range(&when_text);
+            let time_of_day = if hour_range.is_none() {
+                parse_time_of_day(&when_text)
+            } else {
+                None
+            };
+
+            let date_text = if let Some((ref remaining, ..)) = hour_range {
+                if remaining.trim().is_empty() {
+                    "today".to_string()
+                } else {
+                    remaining.clone()
+                }
+            } else if let Some((ref remaining, ..)) = time_of_day {
+                if remaining.trim().is_empty() {
+                    "today".to_string()
+                } else {
+                    remaining.clone()
+                }
+            } else {
+                when_text.clone()
+            };
+
+            let tz = ctx
+                .config
+                .timezone
+                .parse::<chrono_tz::Tz>()
+                .unwrap_or(chrono_tz::UTC);
+
+            let is_window = hour_range.is_some() || time_of_day.is_some();
+
+            if is_window {
+                let (start_h, start_m, end_h, end_m) =
+                    if let Some((_, sh, sm, eh, em)) = hour_range {
+                        (sh, sm, eh, em)
+                    } else if let Some((_, sh, eh)) = time_of_day {
+                        (sh, 0, eh, 0)
+                    } else {
+                        unreachable!()
+                    };
+
+                let target_date = if let Some((date, _)) = parse_single_date(&date_text) {
+                    date
+                } else {
+                    Local::now().with_timezone(&tz).date_naive()
+                };
+
+                let window_start = format!(
+                    "{}T{:02}:{:02}:00",
+                    target_date.format("%Y-%m-%d"),
+                    start_h,
+                    start_m
+                );
+                let window_end = format!(
+                    "{}T{:02}:{:02}:00",
+                    target_date.format("%Y-%m-%d"),
+                    end_h,
+                    end_m
+                );
+
+                let result = client
+                    .resource_free_window(&account, &resources, &window_start, &window_end)
+                    .map_err(|e| anyhow!("{e}"))?;
+
+                if ctx.common.json || ctx.common.yaml {
+                    emit_output(&ctx.common, &result)?;
+                } else if let Some(entries) = result.as_array() {
+                    for entry in entries {
+                        let available = entry["available"].as_bool().unwrap_or(false);
+                        let label = if let Some(ref d) = desc {
+                            format!("{} ({})", alias, d)
+                        } else {
+                            alias.clone()
+                        };
+                        if available {
+                            println!(
+                                "{} is free {} {:02}:{:02}-{:02}:{:02}",
+                                label, date_text, start_h, start_m, end_h, end_m
+                            );
+                        } else {
+                            println!(
+                                "{} is booked {} {:02}:{:02}-{:02}:{:02}",
+                                label, date_text, start_h, start_m, end_h, end_m
+                            );
+                        }
+                    }
+                }
+            } else {
+                let (from_date_str, to_date_str, description) =
+                    parse_date_range_expr(&date_text);
+
+                let result = client
+                    .resource_free(
+                        &account,
+                        &resources,
+                        Some(&from_date_str),
+                        Some(&to_date_str),
+                        1,
+                        None,
+                        None,
+                    )
+                    .map_err(|e| anyhow!("{e}"))?;
+
+                if ctx.common.json || ctx.common.yaml {
+                    emit_output(&ctx.common, &result)?;
+                } else if let Some(entries) = result.as_array() {
+                    for entry in entries {
+                        let slots = entry["free_slots"].as_array();
+                        let label = if let Some(ref d) = desc {
+                            format!("{} ({})", alias, d)
+                        } else {
+                            alias.clone()
+                        };
+
+                        if let Some(slots) = slots {
+                            if slots.is_empty() {
+                                println!("{} has no availability {}", label, description);
+                            } else {
+                                println!(
+                                    "{} is free {} ({}):",
+                                    label, description, from_date_str
+                                );
+                                let slot_strs: Vec<String> = slots
+                                    .iter()
+                                    .filter_map(|s| {
+                                        let start = s["start"].as_str()?;
+                                        let end = s["end"].as_str()?;
+                                        let start_time = &start[11..16];
+                                        let end_time = &end[11..16];
+                                        Some(format!("{} - {}", start_time, end_time))
+                                    })
+                                    .collect();
+                                println!("  {}", slot_strs.join(", "));
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
+fn handle_resource_setup(ctx: &RuntimeContext, args: ResourceSetupArgs) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    if !io::stdout().is_terminal() {
+        return Err(anyhow!("setup requires an interactive terminal"));
+    }
+
+    let account = effective_account(ctx);
+    let client = ctx.service_client()?;
+
+    // 1. Determine group name
+    let group_name = if let Some(name) = args.group {
+        name
+    } else {
+        let existing: Vec<String> = ctx.config.resource_group_names().iter().map(|s| s.to_string()).collect();
+        if !existing.is_empty() {
+            println!("Existing groups: {}", existing.join(", "));
+        }
+        dialoguer::Input::<String>::new()
+            .with_prompt("Resource group name (e.g., cars, rooms)")
+            .interact_text()
+            .map_err(|e| anyhow!("input cancelled: {e}"))?
+            .trim()
+            .to_lowercase()
+    };
+
+    if group_name.is_empty() {
+        return Err(anyhow!("group name cannot be empty"));
+    }
+
+    // 2. Search loop - allow multiple searches and accumulate selections
+    let mut selected_resources: Vec<(String, String, Option<String>)> = Vec::new(); // (alias, email, desc)
+
+    loop {
+        let query = if let Some(ref q) = args.query {
+            if selected_resources.is_empty() {
+                q.clone()
+            } else {
+                dialoguer::Input::<String>::new()
+                    .with_prompt("Search GAL (or press Enter to finish)")
+                    .allow_empty(true)
+                    .interact_text()
+                    .map_err(|e| anyhow!("input cancelled: {e}"))?
+            }
+        } else {
+            dialoguer::Input::<String>::new()
+                .with_prompt(if selected_resources.is_empty() {
+                    "Search GAL for resources"
+                } else {
+                    "Search again (or press Enter to finish)"
+                })
+                .allow_empty(!selected_resources.is_empty())
+                .interact_text()
+                .map_err(|e| anyhow!("input cancelled: {e}"))?
+        };
+
+        if query.trim().is_empty() {
+            break;
+        }
+
+        println!("Searching...");
+        let result = client
+            .addr_resolve(&account, query.trim())
+            .map_err(|e| anyhow!("{e}"))?;
+
+        let entries = result.as_array().cloned().unwrap_or_default();
+        if entries.is_empty() {
+            println!("No results found for \"{}\". Try a different query.", query.trim());
+            continue;
+        }
+
+        // Build display items, marking already-selected ones
+        let already_selected_emails: std::collections::HashSet<String> = selected_resources
+            .iter()
+            .map(|(_, email, _)| email.to_lowercase())
+            .collect();
+
+        let display_entries: Vec<(usize, String)> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                let email = e["email"].as_str().unwrap_or("").to_lowercase();
+                !already_selected_emails.contains(&email)
+            })
+            .map(|(i, e)| {
+                let name = e["name"].as_str().unwrap_or("");
+                let email = e["email"].as_str().unwrap_or("?");
+                let mbox_type = e["mailbox_type"].as_str().unwrap_or("");
+                let label = if name.is_empty() {
+                    format!("{:<50} [{}]", email, mbox_type)
+                } else {
+                    format!("{} <{}>  [{}]", name, email, mbox_type)
+                };
+                (i, label)
+            })
+            .collect();
+
+        if display_entries.is_empty() {
+            println!("All results already selected.");
+            continue;
+        }
+
+        let items: Vec<&str> = display_entries.iter().map(|(_, s)| s.as_str()).collect();
+
+        let selections = dialoguer::MultiSelect::new()
+            .with_prompt("Select resources (Space to toggle, Enter to confirm)")
+            .items(&items)
+            .interact_opt()
+            .map_err(|e| anyhow!("selection cancelled: {e}"))?;
+
+        let selections = match selections {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                println!("No resources selected from this search.");
+                continue;
+            }
+        };
+
+        // For each selected, prompt for alias and optional description
+        for &sel_idx in &selections {
+            let (orig_idx, _) = &display_entries[sel_idx];
+            let entry = &entries[*orig_idx];
+            let email = entry["email"].as_str().unwrap_or("").to_string();
+            let gal_name = entry["name"].as_str().unwrap_or("").to_string();
+
+            // Suggest alias from email local part
+            let suggested_alias = email
+                .split('@')
+                .next()
+                .unwrap_or("")
+                .replace('.', "-")
+                .to_lowercase();
+            // Shorten if very long
+            let suggested_alias = if suggested_alias.len() > 20 {
+                suggested_alias[..20].to_string()
+            } else {
+                suggested_alias
+            };
+
+            let alias = dialoguer::Input::<String>::new()
+                .with_prompt(format!("Alias for {}", email))
+                .default(suggested_alias)
+                .interact_text()
+                .map_err(|e| anyhow!("input cancelled: {e}"))?
+                .trim()
+                .to_lowercase();
+
+            if alias.is_empty() {
+                println!("  Skipped {}", email);
+                continue;
+            }
+
+            let desc_default = if gal_name.is_empty() {
+                String::new()
+            } else {
+                gal_name.clone()
+            };
+
+            let desc = dialoguer::Input::<String>::new()
+                .with_prompt(format!("Description for {} (optional)", alias))
+                .default(desc_default)
+                .allow_empty(true)
+                .interact_text()
+                .map_err(|e| anyhow!("input cancelled: {e}"))?
+                .trim()
+                .to_string();
+
+            let desc_opt = if desc.is_empty() { None } else { Some(desc) };
+
+            println!(
+                "  {} {} -> {}{}",
+                "+".green().bold(),
+                alias.green(),
+                email,
+                desc_opt
+                    .as_ref()
+                    .map(|d| format!(" ({})", d))
+                    .unwrap_or_default()
+            );
+
+            selected_resources.push((alias, email, desc_opt));
+        }
+
+        // If query was provided via --query, don't loop
+        if args.query.is_some() && selected_resources.is_empty() {
+            continue;
+        }
+        if args.query.is_some() {
+            break;
+        }
+    }
+
+    if selected_resources.is_empty() {
+        println!("No resources added.");
+        return Ok(());
+    }
+
+    // 3. Write to config.toml
+    let (mut doc, config_path) = read_config_document(ctx)?;
+
+    // Ensure [resources] table exists
+    if doc.get("resources").is_none() {
+        doc["resources"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let resources_table = doc["resources"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[resources] is not a table"))?;
+
+    // Ensure [resources.<group>] table exists
+    if resources_table.get(&group_name).is_none() {
+        resources_table[&group_name] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let group_table = resources_table[&group_name]
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[resources.{}] is not a table", group_name))?;
+
+    let mut added = 0;
+    for (alias, email, desc) in &selected_resources {
+        if group_table.contains_key(alias) {
+            println!(
+                "  Alias '{}' already exists in [resources.{}], skipping.",
+                alias, group_name
+            );
+            continue;
+        }
+
+        if let Some(desc) = desc {
+            // Use inline table: { email = "...", desc = "..." }
+            let mut inline = toml_edit::InlineTable::new();
+            inline.insert("email", email.as_str().into());
+            inline.insert("desc", desc.as_str().into());
+            group_table[alias] = toml_edit::value(inline);
+        } else {
+            // Simple string
+            group_table[alias] = toml_edit::value(email.as_str());
+        }
+        added += 1;
+    }
+
+    if added > 0 {
+        write_config_document(&doc, &config_path)?;
+        println!(
+            "\nSaved {} resource(s) to [resources.{}] in {}",
+            added,
+            group_name,
+            config_path.display()
+        );
+    } else {
+        println!("\nNo new resources added.");
+    }
+
+    Ok(())
+}
+
+fn handle_resource_remove(ctx: &RuntimeContext, args: ResourceRemoveArgs) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    let (mut doc, config_path) = read_config_document(ctx)?;
+
+    let resources_table = doc
+        .get_mut("resources")
+        .and_then(|r| r.as_table_mut())
+        .ok_or_else(|| anyhow!("no [resources] section in config"))?;
+
+    let available_groups: Vec<String> = resources_table
+        .iter()
+        .map(|(k, _)| k.to_string())
+        .collect();
+
+    let group_table = resources_table
+        .get_mut(&args.group)
+        .and_then(|g| g.as_table_mut())
+        .ok_or_else(|| {
+            anyhow!(
+                "unknown resource group '{}'. Available: {}",
+                args.group,
+                available_groups.join(", ")
+            )
+        })?;
+
+    if !group_table.contains_key(&args.alias) {
+        let available: Vec<&str> = group_table.iter().map(|(k, _)| k).collect();
+        return Err(anyhow!(
+            "unknown resource '{}' in group '{}'. Available: {}",
+            args.alias,
+            args.group,
+            available.join(", ")
+        ));
+    }
+
+    group_table.remove(&args.alias);
+    write_config_document(&doc, &config_path)?;
+
+    println!(
+        "{} Removed '{}' from [resources.{}]",
+        "-".red().bold(),
+        args.alias,
+        args.group
+    );
+
+    Ok(())
+}
+
+/// Capitalize the first letter of a string.
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().to_string() + chars.as_str(),
+    }
 }
 
 fn handle_agenda(ctx: &RuntimeContext, args: AgendaArgs) -> Result<()> {
