@@ -1039,7 +1039,7 @@ fn parse_trip_flags(words: &[String]) -> (Vec<String>, TripFlags) {
     while let Some(word) = iter.next() {
         match word.as_str() {
             "--car" => flags.car = true,
-            "--transit" | "--train" => flags.transit = true,
+            "--transit" | "--train" | "--public" => flags.transit = true,
             "--book" => flags.book = true,
             "--create" => flags.create = true,
             "--sap" => flags.sap = true,
@@ -5204,7 +5204,7 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     } else if flags.car {
         "car"
     } else {
-        return Err(anyhow!("Specify transport mode: --car or --transit"));
+        return Err(anyhow!("Specify transport mode: --car or --public (--transit/--train)"));
     };
 
     // Parse when: need date + time range
