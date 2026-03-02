@@ -2,6 +2,15 @@
 
 ## Open
 
+### [trx-ybfm.2] Natural language resource queries (P1, feature)
+Support natural language queries for resource availability that feel conversational rather than requiring rigid subcommand syntax.
+
+## Examples
+
+```bash
+...
+
+
 ### [trx-ybfm] Resource groups: query availability of named resource collections (P1, feature)
 Add a [resources] config section for grouping related EWS resource mailboxes (cars, rooms, equipment) under a single name, and a new "h8 resource" command to query them.
 
