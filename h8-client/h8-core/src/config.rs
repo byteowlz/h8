@@ -124,6 +124,9 @@ pub struct TripConfig {
     pub default_origin: String,
     /// Buffer minutes to add before/after calculated travel time.
     pub buffer_minutes: u32,
+    /// Round travel durations up to the nearest N minutes (0 = no rounding).
+    /// E.g., 15 rounds 4h22m -> 4h30m; 30 rounds 4h22m -> 4h30m; 60 rounds -> 5h.
+    pub round_minutes: u32,
     /// Car routing provider: "osrm" (free, global, default) or "openrouteservice".
     pub car_provider: String,
     /// Transit routing provider: "db" (Deutsche Bahn), "sbb" (Swiss), etc.
@@ -145,6 +148,7 @@ impl Default for TripConfig {
         Self {
             default_origin: "work".to_string(),
             buffer_minutes: 15,
+            round_minutes: 15,
             car_provider: "osrm".to_string(),
             transit_provider: "db".to_string(),
             country: None,

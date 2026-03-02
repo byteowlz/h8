@@ -83,6 +83,10 @@ default_origin = "work"
 # Buffer minutes to add before/after calculated travel time
 buffer_minutes = 15
 
+# Round car travel durations up to nearest N minutes (0 = no rounding)
+# E.g., 15 rounds 4h22m -> 4h30m; 30 rounds -> 4h30m; 60 rounds -> 5h
+round_minutes = 15
+
 # Car routing provider: "osrm" (free, global, no API key)
 car_provider = "osrm"
 

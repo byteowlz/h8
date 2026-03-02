@@ -196,6 +196,13 @@
           "minimum": 0,
           "default": 15
         },
+        "round_minutes": {
+          "type": "integer",
+          "description": "Round car travel durations up to the nearest N minutes. 0 disables rounding. E.g., 15 rounds 4h22m to 4h30m.",
+          "minimum": 0,
+          "default": 15,
+          "examples": [0, 5, 15, 30, 60]
+        },
         "car_provider": {
           "type": "string",
           "description": "Car routing provider",
