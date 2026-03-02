@@ -1192,6 +1192,108 @@ async def addr_validate(
     return {"valid": is_valid, "email": email_addr}
 
 
+# === Trip / Routing ===
+
+
+class GeocodeRequest(BaseModel):
+    query: str
+    country: Optional[str] = None  # ISO 3166-1 alpha-2 to bias results; None = worldwide
+
+
+class RouteRequest(BaseModel):
+    origin_lat: float
+    origin_lon: float
+    dest_lat: float
+    dest_lon: float
+    mode: str = "car"  # "car" or "transit"
+    origin_station: Optional[str] = None  # For transit routing
+    dest_station: Optional[str] = None  # For transit routing
+    transit_provider: str = "db"  # "db", "sbb", etc.
+    departure: Optional[str] = None  # ISO datetime
+
+
+@app.post("/trip/geocode")
+async def trip_geocode(payload: GeocodeRequest):
+    """Geocode an address or place name to coordinates (worldwide)."""
+    from h8 import routing
+
+    result = await routing.geocode(payload.query, payload.country)
+    if not result:
+        raise HTTPException(404, f"Could not geocode: {payload.query}")
+    return {
+        "lat": result.lat,
+        "lon": result.lon,
+        "display_name": result.display_name,
+        "address": result.address,
+    }
+
+
+@app.post("/trip/route")
+async def trip_route(payload: RouteRequest):
+    """Calculate a route between two points (worldwide)."""
+    from h8 import routing
+    from datetime import datetime as dt
+
+    departure = None
+    if payload.departure:
+        try:
+            departure = dt.fromisoformat(payload.departure)
+        except ValueError:
+            raise HTTPException(400, f"Invalid departure datetime: {payload.departure}")
+
+    result = await routing.calculate_route(
+        origin_lat=payload.origin_lat,
+        origin_lon=payload.origin_lon,
+        dest_lat=payload.dest_lat,
+        dest_lon=payload.dest_lon,
+        mode=payload.mode,
+        origin_station=payload.origin_station,
+        dest_station=payload.dest_station,
+        transit_provider=payload.transit_provider,
+        departure=departure,
+    )
+    if not result:
+        raise HTTPException(
+            502, f"Routing failed for mode={payload.mode}"
+        )
+
+    response: dict = {
+        "mode": result.mode,
+        "duration_minutes": result.duration_minutes,
+        "distance_km": result.distance_km,
+    }
+    if result.car_route:
+        response["car"] = {
+            "duration_seconds": result.car_route.duration_seconds,
+            "distance_meters": result.car_route.distance_meters,
+        }
+    if result.transit_journeys:
+        response["transit_journeys"] = [
+            {
+                "provider": j.provider,
+                "total_duration_minutes": j.total_duration_minutes,
+                "departure_time": j.departure_time,
+                "arrival_time": j.arrival_time,
+                "changes": j.changes,
+                "legs": [
+                    {
+                        "line": leg.line,
+                        "mode": leg.mode,
+                        "departure_station": leg.departure_station,
+                        "arrival_station": leg.arrival_station,
+                        "departure_time": leg.departure_time,
+                        "arrival_time": leg.arrival_time,
+                        "duration_minutes": leg.duration_minutes,
+                        "platform": leg.platform,
+                    }
+                    for leg in j.legs
+                ],
+            }
+            for j in result.transit_journeys
+        ]
+    return response
+
+
 def main() -> None:
     uvicorn.run(
         "h8.service:app",
