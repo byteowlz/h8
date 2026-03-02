@@ -5182,6 +5182,77 @@ fn handle_resource_remove(ctx: &RuntimeContext, args: ResourceRemoveArgs) -> Res
     Ok(())
 }
 
+/// Format a NaiveDateTime as HH:MM.
+fn trip_fmt_time(ndt: chrono::NaiveDateTime) -> String {
+    ndt.format("%H:%M").to_string()
+}
+
+/// Parse ISO datetime string (RFC3339 or plain ISO) to NaiveDateTime.
+fn trip_parse_iso_time(s: &str) -> Option<chrono::NaiveDateTime> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        Some(dt.naive_local())
+    } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        Some(dt)
+    } else {
+        None
+    }
+}
+
+/// Build a human-readable body string from transit journey legs for calendar events.
+fn journey_body(journey: &serde_json::Value) -> Option<String> {
+    let legs = journey["legs"].as_array()?;
+    let mut lines = Vec::new();
+    for leg in legs {
+        let is_walking = leg["walking"].as_bool().unwrap_or(false);
+        let dep_station = leg["departure_station"].as_str().unwrap_or("?");
+        let arr_station = leg["arrival_station"].as_str().unwrap_or("?");
+        let dep_time = leg["departure_time"].as_str()
+            .and_then(|s| trip_parse_iso_time(s))
+            .map(|dt| trip_fmt_time(dt))
+            .unwrap_or_else(|| "??:??".to_string());
+        let arr_time = leg["arrival_time"].as_str()
+            .and_then(|s| trip_parse_iso_time(s))
+            .map(|dt| trip_fmt_time(dt))
+            .unwrap_or_else(|| "??:??".to_string());
+
+        if is_walking {
+            let distance = leg["distance_meters"].as_i64();
+            let dur = leg["duration_minutes"].as_i64().unwrap_or(0);
+            let dist_str = distance.map(|d| {
+                if d >= 1000 { format!(" ({:.1} km)", d as f64 / 1000.0) }
+                else { format!(" ({} m)", d) }
+            }).unwrap_or_default();
+            lines.push(format!(
+                "{} Walk {}min {} -> {}{}",
+                dep_time, dur, dep_station, arr_station, dist_str
+            ));
+        } else {
+            let line_name = leg["line"].as_str().unwrap_or("?");
+            let platform = leg["platform"].as_str();
+            let arr_platform = leg["arrival_platform"].as_str();
+            let dep_plat = platform.map(|p| format!(" (Gl. {})", p)).unwrap_or_default();
+            let arr_plat = arr_platform.map(|p| format!(" (Gl. {})", p)).unwrap_or_default();
+            lines.push(format!(
+                "{} {} {}{} -> {} {}{}",
+                dep_time, line_name, dep_station, dep_plat, arr_time, arr_station, arr_plat
+            ));
+        }
+    }
+    if lines.is_empty() { None } else { Some(lines.join("\n")) }
+}
+
+/// Extract non-walking line names from journey legs for the subject.
+fn journey_line_names(journey: &serde_json::Value) -> Vec<String> {
+    journey["legs"].as_array()
+        .map(|legs| {
+            legs.iter()
+                .filter(|l| !l["walking"].as_bool().unwrap_or(false))
+                .filter_map(|l| l["line"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     use owo_colors::OwoColorize;
 
@@ -5331,6 +5402,17 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
         None
     };
 
+    // For transit: query for "arrive by meeting start" (outbound)
+    // For car: no time constraint on routing (just distance/duration)
+    let arrival_param = if mode == "transit" {
+        let meeting_start_dt = target_date
+            .and_hms_opt(meeting_start_h, meeting_start_m, 0)
+            .ok_or_else(|| anyhow!("invalid meeting start time"))?;
+        Some(meeting_start_dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+    } else {
+        None
+    };
+
     let route_result = client
         .trip_route(
             origin.lat,
@@ -5341,7 +5423,8 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
             origin_station,
             dest_station_name.as_deref(),
             Some(&ctx.config.trip.transit_provider),
-            None,
+            None, // departure
+            arrival_param.as_deref(), // arrival
         )
         .map_err(|e| {
             if mode == "transit" {
@@ -5379,24 +5462,12 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
         eprintln!("done");
     }
 
-    // Format helpers
-    let fmt_time = |ndt: chrono::NaiveDateTime| -> String {
-        ndt.format("%H:%M").to_string()
-    };
+    // Format helpers (thin wrappers around standalone functions for closure ergonomics)
+    let fmt_time = |ndt: chrono::NaiveDateTime| -> String { trip_fmt_time(ndt) };
     let fmt_datetime = |ndt: chrono::NaiveDateTime| -> String {
         ndt.format("%Y-%m-%dT%H:%M:%S").to_string()
     };
-    // Parse ISO datetime string to NaiveDateTime
-    let parse_iso_time = |s: &str| -> Option<chrono::NaiveDateTime> {
-        // Handle formats: "2026-03-05T14:15:00+01:00" or "2026-03-05T14:15:00"
-        if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-            Some(dt.naive_local())
-        } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-            Some(dt)
-        } else {
-            None
-        }
-    };
+    let parse_iso_time = |s: &str| -> Option<chrono::NaiveDateTime> { trip_parse_iso_time(s) };
 
     // Calculate full trip timeline
     let meeting_start = target_date
@@ -5410,8 +5481,7 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     // For transit: use the best journey whose arrival is before meeting start
     // For car: use rounded travel time + buffer
     let (depart_at, arrive_back, outbound_journey, return_journey) = if mode == "transit" && !transit_journeys.is_empty() {
-        // Find outbound journey: pick first one that arrives before meeting start
-        // (the API returns results sorted by departure)
+        // Outbound: first journey (arrives before meeting start thanks to arrival param)
         let outbound = transit_journeys.first().cloned();
         let ob_depart = outbound.as_ref()
             .and_then(|j| j["departure_time"].as_str())
@@ -5422,11 +5492,44 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
             .and_then(|s| parse_iso_time(s))
             .unwrap_or(meeting_start);
 
-        // For return, we'd need a separate query (departure after meeting end).
-        // For now, estimate return using the same travel duration + buffer.
-        let ret_arrive = meeting_end + chrono::Duration::minutes((travel_minutes + buffer) as i64);
+        // Return journey: query departure from destination after meeting end
+        eprint!("Calculating return route... ");
+        let return_departure = meeting_end.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let return_result = client
+            .trip_route(
+                dest_lat,     // origin = destination (going back)
+                dest_lon,
+                origin.lat,   // dest = origin (going home)
+                origin.lon,
+                mode,
+                dest_station_name.as_deref(),
+                origin_station,
+                Some(&ctx.config.trip.transit_provider),
+                Some(&return_departure), // departure
+                None,                     // no arrival constraint
+            );
+        let (ret_journey, ret_arrive) = match return_result {
+            Ok(ref r) => {
+                eprintln!("done");
+                let ret_journeys: Vec<Value> = r["transit_journeys"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let first_ret = ret_journeys.into_iter().next();
+                let arrive = first_ret.as_ref()
+                    .and_then(|j| j["arrival_time"].as_str())
+                    .and_then(|s| parse_iso_time(s))
+                    .unwrap_or_else(|| meeting_end + chrono::Duration::minutes((travel_minutes + buffer) as i64));
+                (first_ret, arrive)
+            },
+            Err(e) => {
+                eprintln!("failed ({}), estimating return time", e);
+                let arrive = meeting_end + chrono::Duration::minutes((travel_minutes + buffer) as i64);
+                (None, arrive)
+            },
+        };
 
-        (ob_depart, ret_arrive, outbound, None::<Value>)
+        (ob_depart, ret_arrive, outbound, ret_journey)
     } else {
         let dep = meeting_start - chrono::Duration::minutes((travel_minutes + buffer) as i64);
         let ret = meeting_end + chrono::Duration::minutes((travel_minutes + buffer) as i64);
@@ -5511,30 +5614,61 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     // Show transit legs for outbound journey
     if let Some(ref journey) = outbound_journey {
         if let Some(legs) = journey["legs"].as_array() {
+            let mut prev_arr_time: Option<chrono::NaiveDateTime> = None;
             for leg in legs {
-                let line = leg["line"].as_str().unwrap_or("?");
+                let is_walking = leg["walking"].as_bool().unwrap_or(false);
                 let dep_station = leg["departure_station"].as_str().unwrap_or("?");
                 let arr_station = leg["arrival_station"].as_str().unwrap_or("?");
-                let dep_time = leg["departure_time"].as_str()
-                    .and_then(|s| parse_iso_time(s))
-                    .map(|dt| fmt_time(dt))
-                    .unwrap_or_else(|| "??:??".to_string());
-                let arr_time = leg["arrival_time"].as_str()
-                    .and_then(|s| parse_iso_time(s))
-                    .map(|dt| fmt_time(dt))
-                    .unwrap_or_else(|| "??:??".to_string());
-                let platform = leg["platform"].as_str();
+                let dep_dt = leg["departure_time"].as_str().and_then(|s| parse_iso_time(s));
+                let arr_dt = leg["arrival_time"].as_str().and_then(|s| parse_iso_time(s));
+                let dep_time = dep_dt.map(|dt| fmt_time(dt)).unwrap_or_else(|| "??:??".to_string());
+                let arr_time = arr_dt.map(|dt| fmt_time(dt)).unwrap_or_else(|| "??:??".to_string());
 
-                let platform_info = platform.map(|p| format!(" Gl. {}", p)).unwrap_or_default();
-                println!(
-                    "      {} {} {}{} -> {} {}",
-                    dep_time.cyan(),
-                    line.bold(),
-                    dep_station,
-                    platform_info.dimmed(),
-                    arr_time.cyan(),
-                    arr_station,
-                );
+                // Show layover between legs
+                if let (Some(prev), Some(dep)) = (prev_arr_time, dep_dt) {
+                    let layover_min = (dep - prev).num_minutes();
+                    if layover_min > 0 {
+                        println!(
+                            "      {} {} min layover",
+                            "   ".dimmed(),
+                            layover_min,
+                        );
+                    }
+                }
+
+                if is_walking {
+                    let distance = leg["distance_meters"].as_i64();
+                    let dur = leg["duration_minutes"].as_i64().unwrap_or(0);
+                    let dist_str = distance.map(|d| {
+                        if d >= 1000 { format!("{:.1} km", d as f64 / 1000.0) }
+                        else { format!("{} m", d) }
+                    }).unwrap_or_default();
+                    println!(
+                        "      {} {} walk {} -> {}{}",
+                        dep_time.dimmed(),
+                        format!("{}min", dur).dimmed(),
+                        dep_station,
+                        arr_station,
+                        if !dist_str.is_empty() { format!(" ({})", dist_str).dimmed().to_string() } else { String::new() },
+                    );
+                } else {
+                    let line = leg["line"].as_str().unwrap_or("?");
+                    let platform = leg["platform"].as_str();
+                    let arr_platform = leg["arrival_platform"].as_str();
+                    let dep_plat = platform.map(|p| format!(" Gl. {}", p)).unwrap_or_default();
+                    let arr_plat = arr_platform.map(|p| format!(" Gl. {}", p)).unwrap_or_default();
+                    println!(
+                        "      {} {} {}{} -> {} {}{}",
+                        dep_time.cyan(),
+                        line.bold(),
+                        dep_station,
+                        dep_plat.dimmed(),
+                        arr_time.cyan(),
+                        arr_station,
+                        arr_plat.dimmed(),
+                    );
+                }
+                prev_arr_time = arr_dt;
             }
             let changes = journey["changes"].as_i64().unwrap_or(0);
             if changes > 0 {
@@ -5564,9 +5698,83 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     );
     println!(
         "    {} Depart from {}",
-        fmt_time(meeting_end).to_string().dimmed(),
+        if let Some(ref j) = return_journey {
+            j["departure_time"].as_str()
+                .and_then(|s| parse_iso_time(s))
+                .map(|dt| fmt_time(dt))
+                .unwrap_or_else(|| fmt_time(meeting_end))
+        } else {
+            fmt_time(meeting_end)
+        }.dimmed(),
         args.destination
     );
+
+    // Show transit legs for return journey
+    if let Some(ref journey) = return_journey {
+        if let Some(legs) = journey["legs"].as_array() {
+            let mut prev_arr_time: Option<chrono::NaiveDateTime> = None;
+            for leg in legs {
+                let is_walking = leg["walking"].as_bool().unwrap_or(false);
+                let dep_station = leg["departure_station"].as_str().unwrap_or("?");
+                let arr_station = leg["arrival_station"].as_str().unwrap_or("?");
+                let dep_dt = leg["departure_time"].as_str().and_then(|s| parse_iso_time(s));
+                let arr_dt = leg["arrival_time"].as_str().and_then(|s| parse_iso_time(s));
+                let dep_time = dep_dt.map(|dt| fmt_time(dt)).unwrap_or_else(|| "??:??".to_string());
+                let arr_time = arr_dt.map(|dt| fmt_time(dt)).unwrap_or_else(|| "??:??".to_string());
+
+                // Show layover between legs
+                if let (Some(prev), Some(dep)) = (prev_arr_time, dep_dt) {
+                    let layover_min = (dep - prev).num_minutes();
+                    if layover_min > 0 {
+                        println!(
+                            "      {} {} min layover",
+                            "   ".dimmed(),
+                            layover_min,
+                        );
+                    }
+                }
+
+                if is_walking {
+                    let distance = leg["distance_meters"].as_i64();
+                    let dur = leg["duration_minutes"].as_i64().unwrap_or(0);
+                    let dist_str = distance.map(|d| {
+                        if d >= 1000 { format!("{:.1} km", d as f64 / 1000.0) }
+                        else { format!("{} m", d) }
+                    }).unwrap_or_default();
+                    println!(
+                        "      {} {} walk {} -> {}{}",
+                        dep_time.dimmed(),
+                        format!("{}min", dur).dimmed(),
+                        dep_station,
+                        arr_station,
+                        if !dist_str.is_empty() { format!(" ({})", dist_str).dimmed().to_string() } else { String::new() },
+                    );
+                } else {
+                    let line = leg["line"].as_str().unwrap_or("?");
+                    let platform = leg["platform"].as_str();
+                    let arr_platform = leg["arrival_platform"].as_str();
+                    let dep_plat = platform.map(|p| format!(" Gl. {}", p)).unwrap_or_default();
+                    let arr_plat = arr_platform.map(|p| format!(" Gl. {}", p)).unwrap_or_default();
+                    println!(
+                        "      {} {} {}{} -> {} {}{}",
+                        dep_time.cyan(),
+                        line.bold(),
+                        dep_station,
+                        dep_plat.dimmed(),
+                        arr_time.cyan(),
+                        arr_station,
+                        arr_plat.dimmed(),
+                    );
+                }
+                prev_arr_time = arr_dt;
+            }
+            let changes = journey["changes"].as_i64().unwrap_or(0);
+            if changes > 0 {
+                println!("      ({} change{})", changes, if changes > 1 { "s" } else { "" });
+            }
+        }
+    }
+
     println!(
         "    {} Back at {}",
         fmt_time(arrive_back).yellow().bold(),
@@ -5707,45 +5915,13 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
             .unwrap_or_else(|| format!("Business Trip - {}", args.destination));
 
         // Build travel-to body with transit details if available
-        let travel_to_body = if let Some(ref journey) = outbound_journey {
-            let mut lines = Vec::new();
-            if let Some(legs) = journey["legs"].as_array() {
-                for leg in legs {
-                    let line_name = leg["line"].as_str().unwrap_or("?");
-                    let dep_station = leg["departure_station"].as_str().unwrap_or("?");
-                    let arr_station = leg["arrival_station"].as_str().unwrap_or("?");
-                    let dep_time = leg["departure_time"].as_str()
-                        .and_then(|s| parse_iso_time(s))
-                        .map(|dt| fmt_time(dt))
-                        .unwrap_or_else(|| "??:??".to_string());
-                    let arr_time = leg["arrival_time"].as_str()
-                        .and_then(|s| parse_iso_time(s))
-                        .map(|dt| fmt_time(dt))
-                        .unwrap_or_else(|| "??:??".to_string());
-                    let platform = leg["platform"].as_str();
-                    let plat_str = platform.map(|p| format!(" (Gl. {})", p)).unwrap_or_default();
-                    lines.push(format!(
-                        "{} {} {}{} -> {} {}",
-                        dep_time, line_name, dep_station, plat_str, arr_time, arr_station
-                    ));
-                }
-            }
-            Some(lines.join("\n"))
-        } else {
-            None
-        };
+        let travel_to_body = outbound_journey.as_ref().and_then(|j| journey_body(j));
 
-        // Travel-to subject with transit detail
+        // Travel-to subject with transit line names
         let travel_to_subject = if let Some(ref journey) = outbound_journey {
-            if let Some(legs) = journey["legs"].as_array() {
-                let train_names: Vec<&str> = legs.iter()
-                    .filter_map(|l| l["line"].as_str())
-                    .collect();
-                if !train_names.is_empty() {
-                    format!("Travel to {} ({})", args.destination, train_names.join(" + "))
-                } else {
-                    format!("Travel to {}", args.destination)
-                }
+            let names = journey_line_names(journey);
+            if !names.is_empty() {
+                format!("Travel to {} ({})", args.destination, names.join(" + "))
             } else {
                 format!("Travel to {}", args.destination)
             }
@@ -5792,19 +5968,34 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
         );
 
         // Travel back
-        let travel_back_payload = serde_json::json!({
-            "subject": format!("Travel from {}", args.destination),
+        let travel_back_body = return_journey.as_ref().and_then(|j| journey_body(j));
+        let travel_back_subject = if let Some(ref journey) = return_journey {
+            let names = journey_line_names(journey);
+            if !names.is_empty() {
+                format!("Travel from {} ({})", args.destination, names.join(" + "))
+            } else {
+                format!("Travel from {}", args.destination)
+            }
+        } else {
+            format!("Travel from {}", args.destination)
+        };
+
+        let mut travel_back_payload = serde_json::json!({
+            "subject": travel_back_subject,
             "start": fmt_datetime(meeting_end),
             "end": fmt_datetime(arrive_back),
             "location": dest_name,
         });
+        if let Some(body) = &travel_back_body {
+            travel_back_payload["body"] = serde_json::json!(body);
+        }
         client
             .calendar_create(&account, travel_back_payload)
             .map_err(|e| anyhow!("Failed to create travel-back event: {e}"))?;
         println!(
-            "  {} Created: Travel from {} ({}-{})",
+            "  {} Created: {} ({}-{})",
             "+".green().bold(),
-            args.destination,
+            travel_back_subject,
             fmt_time(meeting_end),
             fmt_time(arrive_back)
         );
