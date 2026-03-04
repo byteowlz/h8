@@ -2044,6 +2044,26 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
         ("sun", Weekday::Sun),
         ("sonntag", Weekday::Sun),
     ];
+
+    // 3a. Weekday + "next week" pattern (e.g., "friday next week", "next week friday")
+    let next_week_re = Regex::new(r"(?i)\b(next\s+week|nächste\s+woche|naechste\s+woche)\b").unwrap();
+    if next_week_re.is_match(&text_lower) {
+        for (name, weekday) in weekdays {
+            let pattern = format!(r"(?i)\b{}\b", regex::escape(name));
+            if Regex::new(&pattern).unwrap().is_match(&text_lower) {
+                // Calculate next week's occurrence of this weekday
+                // First find next Monday
+                let days_until_monday = (7 - now.weekday().num_days_from_monday()) % 7;
+                let days_until_monday = if days_until_monday == 0 { 7 } else { days_until_monday };
+                let next_monday = today + ChronoDuration::days(days_until_monday as i64);
+                // Then find the weekday within next week (0 = Monday, 6 = Sunday)
+                let target_offset = weekday.num_days_from_monday() as i64;
+                let target = next_monday + ChronoDuration::days(target_offset);
+                return Some((target, format!("{} next week", *name)));
+            }
+        }
+    }
+
     for (name, weekday) in weekdays {
         if text_lower == *name {
             let today_weekday = today.weekday();
