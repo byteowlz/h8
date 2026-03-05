@@ -2,46 +2,46 @@
   "todos": [
     {
       "id": "1",
-      "content": "Update DB HAFAS to use coordinates + arrival param for outbound",
+      "content": "Design ergonomic rule management CLI interface",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "2",
-      "content": "Add return journey query (departure after meeting_end)",
+      "content": "Implement Python service rules_oof.py module",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "3",
-      "content": "Include walking legs with distance in transit display",
+      "content": "Add API endpoints to service/__init__.py",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "4",
-      "content": "Show layover times between connections",
+      "content": "Implement Rust service client methods",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "5",
-      "content": "Pass coordinates through service API + Rust client",
+      "content": "Add CLI commands and handlers",
       "status": "completed",
       "priority": "high"
     },
     {
       "id": "6",
-      "content": "Update CLI display with full connection details",
+      "content": "Test and verify implementation",
       "status": "completed",
-      "priority": "high"
+      "priority": "medium"
     },
     {
-      "id": "7",
-      "content": "Test, commit, push",
+      "id": "59137228",
+      "content": "Implement h8 sync command to sync everything",
       "status": "completed",
       "priority": "high"
     }
   ],
-  "updated_at": "2026-03-02T15:03:21.099Z"
+  "updated_at": "2026-03-05T11:11:19.460Z"
 }
