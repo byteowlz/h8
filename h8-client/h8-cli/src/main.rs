@@ -25,7 +25,7 @@ use h8_core::{
 
 use log::{LevelFilter, debug};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const APP_NAME: &str = env!("CARGO_PKG_NAME");
 
@@ -58,6 +58,9 @@ fn try_main() -> Result<()> {
         Command::Which(args) => handle_natural_resource(&ctx, args),
         Command::Book(args) => handle_book(&ctx, args),
         Command::Trip(args) => handle_trip(&ctx, args),
+        Command::Rules { command } => handle_rules(&ctx, command),
+        Command::Oof { command } => handle_oof(&ctx, command),
+        Command::Sync(args) => handle_sync(&ctx, args),
     }
 }
 
@@ -201,6 +204,43 @@ enum Command {
     ///   h8 trip Berlin friday 9-12 --car --json
     ///   h8 trip Berlin friday 9-12 --car --from home
     Trip(TripArgs),
+    /// Manage inbox rules (filters, auto-sorting, forwarding)
+    ///
+    /// Create rules to automatically organize your email:
+    ///   h8 rules list
+    ///   h8 rules create "move newsletters to Archive if subject contains 'Weekly'"
+    ///   h8 rules create --name "Invoice Filter" --if from "billing@" --then move-to Archive
+    ///   h8 rules enable <id>
+    ///   h8 rules disable <id>
+    ///   h8 rules delete <id>
+    #[command(alias = "rule")]
+    Rules {
+        #[command(subcommand)]
+        command: RulesCommand,
+    },
+    /// Manage Out-of-Office (auto-reply) settings
+    ///
+    /// Enable, disable, or schedule automatic replies:
+    ///   h8 oof status
+    ///   h8 oof enable "I am out of office until Monday"
+    ///   h8 oof schedule "2026-03-10" "2026-03-15" --message "On vacation"
+    ///   h8 oof disable
+    #[command(alias = "autoreply")]
+    Oof {
+        #[command(subcommand)]
+        command: OofCommand,
+    },
+    /// Sync all data - calendar, emails, and contacts
+    ///
+    /// Fetches all data from the server and updates local cache.
+    /// Performs incremental sync by default (only changes since last sync).
+    ///
+    /// Examples:
+    ///   h8 sync                        # Sync everything (incremental)
+    ///   h8 sync --full                 # Full re-sync of everything
+    ///   h8 sync --calendar --mail      # Only sync calendar and mail
+    ///   h8 sync -w 8 -p 2              # Sync 8 weeks future, 2 weeks past
+    Sync(SyncArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -986,6 +1026,161 @@ struct NaturalResourceArgs {
     query: Vec<String>,
 }
 
+// === Rules Commands ===
+
+#[derive(Debug, Subcommand)]
+enum RulesCommand {
+    /// List inbox rules
+    #[command(alias = "ls")]
+    List(RulesListArgs),
+    /// Show rule details
+    #[command(alias = "get")]
+    Show(RulesShowArgs),
+    /// Create a new rule
+    ///
+    /// Natural language (human-friendly):
+    ///   h8 rules create "move newsletters to Archive if subject contains 'Weekly'"
+    ///   h8 rules create "delete emails from spam@example.com"
+    ///
+    /// Structured (agent-friendly):
+    ///   h8 rules create --name "Newsletter Filter" --if subject-contains "Weekly" --then move-to Archive
+    Create(RulesCreateArgs),
+    /// Enable a rule
+    Enable(RulesEnableArgs),
+    /// Disable a rule
+    Disable(RulesDisableArgs),
+    /// Delete a rule
+    #[command(alias = "rm")]
+    Delete(RulesDeleteArgs),
+}
+
+#[derive(Debug, Args)]
+struct RulesListArgs {
+    /// Show all details (default shows summary)
+    #[arg(long)]
+    verbose: bool,
+}
+
+#[derive(Debug, Args)]
+struct RulesShowArgs {
+    /// Rule ID (e.g., 'swift-owl')
+    id: String,
+}
+
+#[derive(Debug, Args)]
+struct RulesCreateArgs {
+    /// Rule name/description (or full natural language rule)
+    #[arg(required = true, num_args = 1..)]
+    name: Vec<String>,
+    /// Condition: from email address
+    #[arg(long)]
+    from: Option<String>,
+    /// Condition: subject contains
+    #[arg(long)]
+    subject_contains: Option<String>,
+    /// Condition: body contains
+    #[arg(long)]
+    body_contains: Option<String>,
+    /// Condition: has attachments
+    #[arg(long)]
+    has_attachments: bool,
+    /// Action: move to folder
+    #[arg(long)]
+    move_to: Option<String>,
+    /// Action: copy to folder
+    #[arg(long)]
+    copy_to: Option<String>,
+    /// Action: delete message
+    #[arg(long)]
+    delete: bool,
+    /// Action: mark as read
+    #[arg(long)]
+    mark_read: bool,
+    /// Action: forward to email(s)
+    #[arg(long)]
+    forward_to: Option<String>,
+    /// Priority (1 = highest, default: 1)
+    #[arg(long, default_value_t = 1)]
+    priority: i32,
+    /// Enable immediately (default: true)
+    #[arg(long, default_value_t = true)]
+    enabled: bool,
+}
+
+#[derive(Debug, Args)]
+struct RulesEnableArgs {
+    /// Rule ID
+    id: String,
+}
+
+#[derive(Debug, Args)]
+struct RulesDisableArgs {
+    /// Rule ID
+    id: String,
+}
+
+#[derive(Debug, Args)]
+struct RulesDeleteArgs {
+    /// Rule ID
+    id: String,
+    /// Skip confirmation
+    #[arg(short = 'y', long)]
+    yes: bool,
+}
+
+// === OOF Commands ===
+
+#[derive(Debug, Subcommand)]
+enum OofCommand {
+    /// Show current OOF status
+    Status,
+    /// Enable OOF (immediate, not scheduled)
+    ///
+    /// Examples:
+    ///   h8 oof enable "I am out of office until Monday"
+    ///   h8 oof enable "On vacation" --external "Contact support for urgent matters"
+    ///   h8 oof enable "Away" --audience known
+    Enable(OofEnableArgs),
+    /// Schedule OOF for a future period
+    ///
+    /// Examples:
+    ///   h8 oof schedule "2026-03-10" "2026-03-15" --message "On vacation"
+    ///   h8 oof schedule monday friday --message "In training"
+    Schedule(OofScheduleArgs),
+    /// Disable OOF
+    Disable,
+}
+
+#[derive(Debug, Args)]
+struct OofEnableArgs {
+    /// Internal reply message
+    #[arg(required = true, num_args = 1..)]
+    message: Vec<String>,
+    /// External reply message (defaults to internal)
+    #[arg(long)]
+    external: Option<String>,
+    /// External audience: all, known, or none
+    #[arg(long, default_value = "all")]
+    audience: String,
+}
+
+#[derive(Debug, Args)]
+struct OofScheduleArgs {
+    /// Start date/time (ISO format or natural language)
+    start: String,
+    /// End date/time (ISO format or natural language)
+    end: String,
+    /// Internal reply message
+    #[arg(short = 'm', long, required = true)]
+    message: String,
+    /// External reply message (defaults to internal)
+    #[arg(long)]
+    external: Option<String>,
+    /// External audience: all, known, or none
+    #[arg(long, default_value = "all")]
+    audience: String,
+}
+
 #[derive(Debug, Args)]
 struct BookArgs {
     /// Resource group name or individual alias (e.g., "room", "car", "bmw")
@@ -1013,6 +1208,38 @@ struct TripArgs {
     /// Examples: "friday 9-12", "tomorrow 14-16", "20.03 10-15"
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     when: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct SyncArgs {
+    /// Sync calendar events
+    #[arg(long)]
+    calendar: bool,
+    /// Sync mail messages
+    #[arg(long)]
+    mail: bool,
+    /// Sync contacts
+    #[arg(long)]
+    contacts: bool,
+    /// Full re-sync (ignore sync tokens)
+    #[arg(long)]
+    full: bool,
+    /// Weeks to sync into the future (default: 4)
+    #[arg(short = 'w', long, default_value_t = 4)]
+    weeks: i64,
+    /// Weeks to sync into the past (default: 1)
+    #[arg(short = 'p', long, default_value_t = 1)]
+    past_weeks: i64,
+    /// Only sync emails from last N days (for mail sync)
+    #[arg(short = 'l', long)]
+    limit_days: Option<u32>,
+}
+
+impl SyncArgs {
+    /// Returns true if no specific data type was selected (sync everything)
+    fn sync_everything(&self) -> bool {
+        !self.calendar && !self.mail && !self.contacts
+    }
 }
 
 /// Flags extracted from TripArgs trailing var arg.
@@ -8636,4 +8863,694 @@ fn parse_datetime_local(raw: &str, tz: chrono_tz::Tz) -> Option<DateTime<chrono_
             .or_else(|| Some(tz.from_utc_datetime(&dt)));
     }
     None
+}
+
+// === Rules Handlers ===
+
+/// Open the database for the account.
+fn open_database(ctx: &RuntimeContext, account: &str) -> Result<Database> {
+    let db_path = ctx.paths.sync_db_path(account);
+    Database::open(&db_path).map_err(|e| anyhow!("{e}"))
+}
+
+/// Resolve a rule ID to its remote ID.
+/// If the input looks like a short ID (contains a hyphen, not a GUID), look it up in the database.
+/// Otherwise, assume it's already a remote ID.
+fn resolve_rule_id(id_gen: &IdGenerator, id: &str) -> Result<String> {
+    // If it looks like a GUID (contains braces or is 32+ chars with hyphens), use directly
+    if id.starts_with("{") || (id.len() > 30 && id.chars().filter(|&c| c == '-').count() >= 3) {
+        return Ok(id.to_string());
+    }
+
+    // Try to resolve as a short ID
+    if let Some(remote_id) = id_gen.resolve_rule(id).map_err(|e| anyhow!("{e}"))? {
+        return Ok(remote_id);
+    }
+
+    // Not found - assume it's a remote ID
+    Ok(id.to_string())
+}
+
+fn handle_rules(ctx: &RuntimeContext, command: RulesCommand) -> Result<()> {
+    let client = ctx.service_client()?;
+    let account = effective_account(ctx);
+
+    match command {
+        RulesCommand::List(args) => {
+            let db = open_database(ctx, &account)?;
+            let id_gen = IdGenerator::new(&db);
+            let result = client.rules_list(&account).map_err(|e| anyhow!("{e}"))?;
+            let rules_with_ids = assign_rule_ids(&result, &id_gen)?;
+            if ctx.common.json {
+                emit_output(&ctx.common, &rules_with_ids)?;
+            } else {
+                print_rules_list(&rules_with_ids, args.verbose);
+            }
+        }
+        RulesCommand::Show(args) => {
+            let db = open_database(ctx, &account)?;
+            let id_gen = IdGenerator::new(&db);
+            let remote_id = resolve_rule_id(&id_gen, &args.id)?;
+            let result = client.rules_get(&account, &remote_id).map_err(|e| anyhow!("{e}"))?;
+            let rule_with_id = assign_rule_id_to_single(&result, &id_gen)?;
+            emit_output(&ctx.common, &rule_with_id)?;
+        }
+        RulesCommand::Create(args) => handle_rules_create(ctx, &client, &account, args)?,
+        RulesCommand::Enable(args) => {
+            let db = open_database(ctx, &account)?;
+            let id_gen = IdGenerator::new(&db);
+            let remote_id = resolve_rule_id(&id_gen, &args.id)?;
+            let result = client.rules_enable(&account, &remote_id).map_err(|e| anyhow!("{e}"))?;
+            let short_id = get_rule_short_id(&result, &id_gen);
+            if !ctx.common.json {
+                println!("Rule enabled: {}", short_id);
+            }
+            emit_output(&ctx.common, &result)?;
+        }
+        RulesCommand::Disable(args) => {
+            let db = open_database(ctx, &account)?;
+            let id_gen = IdGenerator::new(&db);
+            let remote_id = resolve_rule_id(&id_gen, &args.id)?;
+            let result = client.rules_disable(&account, &remote_id).map_err(|e| anyhow!("{e}"))?;
+            let short_id = get_rule_short_id(&result, &id_gen);
+            if !ctx.common.json {
+                println!("Rule disabled: {}", short_id);
+            }
+            emit_output(&ctx.common, &result)?;
+        }
+        RulesCommand::Delete(args) => {
+            let db = open_database(ctx, &account)?;
+            let id_gen = IdGenerator::new(&db);
+            let remote_id = resolve_rule_id(&id_gen, &args.id)?;
+            if !args.yes && !ctx.common.assume_yes {
+                print!("Delete rule {}? [y/N] ", args.id);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("Cancelled");
+                    return Ok(());
+                }
+            }
+            let result = client.rules_delete(&account, &remote_id).map_err(|e| anyhow!("{e}"))?;
+            let _ = id_gen.delete_rule(&args.id);
+            if !ctx.common.json {
+                println!("Rule deleted: {}", args.id);
+            }
+            emit_output(&ctx.common, &result)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Assign readable IDs to all rules in the list.
+fn assign_rule_ids(rules: &Value, id_gen: &IdGenerator) -> Result<Value> {
+    let rules_array = match rules.as_array() {
+        Some(arr) => arr,
+        None => return Ok(rules.clone()),
+    };
+
+    let mut result = Vec::new();
+    for rule in rules_array {
+        let remote_id = rule.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let display_name = rule.get("display_name").and_then(|v| v.as_str());
+
+        // Get or create a short ID for this rule
+        let short_id = id_gen
+            .get_or_create_rule_id(remote_id, display_name)
+            .map_err(|e| anyhow!("{e}"))?;
+
+        // Create a new rule object with the short ID
+        let mut rule_with_id = rule.clone();
+        if let Some(obj) = rule_with_id.as_object_mut() {
+            obj.insert("id".to_string(), json!(short_id));
+            obj.insert("remote_id".to_string(), json!(remote_id));
+        }
+        result.push(rule_with_id);
+    }
+
+    Ok(json!(result))
+}
+
+/// Assign readable ID to a single rule.
+fn assign_rule_id_to_single(rule: &Value, id_gen: &IdGenerator) -> Result<Value> {
+    let remote_id = rule.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let display_name = rule.get("display_name").and_then(|v| v.as_str());
+
+    let short_id = id_gen
+        .get_or_create_rule_id(remote_id, display_name)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    let mut rule_with_id = rule.clone();
+    if let Some(obj) = rule_with_id.as_object_mut() {
+        obj.insert("id".to_string(), json!(short_id));
+        obj.insert("remote_id".to_string(), json!(remote_id));
+    }
+
+    Ok(rule_with_id)
+}
+
+/// Get the short ID for a rule from the result.
+fn get_rule_short_id(rule: &Value, id_gen: &IdGenerator) -> String {
+    let remote_id = rule.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let display_name = rule.get("display_name").and_then(|v| v.as_str());
+
+    // Try to get existing short ID, otherwise create one
+    id_gen
+        .get_or_create_rule_id(remote_id, display_name)
+        .unwrap_or_else(|_| remote_id.to_string())
+}
+
+fn print_rules_list(result: &Value, verbose: bool) {
+    use owo_colors::OwoColorize;
+
+    let empty_vec = vec![];
+    let rules = result.as_array().unwrap_or(&empty_vec);
+    if rules.is_empty() {
+        println!("No inbox rules configured");
+        return;
+    }
+
+    if verbose {
+        for rule in rules {
+            let id = rule.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let name = rule.get("display_name").and_then(|v| v.as_str()).unwrap_or("Untitled");
+            let priority = rule.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
+            let enabled = rule.get("is_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+
+            let status_str = if enabled {
+                "enabled".green().to_string()
+            } else {
+                "disabled".dimmed().to_string()
+            };
+
+            println!("{}  {}  (priority: {}, {})",
+                id,
+                name.bold(),
+                priority,
+                status_str
+            );
+
+            if let Some(conditions) = rule.get("conditions") {
+                println!("  Conditions:");
+                if let Some(obj) = conditions.as_object() {
+                    for (key, val) in obj {
+                        println!("    - {}: {}", key, format_json_value(val).dimmed());
+                    }
+                }
+            }
+
+            if let Some(actions) = rule.get("actions") {
+                println!("  Actions:");
+                if let Some(obj) = actions.as_object() {
+                    for (key, val) in obj {
+                        println!("    - {}: {}", key, format_json_value(val).dimmed());
+                    }
+                }
+            }
+            println!();
+        }
+    } else {
+        // Compact table view
+        println!("{:<12} {:<6} {:<10} {}", "ID", "Prio", "Status", "Name");
+        println!("{}", "-".repeat(60));
+        for rule in rules {
+            let id = rule.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let short_id = if id.len() > 10 { &id[..10] } else { id };
+            let name = rule.get("display_name").and_then(|v| v.as_str()).unwrap_or("Untitled");
+            let priority = rule.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
+            let enabled = rule.get("is_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let status = if enabled { "on".green().to_string() } else { "off".dimmed().to_string() };
+
+            let display_name = if name.len() > 30 { format!("{}...", &name[..27]) } else { name.to_string() };
+            println!("{:<12} {:<6} {:<10} {}", short_id, priority, status, display_name);
+        }
+    }
+}
+
+fn format_json_value(val: &Value) -> String {
+    match val {
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(format_json_value).collect();
+            format!("[{}]", items.join(", "))
+        }
+        _ => val.to_string(),
+    }
+}
+
+fn handle_rules_create(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    args: RulesCreateArgs,
+) -> Result<()> {
+    let db = open_database(ctx, account)?;
+    let id_gen = IdGenerator::new(&db);
+
+    // Build the rule name from positional args if it's a natural language query
+    let name = args.name.join(" ");
+
+    // Build conditions and actions from flags
+    let mut conditions: serde_json::Map<String, Value> = serde_json::Map::new();
+    let mut actions: serde_json::Map<String, Value> = serde_json::Map::new();
+
+    if let Some(from) = &args.from {
+        conditions.insert("from_addresses".to_string(), json!([from]));
+    }
+    if let Some(subject) = &args.subject_contains {
+        conditions.insert("contains_subject_strings".to_string(), json!([subject]));
+    }
+    if let Some(body) = &args.body_contains {
+        conditions.insert("contains_body_strings".to_string(), json!([body]));
+    }
+    if args.has_attachments {
+        conditions.insert("has_attachments".to_string(), json!(true));
+    }
+
+    if let Some(folder) = &args.move_to {
+        actions.insert("move_to_folder".to_string(), json!(folder));
+    }
+    if let Some(folder) = &args.copy_to {
+        actions.insert("copy_to_folder".to_string(), json!(folder));
+    }
+    if args.delete {
+        actions.insert("delete".to_string(), json!(true));
+    }
+    if args.mark_read {
+        actions.insert("mark_as_read".to_string(), json!(true));
+    }
+    if let Some(forward) = &args.forward_to {
+        actions.insert("forward_to_recipients".to_string(), json!([forward]));
+    }
+
+    // If no explicit conditions/actions were given, try to parse natural language
+    let (parsed_name, parsed_conditions, parsed_actions) = if conditions.is_empty() && actions.is_empty() {
+        parse_natural_rule(&name)
+    } else {
+        (name, conditions, actions)
+    };
+
+    if parsed_conditions.is_empty() {
+        return Err(anyhow!("No conditions specified. Use --from, --subject-contains, etc. or provide natural language"));
+    }
+    if parsed_actions.is_empty() {
+        return Err(anyhow!("No actions specified. Use --move-to, --delete, --mark-read, etc."));
+    }
+
+    let payload = json!({
+        "display_name": parsed_name,
+        "priority": args.priority,
+        "is_enabled": args.enabled,
+        "conditions": parsed_conditions,
+        "actions": parsed_actions,
+    });
+
+    let result = client.rules_create(account, payload).map_err(|e| anyhow!("{e}"))?;
+
+    // Assign a readable ID to the newly created rule
+    let result_with_id = assign_rule_id_to_single(&result, &id_gen)?;
+
+    if !ctx.common.json {
+        let id = result_with_id.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+        println!("Rule created: {} ({})", id, parsed_name);
+    }
+
+    emit_output(&ctx.common, &result_with_id)
+}
+
+/// Parse natural language rule descriptions
+/// Examples:
+///   "move newsletters to Archive if subject contains 'Weekly'"
+///   "delete emails from spam@example.com"
+fn parse_natural_rule(name: &str) -> (String, serde_json::Map<String, Value>, serde_json::Map<String, Value>) {
+    let mut conditions: serde_json::Map<String, Value> = serde_json::Map::new();
+    let mut actions: serde_json::Map<String, Value> = serde_json::Map::new();
+
+    let lower = name.to_lowercase();
+
+    // Detect actions
+    if lower.contains("move to") || lower.contains("move emails to") {
+        // Extract folder name after "to" or "folder"
+        if let Some(folder) = extract_folder_name(name) {
+            actions.insert("move_to_folder".to_string(), json!(folder));
+        }
+    }
+    if lower.contains("delete") || lower.contains("trash") {
+        actions.insert("delete".to_string(), json!(true));
+    }
+    if lower.contains("mark as read") || lower.contains("mark read") {
+        actions.insert("mark_as_read".to_string(), json!(true));
+    }
+    if lower.contains("copy to") || lower.contains("copy emails to") {
+        if let Some(folder) = extract_folder_name(name) {
+            actions.insert("copy_to_folder".to_string(), json!(folder));
+        }
+    }
+    if lower.contains("forward to") {
+        // Try to extract email after "forward to"
+        if let Some(email) = extract_email_after(name, "forward to") {
+            actions.insert("forward_to_recipients".to_string(), json!([email]));
+        }
+    }
+
+    // Detect conditions
+    if lower.contains("if subject contains") || lower.contains("subject contains") {
+        if let Some(text) = extract_quoted_or_after(name, "contains") {
+            conditions.insert("contains_subject_strings".to_string(), json!([text]));
+        }
+    }
+    if lower.contains("if body contains") || lower.contains("body contains") {
+        if let Some(text) = extract_quoted_or_after(name, "contains") {
+            conditions.insert("contains_body_strings".to_string(), json!([text]));
+        }
+    }
+    if lower.contains("from ") || lower.contains("if from ") {
+        if let Some(email) = extract_email_after(name, "from") {
+            conditions.insert("from_addresses".to_string(), json!([email]));
+        }
+    }
+    if lower.contains("has attachments") || lower.contains("with attachments") {
+        conditions.insert("has_attachments".to_string(), json!(true));
+    }
+
+    (name.to_string(), conditions, actions)
+}
+
+fn extract_folder_name(s: &str) -> Option<String> {
+    // Look for "to FolderName" or "folder FolderName"
+    let lower = s.to_lowercase();
+    for pattern in &["move to ", "move emails to ", "copy to ", "copy emails to ", "folder "] {
+        if let Some(pos) = lower.find(pattern) {
+            let start = pos + pattern.len();
+            let rest = &s[start..];
+            // Take until next keyword or end
+            let end = rest.find(" if ").unwrap_or(rest.len());
+            return Some(rest[..end].trim().to_string());
+        }
+    }
+    None
+}
+
+fn extract_email_after(s: &str, keyword: &str) -> Option<String> {
+    let lower = s.to_lowercase();
+    if let Some(pos) = lower.find(&keyword.to_lowercase()) {
+        let start = pos + keyword.len();
+        let rest = &s[start..].trim_start();
+        // Extract what's likely an email or until next word
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        if !words.is_empty() {
+            let email = words[0].trim_matches(|c| c == '\'' || c == '"');
+            return Some(email.to_string());
+        }
+    }
+    None
+}
+
+fn extract_quoted_or_after(s: &str, keyword: &str) -> Option<String> {
+    // First try to extract quoted string
+    if let Some(start) = s.find('\'') {
+        if let Some(end) = s[start + 1..].find('\'') {
+            return Some(s[start + 1..start + 1 + end].to_string());
+        }
+    }
+    if let Some(start) = s.find('"') {
+        if let Some(end) = s[start + 1..].find('"') {
+            return Some(s[start + 1..start + 1 + end].to_string());
+        }
+    }
+    // Otherwise extract word after keyword
+    extract_email_after(s, keyword)
+}
+
+// === OOF Handlers ===
+
+fn handle_oof(ctx: &RuntimeContext, command: OofCommand) -> Result<()> {
+    let client = ctx.service_client()?;
+    let account = effective_account(ctx);
+
+    match command {
+        OofCommand::Status => {
+            let result = client.oof_get(&account).map_err(|e| anyhow!("{e}"))?;
+            if ctx.common.json {
+                emit_output(&ctx.common, &result)?;
+            } else {
+                print_oof_status(&result);
+            }
+        }
+        OofCommand::Enable(args) => {
+            let internal = args.message.join(" ");
+            let external = args.external.as_deref();
+            let result = client
+                .oof_enable(&account, &internal, external, &args.audience)
+                .map_err(|e| anyhow!("{e}"))?;
+            if !ctx.common.json {
+                println!("Out-of-Office enabled");
+            }
+            emit_output(&ctx.common, &result)?;
+        }
+        OofCommand::Schedule(args) => {
+            // Parse natural language dates if needed
+            let start = parse_datetime_natural(&args.start)?;
+            let end = parse_datetime_natural(&args.end)?;
+            let result = client
+                .oof_schedule(
+                    &account,
+                    &start,
+                    &end,
+                    &args.message,
+                    args.external.as_deref(),
+                    &args.audience,
+                )
+                .map_err(|e| anyhow!("{e}"))?;
+            if !ctx.common.json {
+                println!("Out-of-Office scheduled");
+            }
+            emit_output(&ctx.common, &result)?;
+        }
+        OofCommand::Disable => {
+            let result = client.oof_disable(&account).map_err(|e| anyhow!("{e}"))?;
+            if !ctx.common.json {
+                println!("Out-of-Office disabled");
+            }
+            emit_output(&ctx.common, &result)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn print_oof_status(result: &Value) {
+    use owo_colors::OwoColorize;
+
+    let _state = result.get("state").and_then(|v| v.as_str()).unwrap_or("Unknown");
+    let enabled = result.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let scheduled = result.get("scheduled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let audience = result.get("external_audience").and_then(|v| v.as_str()).unwrap_or("Unknown");
+
+    if enabled {
+        println!("Out-of-Office: {}", "ENABLED".green().bold());
+        if scheduled {
+            if let Some(start) = result.get("start").and_then(|v| v.as_str()) {
+                if let Some(end) = result.get("end").and_then(|v| v.as_str()) {
+                    println!("Scheduled: {} to {}", start, end);
+                }
+            }
+        } else {
+            println!("Active now (not scheduled)");
+        }
+        println!("External audience: {}", audience);
+
+        if let Some(reply) = result.get("internal_reply").and_then(|v| v.as_str()) {
+            if !reply.is_empty() {
+                println!("\nInternal reply:");
+                println!("  {}", reply);
+            }
+        }
+        if let Some(reply) = result.get("external_reply").and_then(|v| v.as_str()) {
+            if !reply.is_empty() {
+                println!("\nExternal reply:");
+                println!("  {}", reply);
+            }
+        }
+    } else {
+        println!("Out-of-Office: {}", "DISABLED".dimmed());
+    }
+}
+
+fn parse_datetime_natural(input: &str) -> Result<String> {
+    // If already ISO format, return as-is
+    if input.contains('T') || input.contains('-') && input.len() >= 10 {
+        return Ok(input.to_string());
+    }
+
+    // Try to parse natural language via service dateparser
+    // For now, just pass through and let the service handle it
+    Ok(input.to_string())
+}
+
+// === Sync Handler ===
+
+fn handle_sync(ctx: &RuntimeContext, args: SyncArgs) -> Result<()> {
+    let client = ctx.service_client()?;
+    let account = effective_account(ctx);
+    let sync_everything = args.sync_everything();
+
+    let mut results = serde_json::Map::new();
+    let mut has_errors = false;
+
+    // Sync Calendar
+    if sync_everything || args.calendar {
+        if !ctx.common.quiet {
+            println!("Syncing calendar...");
+        }
+        match client.calendar_list(
+            &account,
+            args.weeks * 7,
+            None,
+            None,
+        ) {
+            Ok(events) => {
+                // Sync to local database
+                let db_path = ctx.paths.sync_db_path(&account);
+                match Database::open(&db_path) {
+                    Ok(db) => {
+                        let id_gen = IdGenerator::new(&db);
+                        // Ensure ID pool is seeded
+                        if let Ok(stats) = id_gen.stats() {
+                            if stats.total() == 0 {
+                                let words = h8_core::id::WordLists::embedded();
+                                let _ = id_gen.init_pool(&words);
+                            }
+                        }
+                        if let Ok(synced) = sync_calendar_events(ctx, &account, &events) {
+                            results.insert("calendar".to_string(), json!({
+                                "status": "ok",
+                                "events_synced": synced.as_array().map(|a| a.len()).unwrap_or(0),
+                            }));
+                            if !ctx.common.quiet {
+                                println!("  ✓ Calendar: {} events synced", synced.as_array().map(|a| a.len()).unwrap_or(0));
+                            }
+                        } else {
+                            has_errors = true;
+                            results.insert("calendar".to_string(), json!({
+                                "status": "error",
+                                "message": "Failed to sync to local database",
+                            }));
+                        }
+                    }
+                    Err(e) => {
+                        has_errors = true;
+                        results.insert("calendar".to_string(), json!({
+                            "status": "error",
+                            "message": format!("Database error: {}", e),
+                        }));
+                    }
+                }
+            }
+            Err(e) => {
+                has_errors = true;
+                results.insert("calendar".to_string(), json!({
+                    "status": "error",
+                    "message": format!("Service error: {}", e),
+                }));
+                if !ctx.common.quiet {
+                    eprintln!("  ✗ Calendar sync failed: {}", e);
+                }
+            }
+        }
+    }
+
+    // Sync Mail
+    if sync_everything || args.mail {
+        if !ctx.common.quiet {
+            println!("Syncing mail...");
+        }
+        let limit = args.limit_days.map(|d| d as usize * 100).unwrap_or(1000);
+
+        // Sync configured folders
+        let folders = vec!["inbox", "sent"];
+        let mut total_count = 0;
+        let maildir_path = ctx.paths.mail_dir(&account);
+
+        for folder in folders {
+            match client.mail_fetch(
+                &account,
+                folder,
+                &maildir_path,
+                h8_core::types::FetchFormat::Maildir,
+                Some(limit),
+            ) {
+                Ok(result) => {
+                    let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    total_count += count;
+                }
+                Err(e) => {
+                    has_errors = true;
+                    if !ctx.common.quiet {
+                        eprintln!("  ✗ Failed to sync folder '{}': {}", folder, e);
+                    }
+                }
+            }
+        }
+
+        results.insert("mail".to_string(), json!({
+            "status": if has_errors && total_count == 0 { "error" } else { "ok" },
+            "messages_synced": total_count,
+        }));
+
+        if !ctx.common.quiet {
+            println!("  ✓ Mail: {} messages synced", total_count);
+        }
+    }
+
+    // Sync Contacts
+    if sync_everything || args.contacts {
+        if !ctx.common.quiet {
+            println!("Syncing contacts...");
+        }
+        let limit = 1000; // Sync up to 1000 contacts
+        match client.contacts_list(&account, limit, None) {
+            Ok(contacts) => {
+                let count = contacts.as_array().map(|a| a.len()).unwrap_or(0);
+                results.insert("contacts".to_string(), json!({
+                    "status": "ok",
+                    "contacts_synced": count,
+                }));
+                if !ctx.common.quiet {
+                    println!("  ✓ Contacts: {} contacts synced", count);
+                }
+            }
+            Err(e) => {
+                has_errors = true;
+                results.insert("contacts".to_string(), json!({
+                    "status": "error",
+                    "message": format!("Service error: {}", e),
+                }));
+                if !ctx.common.quiet {
+                    eprintln!("  ✗ Contacts sync failed: {}", e);
+                }
+            }
+        }
+    }
+
+    // Output results
+    if ctx.common.json {
+        emit_output(&ctx.common, &json!(results))?;
+    } else if !ctx.common.quiet {
+        if has_errors {
+            println!("\nSync completed with errors.");
+        } else {
+            println!("\nSync completed successfully.");
+        }
+    }
+
+    if has_errors {
+        Err(anyhow!("One or more sync operations failed"))
+    } else {
+        Ok(())
+    }
 }

@@ -24,7 +24,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 
-from h8 import auth, calendar, contacts, free, mail, people, resolve, resources
+from h8 import auth, calendar, contacts, free, mail, people, resolve, resources, rules_oof
 from h8.config import get_config, resolve_person_alias
 from exchangelib.errors import UnauthorizedError
 
@@ -183,6 +183,58 @@ class DraftUpdate(BaseModel):
         if isinstance(v, (list, tuple)):
             return list(v)
         raise ValueError("must be a string or list of strings")
+
+
+# === Rules and OOF Models ===
+
+
+class RuleCreate(BaseModel):
+    """Request model for creating an inbox rule."""
+
+    display_name: str
+    priority: int = 1
+    is_enabled: bool = True
+    conditions: Optional[Dict[str, Any]] = None
+    actions: Optional[Dict[str, Any]] = None
+
+
+class RuleUpdate(BaseModel):
+    """Request model for updating an inbox rule."""
+
+    display_name: Optional[str] = None
+    priority: Optional[int] = None
+    is_enabled: Optional[bool] = None
+    conditions: Optional[Dict[str, Any]] = None
+    actions: Optional[Dict[str, Any]] = None
+
+
+class OofSettings(BaseModel):
+    """Request model for setting OOF."""
+
+    state: str  # Enabled, Scheduled, or Disabled
+    external_audience: Optional[str] = "All"  # All, Known, or None
+    start: Optional[str] = None  # ISO datetime
+    end: Optional[str] = None  # ISO datetime
+    internal_reply: Optional[str] = None
+    external_reply: Optional[str] = None
+
+
+class OofEnable(BaseModel):
+    """Request model for enabling OOF."""
+
+    internal_reply: str
+    external_reply: Optional[str] = None
+    external_audience: str = "All"  # All, Known, or None
+
+
+class OofSchedule(BaseModel):
+    """Request model for scheduling OOF."""
+
+    start: str  # ISO datetime
+    end: str  # ISO datetime
+    internal_reply: str
+    external_reply: Optional[str] = None
+    external_audience: str = "All"  # All, Known, or None
 
 
 def current_account_email(requested: Optional[str]) -> str:
@@ -1303,6 +1355,156 @@ async def trip_route(payload: RouteRequest):
             for j in result.transit_journeys
         ]
     return response
+
+
+# === Rules and OOF Endpoints ===
+
+
+@app.get("/rules")
+async def rules_list(account: Optional[str] = None):
+    """List all inbox rules."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(rules_oof.list_rules, email, acct)
+
+
+@app.get("/rules/{rule_id}")
+async def rules_get(rule_id: str, account: Optional[str] = None):
+    """Get a specific rule by ID."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    result = await safe_call_with_retry(rules_oof.get_rule, email, acct, rule_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Rule '{rule_id}' not found")
+    return result
+
+
+@app.post("/rules")
+async def rules_create(payload: RuleCreate, account: Optional[str] = None):
+    """Create a new inbox rule."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        rules_oof.create_rule,
+        email,
+        acct,
+        payload.display_name,
+        payload.priority,
+        payload.is_enabled,
+        payload.conditions,
+        payload.actions,
+    )
+
+
+@app.put("/rules/{rule_id}")
+async def rules_update(
+    rule_id: str, payload: RuleUpdate, account: Optional[str] = None
+):
+    """Update an existing inbox rule."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        rules_oof.update_rule,
+        email,
+        acct,
+        rule_id,
+        payload.display_name,
+        payload.priority,
+        payload.is_enabled,
+        payload.conditions,
+        payload.actions,
+    )
+
+
+@app.post("/rules/{rule_id}/enable")
+async def rules_enable(rule_id: str, account: Optional[str] = None):
+    """Enable an inbox rule."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(rules_oof.enable_rule, email, acct, rule_id)
+
+
+@app.post("/rules/{rule_id}/disable")
+async def rules_disable(rule_id: str, account: Optional[str] = None):
+    """Disable an inbox rule."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(rules_oof.disable_rule, email, acct, rule_id)
+
+
+@app.delete("/rules/{rule_id}")
+async def rules_delete(rule_id: str, account: Optional[str] = None):
+    """Delete an inbox rule."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    await safe_call_with_retry(rules_oof.delete_rule, email, acct, rule_id)
+    return {"success": True, "id": rule_id}
+
+
+@app.get("/oof")
+async def oof_get(account: Optional[str] = None):
+    """Get Out-of-Office settings."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(rules_oof.get_oof_settings, email, acct)
+
+
+@app.put("/oof")
+async def oof_set(payload: OofSettings, account: Optional[str] = None):
+    """Set Out-of-Office settings."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        rules_oof.set_oof_settings,
+        email,
+        acct,
+        payload.state,
+        payload.external_audience,
+        payload.start,
+        payload.end,
+        payload.internal_reply,
+        payload.external_reply,
+    )
+
+
+@app.post("/oof/enable")
+async def oof_enable(payload: OofEnable, account: Optional[str] = None):
+    """Enable Out-of-Office (immediate, not scheduled)."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        rules_oof.enable_oof,
+        email,
+        acct,
+        payload.internal_reply,
+        payload.external_reply,
+        payload.external_audience,
+    )
+
+
+@app.post("/oof/schedule")
+async def oof_schedule(payload: OofSchedule, account: Optional[str] = None):
+    """Schedule Out-of-Office for a future period."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        rules_oof.schedule_oof,
+        email,
+        acct,
+        payload.start,
+        payload.end,
+        payload.internal_reply,
+        payload.external_reply,
+        payload.external_audience,
+    )
+
+
+@app.post("/oof/disable")
+async def oof_disable(account: Optional[str] = None):
+    """Disable Out-of-Office."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(rules_oof.disable_oof, email, acct)
 
 
 def main() -> None:

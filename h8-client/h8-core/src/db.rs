@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{OptionalExtension, params, Connection};
 
 use crate::error::{Error, Result};
 use crate::types::{AddressEntry, CalendarEventSync, FolderSync, MessageSync};
@@ -92,6 +92,15 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_calendar_start ON calendar_events(start);
             CREATE INDEX IF NOT EXISTS idx_addresses_name ON addresses(name);
             CREATE INDEX IF NOT EXISTS idx_addresses_send_count ON addresses(send_count DESC);
+
+            CREATE TABLE IF NOT EXISTS rules (
+                short_id TEXT PRIMARY KEY,
+                remote_id TEXT UNIQUE NOT NULL,
+                display_name TEXT,
+                assigned_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_rules_remote_id ON rules(remote_id);
             "#,
         )?;
 
@@ -726,6 +735,156 @@ impl Database {
             addresses.push(row?);
         }
         Ok(addresses)
+    }
+
+    // === Rules ID Management ===
+
+    /// Get or create a short ID for a rule.
+    /// If the rule already exists, returns its short ID.
+    /// Otherwise, generates a new short ID and stores the mapping.
+    pub fn get_or_create_rule_id(
+        &self,
+        remote_id: &str,
+        display_name: Option<&str>,
+        word_lists: &crate::id::WordLists,
+    ) -> Result<String> {
+        // Check if rule already has a short ID
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT short_id FROM rules WHERE remote_id = ?1",
+                params![remote_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+
+        // Generate a new short ID based on display_name or random words
+        let short_id = if let Some(name) = display_name {
+            self.generate_rule_id_from_name(name)
+        } else {
+            // Use random adjective-noun from word lists
+            let adj = word_lists
+                .adjectives
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("swift");
+            let noun = word_lists
+                .nouns
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("owl");
+            format!("{}-{}", adj, noun)
+        };
+
+        // Ensure uniqueness by appending a number if needed
+        let unique_id = self.ensure_unique_rule_id(&short_id)?;
+
+        self.conn.execute(
+            "INSERT INTO rules (short_id, remote_id, display_name, assigned_at) VALUES (?1, ?2, ?3, datetime('now'))",
+            params![&unique_id, remote_id, display_name],
+        )?;
+
+        Ok(unique_id)
+    }
+
+    /// Generate a rule ID from a display name (taking first letters or words)
+    fn generate_rule_id_from_name(&self, name: &str) -> String {
+        let lower = name.to_lowercase();
+        let words: Vec<&str> = lower.split_whitespace().collect();
+
+        if words.len() >= 2 {
+            // Take first 2 words, truncate to reasonable length
+            let first = words[0].trim_matches(|c: char| !c.is_alphanumeric());
+            let second = words[1].trim_matches(|c: char| !c.is_alphanumeric());
+            let first_short = &first[..first.len().min(8)];
+            let second_short = &second[..second.len().min(8)];
+            format!("{}-{}", first_short, second_short)
+        } else if words.len() == 1 {
+            // Single word - take first part and add common noun
+            let word = words[0].trim_matches(|c: char| !c.is_alphanumeric());
+            format!("{}-rule", &word[..word.len().min(10)])
+        } else {
+            "unnamed-rule".to_string()
+        }
+    }
+
+    /// Ensure rule ID is unique by appending -N if needed
+    fn ensure_unique_rule_id(&self, base_id: &str) -> Result<String> {
+        let mut id = base_id.to_string();
+        let mut counter = 1;
+
+        loop {
+            let exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM rules WHERE short_id = ?1",
+                    params![&id],
+                    |_| Ok(true),
+                )
+                .optional()?
+                .is_some();
+
+            if !exists {
+                return Ok(id);
+            }
+
+            counter += 1;
+            id = format!("{}-{}", base_id, counter);
+        }
+    }
+
+    /// Look up the remote ID for a rule short ID.
+    pub fn get_rule_remote_id(&self, short_id: &str) -> Result<Option<String>> {
+        let remote_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT remote_id FROM rules WHERE short_id = ?1",
+                params![short_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(remote_id)
+    }
+
+    /// Look up the short ID for a rule remote ID.
+    pub fn get_rule_short_id(&self, remote_id: &str) -> Result<Option<String>> {
+        let short_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT short_id FROM rules WHERE remote_id = ?1",
+                params![remote_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(short_id)
+    }
+
+    /// Delete a rule mapping.
+    pub fn delete_rule_mapping(&self, short_id: &str) -> Result<bool> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM rules WHERE short_id = ?1", params![short_id])?;
+        Ok(rows > 0)
+    }
+
+    /// List all rule mappings.
+    pub fn list_rule_mappings(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT short_id, remote_id FROM rules ORDER BY assigned_at")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut mappings = Vec::new();
+        for row in rows {
+            mappings.push(row?);
+        }
+        Ok(mappings)
     }
 }
 
