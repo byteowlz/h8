@@ -591,6 +591,83 @@ impl ServiceClient {
         )
     }
 
+    // === Rules and OOF ===
+
+    /// List inbox rules.
+    pub fn rules_list(&self, account: &str) -> Result<Value> {
+        let params = [("account", account)];
+        self.get("/rules", &params)
+    }
+
+    /// Get a specific rule by ID.
+    pub fn rules_get(&self, account: &str, rule_id: &str) -> Result<Value> {
+        let params = [("account", account)];
+        self.get(&format!("/rules/{}", rule_id), &params)
+    }
+
+    /// Create a new inbox rule.
+    pub fn rules_create(&self, account: &str, payload: Value) -> Result<Value> {
+        self.post_json(&format!("/rules?account={}", account), payload)
+    }
+
+    /// Update an existing inbox rule.
+    pub fn rules_update(&self, account: &str, rule_id: &str, payload: Value) -> Result<Value> {
+        self.put_json(&format!("/rules/{}?account={}", rule_id, account), payload)
+    }
+
+    /// Enable an inbox rule.
+    pub fn rules_enable(&self, account: &str, rule_id: &str) -> Result<Value> {
+        self.post_json(&format!("/rules/{}/enable?account={}", rule_id, account), serde_json::json!({}))
+    }
+
+    /// Disable an inbox rule.
+    pub fn rules_disable(&self, account: &str, rule_id: &str) -> Result<Value> {
+        self.post_json(&format!("/rules/{}/disable?account={}", rule_id, account), serde_json::json!({}))
+    }
+
+    /// Delete an inbox rule.
+    pub fn rules_delete(&self, account: &str, rule_id: &str) -> Result<Value> {
+        self.delete(&format!("/rules/{}?account={}", rule_id, account))
+    }
+
+    /// Get Out-of-Office settings.
+    pub fn oof_get(&self, account: &str) -> Result<Value> {
+        let params = [("account", account)];
+        self.get("/oof", &params)
+    }
+
+    /// Set Out-of-Office settings.
+    pub fn oof_set(&self, account: &str, payload: Value) -> Result<Value> {
+        self.put_json(&format!("/oof?account={}", account), payload)
+    }
+
+    /// Enable Out-of-Office (immediate).
+    pub fn oof_enable(&self, account: &str, internal_reply: &str, external_reply: Option<&str>, external_audience: &str) -> Result<Value> {
+        let payload = serde_json::json!({
+            "internal_reply": internal_reply,
+            "external_reply": external_reply,
+            "external_audience": external_audience,
+        });
+        self.post_json(&format!("/oof/enable?account={}", account), payload)
+    }
+
+    /// Schedule Out-of-Office for a future period.
+    pub fn oof_schedule(&self, account: &str, start: &str, end: &str, internal_reply: &str, external_reply: Option<&str>, external_audience: &str) -> Result<Value> {
+        let payload = serde_json::json!({
+            "start": start,
+            "end": end,
+            "internal_reply": internal_reply,
+            "external_reply": external_reply,
+            "external_audience": external_audience,
+        });
+        self.post_json(&format!("/oof/schedule?account={}", account), payload)
+    }
+
+    /// Disable Out-of-Office.
+    pub fn oof_disable(&self, account: &str) -> Result<Value> {
+        self.post_json(&format!("/oof/disable?account={}", account), serde_json::json!({}))
+    }
+
     // Internal HTTP methods
 
     fn get(&self, path: &str, params: &[(&str, &str)]) -> Result<Value> {

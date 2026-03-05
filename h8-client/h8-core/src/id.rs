@@ -96,6 +96,26 @@ impl<'a> IdGenerator<'a> {
             used: self.db.count_used_ids()?,
         })
     }
+
+    /// Get or create a short ID for a rule.
+    /// Uses the rule's display name to generate a readable ID.
+    pub fn get_or_create_rule_id(
+        &self,
+        remote_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<String> {
+        self.db.get_or_create_rule_id(remote_id, display_name, &WordLists::embedded())
+    }
+
+    /// Resolve a rule short ID to its remote ID.
+    pub fn resolve_rule(&self, short_id: &str) -> Result<Option<String>> {
+        self.db.get_rule_remote_id(short_id)
+    }
+
+    /// Delete a rule ID mapping.
+    pub fn delete_rule(&self, short_id: &str) -> Result<bool> {
+        self.db.delete_rule_mapping(short_id)
+    }
 }
 
 /// ID pool statistics.
