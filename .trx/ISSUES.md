@@ -1,5 +1,16 @@
 # Issues
 
+## Open
+
+### [trx-ds1g] feat: bulk unsubscribe from marketing emails (P1, feature)
+## Summary
+Add native bulk unsubscribe functionality to h8 mail command, allowing users to automatically extract and visit unsubscribe links from marketing emails.
+
+## Motivation
+Users receive hundreds of marketing emails with unsubscribe links buried in footers. Manually unsubscribing is tedious. A native h8 command would streamline inbox cleanup.
+...
+
+
 ## Closed
 
 - [trx-ybfm.2] Natural language resource queries (closed 2026-03-02)
