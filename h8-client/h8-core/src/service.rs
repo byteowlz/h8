@@ -180,6 +180,7 @@ impl ServiceClient {
     }
 
     /// Fetch messages to local storage.
+    /// Uses a 5-minute timeout since mail fetch can take a long time.
     pub fn mail_fetch(
         &self,
         account: &str,
@@ -195,7 +196,34 @@ impl ServiceClient {
             limit,
         };
         let payload = serde_json::to_value(&body)?;
-        self.post_json(&format!("/mail/fetch?account={}", account), payload)
+
+        // Use extended timeout for mail fetch (5 minutes)
+        let url = format!("{}{}", self.base_url, format!("/mail/fetch?account={}", account));
+        let http = Client::builder()
+            .timeout(Duration::from_secs(300)) // 5 minutes
+            .build()?;
+        let resp = http.post(&url).json(&payload).send()?;
+
+        let status = resp.status();
+        let text = resp.text()?;
+
+        if !status.is_success() {
+            if let Ok(val) = serde_json::from_str::<Value>(&text)
+                && let Some(detail) = val
+                    .as_object()
+                    .and_then(|m| m.get("detail"))
+                    .and_then(|d| d.as_str())
+            {
+                return Err(Error::Service(format!("service error: {}", detail)));
+            }
+            let snippet: String = text.chars().take(400).collect();
+            return Err(Error::Service(format!(
+                "service error ({}): {}",
+                status, snippet
+            )));
+        }
+
+        serde_json::from_str(&text).map_err(Into::into)
     }
 
     /// Save a draft to Exchange.
