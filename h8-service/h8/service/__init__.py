@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from h8 import auth, calendar, contacts, free, mail, people, resolve, resources, rules_oof
 from h8.config import get_config, resolve_person_alias
-from exchangelib.errors import UnauthorizedError
+from exchangelib.errors import UnauthorizedError, ErrorServerBusy
 
 log = logging.getLogger(__name__)
 
@@ -262,32 +262,49 @@ def refresh_ews_account(requested: Optional[str]):
 
 async def safe_call_with_retry(func, account_email: str, *args, **kwargs):
     """
-    Execute a function with automatic retry on UnauthorizedError.
+    Execute a function with automatic retry on UnauthorizedError or ErrorServerBusy.
 
     If an UnauthorizedError occurs, renews token via oama and retries once.
+    If ErrorServerBusy occurs, retries with exponential backoff.
     """
-    try:
-        return await run_in_threadpool(func, *args, **kwargs)
-    except UnauthorizedError as exc:
-        log.warning(
-            "UnauthorizedError for %s, renewing token and retrying...", account_email
-        )
+    max_retries = 3
+    base_delay = 2  # seconds
+
+    for attempt in range(max_retries):
         try:
-            # Renew via oama and refresh the account token
-            new_account = auth.renew_and_refresh_account(account_email)
-            # Replace the account argument if it's the first positional arg
-            if args and hasattr(args[0], "primary_smtp_address"):
-                args = (new_account,) + args[1:]
             return await run_in_threadpool(func, *args, **kwargs)
-        except UnauthorizedError:
-            log.error("Retry failed with UnauthorizedError for %s", account_email)
-            raise HTTPException(status_code=401, detail=f"Authentication failed: {exc}")
-        except Exception as retry_exc:
-            log.error("Retry failed with error: %s", retry_exc)
-            raise HTTPException(status_code=500, detail=str(retry_exc))
-    except Exception as exc:
-        log.error("Error in safe_call: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        except UnauthorizedError as exc:
+            log.warning(
+                "UnauthorizedError for %s, renewing token and retrying...", account_email
+            )
+            try:
+                # Renew via oama and refresh the account token
+                new_account = auth.renew_and_refresh_account(account_email)
+                # Replace the account argument if it's the first positional arg
+                if args and hasattr(args[0], "primary_smtp_address"):
+                    args = (new_account,) + args[1:]
+                return await run_in_threadpool(func, *args, **kwargs)
+            except UnauthorizedError:
+                log.error("Retry failed with UnauthorizedError for %s", account_email)
+                raise HTTPException(status_code=401, detail=f"Authentication failed: {exc}")
+            except Exception as retry_exc:
+                log.error("Retry failed with error: %s", retry_exc)
+                raise HTTPException(status_code=500, detail=str(retry_exc))
+        except ErrorServerBusy as exc:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                log.warning(
+                    "Server busy for %s, retrying in %ds (attempt %d/%d)...",
+                    account_email, delay, attempt + 1, max_retries
+                )
+                await asyncio.sleep(delay)
+                continue
+            else:
+                log.error("Server busy retries exhausted for %s", account_email)
+                raise HTTPException(status_code=503, detail=f"Exchange server busy, please try again later: {exc}")
+        except Exception as exc:
+            log.error("Error in safe_call: %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
 
 
 async def safe_call(func, *args, **kwargs):
