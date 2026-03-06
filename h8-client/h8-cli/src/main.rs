@@ -1058,7 +1058,7 @@ enum RulesCommand {
 struct RulesListArgs {
     /// Show all details (default shows summary)
     #[arg(long)]
-    verbose: bool,
+    detailed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -8904,7 +8904,7 @@ fn handle_rules(ctx: &RuntimeContext, command: RulesCommand) -> Result<()> {
             if ctx.common.json {
                 emit_output(&ctx.common, &rules_with_ids)?;
             } else {
-                print_rules_list(&rules_with_ids, args.verbose);
+                print_rules_list(&rules_with_ids, args.detailed);
             }
         }
         RulesCommand::Show(args) => {
