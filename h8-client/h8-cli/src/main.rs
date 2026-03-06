@@ -9469,41 +9469,58 @@ fn handle_sync(ctx: &RuntimeContext, args: SyncArgs) -> Result<()> {
         if !ctx.common.quiet {
             println!("Syncing mail...");
         }
-        let limit = args.limit_days.map(|d| d as usize * 100).unwrap_or(1000);
+        let limit = args.limit_days.map(|d| d as usize * 10).unwrap_or(50);
 
-        // Sync configured folders
+        // Sync mail metadata (not full content) from configured folders
         let folders = vec!["inbox", "sent"];
-        let mut total_count = 0;
-        let maildir_path = ctx.paths.mail_dir(&account);
+        let mut total_count: usize = 0;
+        let mut mail_errors = false;
 
-        for folder in folders {
-            match client.mail_fetch(
-                &account,
-                folder,
-                &maildir_path,
-                h8_core::types::FetchFormat::Maildir,
-                Some(limit),
-            ) {
-                Ok(result) => {
-                    let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    total_count += count;
+        let db_path = ctx.paths.sync_db_path(&account);
+        let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+        let id_gen = IdGenerator::new(&db);
+
+        // Ensure ID pool is seeded
+        if let Ok(stats) = id_gen.stats() {
+            if stats.total() == 0 {
+                let words = h8_core::id::WordLists::embedded();
+                let _ = id_gen.init_pool(&words);
+            }
+        }
+
+        for folder in &folders {
+            match client.mail_list(&account, folder, limit, false) {
+                Ok(messages) => {
+                    if let Some(msgs) = messages.as_array() {
+                        for msg in msgs {
+                            let remote_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            if remote_id.is_empty() { continue; }
+
+                            // Assign readable ID if not already assigned
+                            let _ = id_gen.allocate(remote_id);
+                        }
+                        total_count += msgs.len();
+                        if !ctx.common.quiet {
+                            println!("  ✓ {}: {} messages", folder, msgs.len());
+                        }
+                    }
                 }
                 Err(e) => {
-                    has_errors = true;
+                    mail_errors = true;
                     if !ctx.common.quiet {
-                        eprintln!("  ✗ Failed to sync folder '{}': {}", folder, e);
+                        eprintln!("  ✗ Failed to sync '{}': {}", folder, e);
                     }
                 }
             }
         }
 
         results.insert("mail".to_string(), json!({
-            "status": if has_errors && total_count == 0 { "error" } else { "ok" },
+            "status": if mail_errors && total_count == 0 { "error" } else { "ok" },
             "messages_synced": total_count,
         }));
 
-        if !ctx.common.quiet {
-            println!("  ✓ Mail: {} messages synced", total_count);
+        if mail_errors {
+            has_errors = true;
         }
     }
 
