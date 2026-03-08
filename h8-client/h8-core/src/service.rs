@@ -696,6 +696,50 @@ impl ServiceClient {
         self.post_json(&format!("/oof/disable?account={}", account), serde_json::json!({}))
     }
 
+    // === Unsubscribe ===
+
+    /// Scan messages for unsubscribe links (dry run).
+    pub fn mail_unsubscribe_scan(
+        &self,
+        account: &str,
+        folder: &str,
+        sender: Option<&str>,
+        search: Option<&str>,
+        limit: usize,
+        safe_senders: &[String],
+        blocked_patterns: &[String],
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "folder": folder,
+            "sender": sender,
+            "search": search,
+            "limit": limit,
+            "safe_senders": safe_senders,
+            "blocked_patterns": blocked_patterns,
+        });
+        self.post_json(&format!("/mail/unsubscribe/scan?account={}", account), payload)
+    }
+
+    /// Execute unsubscribe for given message IDs.
+    pub fn mail_unsubscribe_execute(
+        &self,
+        account: &str,
+        item_ids: &[String],
+        safe_senders: &[String],
+        blocked_patterns: &[String],
+        trusted_domains: &[String],
+        rate_limit_seconds: f64,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "item_ids": item_ids,
+            "safe_senders": safe_senders,
+            "blocked_patterns": blocked_patterns,
+            "trusted_domains": trusted_domains,
+            "rate_limit_seconds": rate_limit_seconds,
+        });
+        self.post_json(&format!("/mail/unsubscribe/execute?account={}", account), payload)
+    }
+
     // Internal HTTP methods
 
     fn get(&self, path: &str, params: &[(&str, &str)]) -> Result<Value> {

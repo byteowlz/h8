@@ -469,6 +469,18 @@ enum MailCommand {
     EmptyFolder(MailEmptyFolderArgs),
     /// Mark message(s) as spam/junk
     Spam(MailSpamArgs),
+    /// Bulk unsubscribe from marketing emails
+    ///
+    /// Scans messages for unsubscribe links (List-Unsubscribe header + body patterns),
+    /// then visits them to unsubscribe. Dry run by default -- use --execute to act.
+    ///
+    /// Examples:
+    ///   h8 mail unsubscribe --from newsletter@example.com
+    ///   h8 mail unsubscribe --search "Weekly Digest" --dry-run
+    ///   h8 mail unsubscribe --from marketing@ --execute
+    ///   h8 mail unsubscribe --all --limit 100 --json
+    #[command(alias = "unsub")]
+    Unsubscribe(MailUnsubscribeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -834,6 +846,31 @@ struct MailSpamArgs {
     /// Only mark, don't move to junk/inbox folder
     #[arg(long)]
     no_move: bool,
+}
+
+#[derive(Debug, Args)]
+struct MailUnsubscribeArgs {
+    /// Target specific sender (substring match, e.g., "newsletter@" or "marketing")
+    #[arg(long)]
+    from: Option<String>,
+    /// Search for emails matching subject term
+    #[arg(long)]
+    search: Option<String>,
+    /// Scan all emails in inbox
+    #[arg(long)]
+    all: bool,
+    /// Actually perform unsubscribes (default is dry run / scan only)
+    #[arg(long)]
+    execute: bool,
+    /// Maximum emails to process
+    #[arg(short = 'l', long, default_value_t = 50)]
+    limit: usize,
+    /// Folder to scan
+    #[arg(short = 'f', long, default_value = "inbox")]
+    folder: String,
+    /// Save results to JSON file
+    #[arg(short = 'o', long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2771,6 +2808,7 @@ fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
         MailCommand::Attachments(args) => handle_mail_attachments(ctx, &client, &account, args),
         MailCommand::EmptyFolder(args) => handle_mail_empty_folder(ctx, &client, &account, args),
         MailCommand::Spam(args) => handle_mail_spam(ctx, &client, &account, args),
+        MailCommand::Unsubscribe(args) => handle_mail_unsubscribe(ctx, &client, &account, args),
     }
 }
 
@@ -4133,6 +4171,207 @@ fn handle_mail_spam(
             "Marked {} message(s) as {}",
             success_count, action
         );
+    }
+
+    Ok(())
+}
+
+fn handle_mail_unsubscribe(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    args: MailUnsubscribeArgs,
+) -> Result<()> {
+    // Validate: must have --from, --search, or --all
+    if args.from.is_none() && args.search.is_none() && !args.all {
+        return Err(anyhow!(
+            "specify --from <sender>, --search <term>, or --all to select messages"
+        ));
+    }
+
+    let unsub_config = &ctx.config.unsubscribe;
+    let limit = std::cmp::min(args.limit, unsub_config.max_emails_per_run);
+
+    // Step 1: Scan for unsubscribe links
+    if !ctx.common.quiet {
+        if args.execute {
+            println!("Scanning and unsubscribing from emails...\n");
+        } else {
+            println!("Scanning for unsubscribe links (dry run)...\n");
+        }
+    }
+
+    let scan_results = client
+        .mail_unsubscribe_scan(
+            account,
+            &args.folder,
+            args.from.as_deref(),
+            args.search.as_deref(),
+            limit,
+            &unsub_config.safe_senders,
+            &unsub_config.blocked_patterns,
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+
+    let results_array = scan_results
+        .as_array()
+        .ok_or_else(|| anyhow!("expected array from scan"))?;
+
+    if results_array.is_empty() {
+        println!("No matching messages found.");
+        return Ok(());
+    }
+
+    // Collect messages that have unsubscribe links
+    let with_links: Vec<&Value> = results_array
+        .iter()
+        .filter(|r| {
+            r.get("status").and_then(|s| s.as_str()) == Some("found")
+        })
+        .collect();
+
+    let no_links: Vec<&Value> = results_array
+        .iter()
+        .filter(|r| {
+            r.get("status").and_then(|s| s.as_str()) == Some("no_link")
+        })
+        .collect();
+
+    let skipped: Vec<&Value> = results_array
+        .iter()
+        .filter(|r| {
+            r.get("status").and_then(|s| s.as_str()) == Some("skipped")
+        })
+        .collect();
+
+    if !ctx.common.json && !ctx.common.yaml {
+        println!(
+            "Scanned {} message(s): {} with unsubscribe links, {} without, {} skipped (safe sender)\n",
+            results_array.len(),
+            with_links.len(),
+            no_links.len(),
+            skipped.len(),
+        );
+
+        // Show scan results
+        for result in results_array {
+            let sender = result.get("sender").and_then(|v| v.as_str()).unwrap_or("?");
+            let subject = result.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
+            let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+            let link_count = result
+                .get("links")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+
+            let status_indicator = match status {
+                "found" => format!("[{} link(s)]", link_count),
+                "no_link" => "[no link]".to_string(),
+                "skipped" => "[safe sender]".to_string(),
+                other => format!("[{}]", other),
+            };
+
+            println!("  {} {} - {}", status_indicator, sender, subject);
+        }
+        println!();
+    }
+
+    // Step 2: Execute if requested
+    if args.execute && !with_links.is_empty() {
+        let item_ids: Vec<String> = with_links
+            .iter()
+            .filter_map(|r| {
+                r.get("message_id").and_then(|v| v.as_str()).map(String::from)
+            })
+            .collect();
+
+        if !ctx.common.quiet {
+            println!("Executing unsubscribe for {} message(s)...\n", item_ids.len());
+        }
+
+        let exec_results = client
+            .mail_unsubscribe_execute(
+                account,
+                &item_ids,
+                &unsub_config.safe_senders,
+                &unsub_config.blocked_patterns,
+                &unsub_config.trusted_unsubscribe_domains,
+                unsub_config.rate_limit_seconds,
+            )
+            .map_err(|e| anyhow!("{e}"))?;
+
+        if ctx.common.json || ctx.common.yaml {
+            emit_output(&ctx.common, &exec_results)?;
+        } else {
+            let empty_vec = Vec::new();
+            let exec_array = exec_results.as_array().unwrap_or(&empty_vec);
+            let mut success = 0;
+            let mut failed = 0;
+            let mut needs_confirm = 0;
+
+            for result in exec_array.iter() {
+                let sender = result.get("sender").and_then(|v| v.as_str()).unwrap_or("?");
+                let subject = result
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no subject)");
+                let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                let error = result.get("error").and_then(|v| v.as_str());
+
+                match status {
+                    "success" => {
+                        success += 1;
+                        println!("  [OK] {} - {}", sender, subject);
+                    }
+                    "needs_confirmation" => {
+                        needs_confirm += 1;
+                        let detail = error.unwrap_or("needs manual confirmation");
+                        println!("  [CONFIRM] {} - {} ({})", sender, subject, detail);
+                    }
+                    "skipped" => {
+                        println!("  [SKIP] {} - {}", sender, subject);
+                    }
+                    _ => {
+                        failed += 1;
+                        let detail = error.unwrap_or("unknown error");
+                        println!("  [FAIL] {} - {} ({})", sender, subject, detail);
+                    }
+                }
+            }
+
+            println!(
+                "\nResults: {} success, {} need confirmation, {} failed",
+                success, needs_confirm, failed
+            );
+        }
+
+        // Save to output file if requested
+        if let Some(ref output_path) = args.output {
+            let json = serde_json::to_string_pretty(&exec_results)?;
+            fs::write(output_path, json)?;
+            if !ctx.common.quiet {
+                println!("Results saved to {}", output_path.display());
+            }
+        }
+    } else if !args.execute {
+        // Dry run output
+        if ctx.common.json || ctx.common.yaml {
+            emit_output(&ctx.common, &scan_results)?;
+        } else if !with_links.is_empty() {
+            println!(
+                "Use --execute to unsubscribe from {} message(s).",
+                with_links.len()
+            );
+        }
+
+        // Save scan results to output file if requested
+        if let Some(ref output_path) = args.output {
+            let json = serde_json::to_string_pretty(&scan_results)?;
+            fs::write(output_path, json)?;
+            if !ctx.common.quiet {
+                println!("Scan results saved to {}", output_path.display());
+            }
+        }
     }
 
     Ok(())
