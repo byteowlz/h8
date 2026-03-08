@@ -175,6 +175,37 @@ impl TripConfig {
     }
 }
 
+/// Unsubscribe configuration for bulk email unsubscribe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UnsubscribeConfig {
+    /// Safe senders - never unsubscribe from these (substring match).
+    pub safe_senders: Vec<String>,
+    /// Auto-approve patterns - trust these domains for auto-confirm.
+    pub trusted_unsubscribe_domains: Vec<String>,
+    /// Block patterns - never visit these domains.
+    pub blocked_patterns: Vec<String>,
+    /// Default to dry run (require --execute to actually unsubscribe).
+    pub default_dry_run: bool,
+    /// Seconds to wait between HTTP requests.
+    pub rate_limit_seconds: f64,
+    /// Maximum emails to process per run.
+    pub max_emails_per_run: usize,
+}
+
+impl Default for UnsubscribeConfig {
+    fn default() -> Self {
+        Self {
+            safe_senders: Vec::new(),
+            trusted_unsubscribe_domains: Vec::new(),
+            blocked_patterns: Vec::new(),
+            default_dry_run: true,
+            rate_limit_seconds: 2.0,
+            max_emails_per_run: 50,
+        }
+    }
+}
+
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -196,6 +227,9 @@ pub struct AppConfig {
     /// Trip planning configuration.
     #[serde(default)]
     pub trip: TripConfig,
+    /// Unsubscribe configuration.
+    #[serde(default)]
+    pub unsubscribe: UnsubscribeConfig,
     /// People aliases (name -> email).
     #[serde(default)]
     pub people: std::collections::HashMap<String, String>,
@@ -214,6 +248,7 @@ impl Default for AppConfig {
             mail: MailConfig::default(),
             calendar: CalendarConfig::default(),
             trip: TripConfig::default(),
+            unsubscribe: UnsubscribeConfig::default(),
             people: std::collections::HashMap::new(),
             resources: std::collections::HashMap::new(),
         }

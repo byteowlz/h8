@@ -17,6 +17,7 @@ h8-service/           Python FastAPI (exchangelib for EWS, routing APIs)
   h8/resolve.py       EWS ResolveNames for GAL search + email validation
   h8/resources.py     Resource availability via EWS
   h8/routing.py       Geocoding (Nominatim), car routing (OSRM), transit (DB HAFAS)
+  h8/unsubscribe.py   Bulk unsubscribe: link extraction, HTTP visiting
   h8/service/__init__.py  FastAPI routes (add endpoints here)
 
 h8-client/            Rust workspace
@@ -83,6 +84,7 @@ flags from the captured words. Use `strip_global_flags()` for global flags. For 
 | `h8 mail compose` | Create draft in editor |
 | `h8 mail reply <id> [--all]` | Reply to message |
 | `h8 mail send <id>` | Send draft |
+| `h8 mail unsubscribe [OPTIONS]` | Bulk unsubscribe from marketing emails |
 | `h8 cal show [when]` | Show events (today, tomorrow, friday, kw30, next week) |
 | `h8 cal add "fri 2pm Meeting"` | Natural language event creation |
 | `h8 contacts list [-s search]` | List/search contacts |
@@ -117,6 +119,7 @@ flags from the captured words. Use `strip_global_flags()` for global flags. For 
 | `[resources.<group>]` | Bookable resource groups (cars, rooms, etc.) |
 | `[trip]` | Default origin, buffer, routing providers, country |
 | `[trip.locations.<alias>]` | Named locations with coordinates and station |
+| `[unsubscribe]` | Safe senders, trusted domains, rate limiting |
 
 ## Routing Providers
 
