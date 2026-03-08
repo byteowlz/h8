@@ -24,7 +24,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 
-from h8 import auth, calendar, contacts, free, mail, people, resolve, resources, rules_oof
+from h8 import auth, calendar, contacts, free, mail, people, resolve, resources, rules_oof, unsubscribe
 from h8.config import get_config, resolve_person_alias
 from exchangelib.errors import UnauthorizedError, ErrorServerBusy
 
@@ -1522,6 +1522,102 @@ async def oof_disable(account: Optional[str] = None):
     email = current_account_email(account)
     acct = auth.get_account(email)
     return await safe_call_with_retry(rules_oof.disable_oof, email, acct)
+
+
+# === Unsubscribe Endpoints ===
+
+
+class UnsubscribeScan(BaseModel):
+    """Request model for scanning messages for unsubscribe links."""
+
+    folder: str = "inbox"
+    sender: Optional[str] = None
+    search: Optional[str] = None
+    limit: int = 50
+    safe_senders: List[str] = Field(default_factory=list)
+    blocked_patterns: List[str] = Field(default_factory=list)
+
+    @field_validator("safe_senders", "blocked_patterns", mode="before")
+    @classmethod
+    def _coerce_list(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v]
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        raise ValueError("must be a string or list of strings")
+
+
+class UnsubscribeExecute(BaseModel):
+    """Request model for executing unsubscribes."""
+
+    item_ids: List[str]
+    safe_senders: List[str] = Field(default_factory=list)
+    blocked_patterns: List[str] = Field(default_factory=list)
+    trusted_domains: List[str] = Field(default_factory=list)
+    rate_limit_seconds: float = 2.0
+
+    @field_validator(
+        "item_ids", "safe_senders", "blocked_patterns", "trusted_domains",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_list(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v]
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        raise ValueError("must be a string or list of strings")
+
+
+@app.post("/mail/unsubscribe/scan")
+async def mail_unsubscribe_scan(
+    payload: UnsubscribeScan, account: Optional[str] = None
+):
+    """Scan messages for unsubscribe links (dry run).
+
+    Returns a list of messages with discovered unsubscribe links.
+    Does NOT visit any URLs - safe to call repeatedly.
+    """
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        unsubscribe.scan_messages,
+        email,
+        acct,
+        payload.folder,
+        payload.sender,
+        payload.search,
+        payload.limit,
+        payload.safe_senders,
+        payload.blocked_patterns,
+    )
+
+
+@app.post("/mail/unsubscribe/execute")
+async def mail_unsubscribe_execute(
+    payload: UnsubscribeExecute, account: Optional[str] = None
+):
+    """Execute unsubscribe for the given message IDs.
+
+    Visits unsubscribe URLs and reports results.
+    This actually performs the unsubscribe action.
+    """
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        unsubscribe.execute_unsubscribe,
+        email,
+        acct,
+        payload.item_ids,
+        payload.safe_senders,
+        payload.blocked_patterns,
+        payload.trusted_domains,
+        payload.rate_limit_seconds,
+    )
 
 
 def main() -> None:

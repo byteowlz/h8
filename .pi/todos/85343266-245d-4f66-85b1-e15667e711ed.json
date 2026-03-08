@@ -1,0 +1,59 @@
+{
+  "todos": [
+    {
+      "id": "1",
+      "content": "Python: Add unsubscribe functions in h8-service/h8/unsubscribe.py",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "content": "Python: Add unsubscribe API endpoints in h8/service/__init__.py",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "3",
+      "content": "Rust: Add UnsubscribeConfig to AppConfig in h8-core/src/config.rs",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "4",
+      "content": "Rust: Add unsubscribe service client methods in h8-core/src/service.rs",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "5",
+      "content": "Rust: Add MailCommand::Unsubscribe and CLI handler in h8-cli/src/main.rs",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "6",
+      "content": "Add httpx dependency for visiting unsubscribe URLs (already in deps)",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "7",
+      "content": "Remote build and fix errors",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "8",
+      "content": "Update AGENTS.md CLI commands table",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "9",
+      "content": "Close trx issue",
+      "status": "completed",
+      "priority": "medium"
+    }
+  ],
+  "updated_at": "2026-03-05T16:14:37.633Z"
+}
