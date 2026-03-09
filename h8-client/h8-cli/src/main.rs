@@ -2939,6 +2939,40 @@ fn handle_mail_search(
         );
     }
 
+    // Resolve remote IDs to readable short IDs
+    let db_path = ctx.paths.sync_db_path(account);
+    if db_path.exists() {
+        let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+        let id_gen = IdGenerator::new(&db);
+
+        if let Some(msgs) = messages.as_array() {
+            let resolved: Vec<Value> = msgs.iter().map(|msg| {
+                let mut m = msg.clone();
+                if let Some(remote_id) = msg.get("id").and_then(|v| v.as_str()) {
+                    // Try existing short ID from id_pool, or from messages table,
+                    // or allocate a new one
+                    let short_id = db
+                        .get_id_by_remote(remote_id)
+                        .ok()
+                        .flatten()
+                        .or_else(|| {
+                            db.get_message_by_remote_id(remote_id)
+                                .ok()
+                                .flatten()
+                                .map(|m| m.local_id)
+                        })
+                        .or_else(|| id_gen.allocate(remote_id).ok());
+                    if let Some(sid) = short_id {
+                        m.as_object_mut().unwrap().insert("id".to_string(), json!(sid));
+                    }
+                }
+                m
+            }).collect();
+            emit_output(&ctx.common, &json!(resolved))?;
+            return Ok(());
+        }
+    }
+
     emit_output(&ctx.common, &messages)?;
     Ok(())
 }
