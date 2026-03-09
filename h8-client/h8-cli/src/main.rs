@@ -3765,9 +3765,6 @@ fn handle_mail_sync(
     account: &str,
     args: MailSyncArgs,
 ) -> Result<()> {
-    let mail_dir = get_mail_dir(ctx, account)?;
-    mail_dir.init().map_err(|e| anyhow!("{e}"))?;
-
     let db_path = ctx.paths.sync_db_path(account);
     let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
     let limit_days = args.limit_days;
@@ -3779,7 +3776,6 @@ fn handle_mail_sync(
     if stats.total() == 0 {
         let words = WordLists::embedded();
         id_gen.init_pool(&words).map_err(|e| anyhow!("{e}"))?;
-        println!("Initialized ID pool");
     }
 
     // Determine folders to sync
@@ -3790,9 +3786,7 @@ fn handle_mail_sync(
     };
 
     for folder in &folders {
-        println!("Syncing {}...", folder);
-
-        // Fetch from server to local
+        // Fetch metadata from server (fast - uses .only() fields, no bodies)
         let messages = client
             .mail_list(account, folder, 100, false)
             .map_err(|e| anyhow!("{e}"))?;
@@ -3801,9 +3795,11 @@ fn handle_mail_sync(
             .as_array()
             .ok_or_else(|| anyhow!("expected array from server"))?;
 
-        // First pass: collect messages to sync (filter by cutoff, skip existing)
-        let mut to_sync: Vec<(&str, &Value)> = Vec::new();
+        let mut synced = 0;
+        let mut skipped = 0;
+
         for msg_val in messages_arr {
+            // Apply cutoff filter
             if let Some(ref cutoff) = cutoff_time {
                 let email_ts = msg_val
                     .get("datetime_received")
@@ -3821,167 +3817,86 @@ fn handle_mail_sync(
                 .get("item_id")
                 .or_else(|| msg_val.get("id"))
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("missing item_id"))?;
+                .unwrap_or("");
+            if remote_id.is_empty() {
+                continue;
+            }
 
-            // Check if we already have this message
+            // Skip if already synced
             if db
                 .get_message_by_remote_id(remote_id)
                 .map_err(|e| anyhow!("{e}"))?
                 .is_some()
             {
+                skipped += 1;
                 continue;
             }
 
-            to_sync.push((remote_id, msg_val));
-        }
+            // Allocate human-readable ID
+            let local_id = id_gen.allocate(remote_id).map_err(|e| anyhow!("{e}"))?;
 
-        let total = to_sync.len();
-        if total == 0 {
-            println!("  No new messages");
-            continue;
-        }
+            let subject = msg_val
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no subject)");
+            let from = msg_val
+                .get("from")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let date = msg_val
+                .get("datetime_received")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let is_read = msg_val
+                .get("is_read")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let has_attachments = msg_val
+                .get("has_attachments")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
-        println!("  Fetching {} new messages...", total);
-
-        // Batch fetch all messages in chunks for efficiency
-        const BATCH_SIZE: usize = 50;
-        let mut synced = 0;
-        let mut failed = 0;
-
-        for chunk in to_sync.chunks(BATCH_SIZE) {
-            // Collect IDs for batch request
-            let ids: Vec<&str> = chunk.iter().map(|(id, _)| *id).collect();
-
-            print!("\r  [{}/{}] Fetching batch...    ", synced + 1, total);
-            let _ = io::stdout().flush();
-
-            // Batch fetch all messages in this chunk
-            let batch_result = client.mail_batch_get(account, folder, &ids);
-            let batch_messages: Vec<Option<Value>> = match batch_result {
-                Ok(val) => {
-                    if let Some(arr) = val.as_array() {
-                        arr.iter()
-                            .map(|v| if v.is_null() { None } else { Some(v.clone()) })
-                            .collect()
-                    } else {
-                        // Fallback: treat as empty
-                        vec![None; ids.len()]
-                    }
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Batch fetch failed: {}, falling back to individual fetches",
-                        e
-                    );
-                    // Fall back to individual fetches
-                    ids.iter()
-                        .map(|id| client.mail_get(account, folder, id).ok())
-                        .collect()
-                }
+            // Store metadata in database (body fetched on-demand via `h8 mail read`)
+            let msg_sync = h8_core::types::MessageSync {
+                local_id: local_id.clone(),
+                remote_id: remote_id.to_string(),
+                change_key: msg_val
+                    .get("changekey")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                folder: folder.clone(),
+                subject: Some(subject.to_string()),
+                from_addr: Some(from.to_string()),
+                received_at: Some(date.to_string()),
+                is_read,
+                is_draft: folder == FOLDER_DRAFTS,
+                has_attachments,
+                synced_at: Some(chrono::Utc::now().to_rfc3339()),
+                local_hash: None,
             };
+            db.upsert_message(&msg_sync).map_err(|e| anyhow!("{e}"))?;
 
-            // Process each message from the batch
-            for ((remote_id, msg_val), full_msg_opt) in chunk.iter().zip(batch_messages.into_iter())
-            {
-                // Progress indicator
-                print!("\r  [{}/{}] Syncing...    ", synced + 1, total);
-                let _ = io::stdout().flush();
-
-                let full_msg = match full_msg_opt {
-                    Some(msg) => msg,
-                    None => {
-                        log::warn!("Failed to fetch message {}", remote_id);
-                        failed += 1;
-                        continue;
-                    }
-                };
-
-                // Allocate human-readable ID
-                let local_id = id_gen.allocate(remote_id).map_err(|e| anyhow!("{e}"))?;
-
-                // Build email content - use full_msg for body, msg_val for metadata
-                let subject = msg_val
-                    .get("subject")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(no subject)");
-                let from = msg_val
-                    .get("from")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let body = full_msg.get("body").and_then(|v| v.as_str()).unwrap_or("");
-                let date = msg_val
-                    .get("datetime_received")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
-                let content = format!(
-                    "From: {}\r\nSubject: {}\r\nDate: {}\r\n\r\n{}",
-                    from, subject, date, body
-                );
-
-                // Determine flags from list response (faster than full_msg)
-                let is_read = msg_val
-                    .get("is_read")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let mut flags = MessageFlags::default();
-                if is_read {
-                    flags.seen = true;
+            // Cache email addresses for autocomplete
+            if let Some((email, name)) = parse_email_address(from) {
+                if folder == "sent" {
+                    let _ = db.record_sent_address(&email, name.as_deref());
+                } else {
+                    let _ = db.record_received_address(&email, name.as_deref());
                 }
-
-                // Store in Maildir
-                mail_dir
-                    .store_with_id(folder, content.as_bytes(), &flags, &local_id)
-                    .map_err(|e| anyhow!("{e}"))?;
-
-                // Check for attachments from list response
-                let has_attachments = msg_val
-                    .get("has_attachments")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-                // Store in database
-                let msg_sync = h8_core::types::MessageSync {
-                    local_id: local_id.clone(),
-                    remote_id: remote_id.to_string(),
-                    change_key: msg_val
-                        .get("changekey")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    folder: folder.clone(),
-                    subject: Some(subject.to_string()),
-                    from_addr: Some(from.to_string()),
-                    received_at: Some(date.to_string()),
-                    is_read,
-                    is_draft: folder == FOLDER_DRAFTS,
-                    has_attachments,
-                    synced_at: Some(chrono::Utc::now().to_rfc3339()),
-                    local_hash: None,
-                };
-                db.upsert_message(&msg_sync).map_err(|e| anyhow!("{e}"))?;
-
-                // Cache email addresses for autocomplete
-                // Parse "Name <email>" or just "email" format
-                if let Some((email, name)) = parse_email_address(from) {
-                    if folder == "sent" {
-                        let _ = db.record_sent_address(&email, name.as_deref());
-                    } else {
-                        let _ = db.record_received_address(&email, name.as_deref());
-                    }
-                }
-
-                synced += 1;
             }
+
+            synced += 1;
         }
 
-        if failed > 0 {
-            println!("\r  Synced {} messages ({} failed)     ", synced, failed);
-        } else {
-            println!("\r  Synced {} new messages              ", synced);
+        if !ctx.common.quiet {
+            if synced > 0 {
+                println!("  ✓ {}: {} new, {} up-to-date", folder, synced, skipped);
+            } else {
+                println!("  ✓ {}: {} up-to-date", folder, skipped);
+            }
         }
     }
 
-    println!("Sync complete");
     Ok(())
 }
 
@@ -9703,63 +9618,30 @@ fn handle_sync(ctx: &RuntimeContext, args: SyncArgs) -> Result<()> {
         }
     }
 
-    // Sync Mail
+    // Sync Mail — delegate to the same handler as `h8 mail sync`
     if sync_everything || args.mail {
         if !ctx.common.quiet {
             println!("Syncing mail...");
         }
-        let limit = args.limit_days.map(|d| d as usize * 10).unwrap_or(50);
-
-        // Sync mail metadata (not full content) from configured folders
-        let folders = vec!["inbox", "sent"];
-        let mut total_count: usize = 0;
-        let mut mail_errors = false;
-
-        let db_path = ctx.paths.sync_db_path(&account);
-        let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
-        let id_gen = IdGenerator::new(&db);
-
-        // Ensure ID pool is seeded
-        if let Ok(stats) = id_gen.stats() {
-            if stats.total() == 0 {
-                let words = h8_core::id::WordLists::embedded();
-                let _ = id_gen.init_pool(&words);
+        let mail_args = MailSyncArgs {
+            folder: None,
+            full: args.full,
+            limit_days: args.limit_days,
+        };
+        match handle_mail_sync(ctx, &client, &account, mail_args) {
+            Ok(()) => {
+                results.insert("mail".to_string(), json!({ "status": "ok" }));
             }
-        }
-
-        for folder in &folders {
-            match client.mail_list(&account, folder, limit, false) {
-                Ok(messages) => {
-                    if let Some(msgs) = messages.as_array() {
-                        for msg in msgs {
-                            let remote_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                            if remote_id.is_empty() { continue; }
-
-                            // Assign readable ID if not already assigned
-                            let _ = id_gen.allocate(remote_id);
-                        }
-                        total_count += msgs.len();
-                        if !ctx.common.quiet {
-                            println!("  ✓ {}: {} messages", folder, msgs.len());
-                        }
-                    }
-                }
-                Err(e) => {
-                    mail_errors = true;
-                    if !ctx.common.quiet {
-                        eprintln!("  ✗ Failed to sync '{}': {}", folder, e);
-                    }
+            Err(e) => {
+                has_errors = true;
+                results.insert("mail".to_string(), json!({
+                    "status": "error",
+                    "message": format!("{}", e),
+                }));
+                if !ctx.common.quiet {
+                    eprintln!("  ✗ Mail sync failed: {}", e);
                 }
             }
-        }
-
-        results.insert("mail".to_string(), json!({
-            "status": if mail_errors && total_count == 0 { "error" } else { "ok" },
-            "messages_synced": total_count,
-        }));
-
-        if mail_errors {
-            has_errors = true;
         }
     }
 
