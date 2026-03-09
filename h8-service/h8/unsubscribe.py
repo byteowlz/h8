@@ -262,12 +262,14 @@ def scan_messages(
 
     mail_folder = get_folder(account, folder)
 
-    # Build query
+    # Build query - filter subject server-side, sender client-side
+    # (exchangelib does not support sender__email_address field path)
     query = mail_folder.all()
-    if sender:
-        query = query.filter(sender__email_address__icontains=sender)
     if search:
         query = query.filter(subject__icontains=search)
+
+    # Fetch more if filtering by sender client-side (need headroom)
+    fetch_limit = limit * 5 if sender else limit
 
     # Fetch messages with headers
     messages = query.order_by("-datetime_received").only(
@@ -278,15 +280,24 @@ def scan_messages(
         "datetime_received",
         "headers",
         "body",
-    )[:limit]
+    )[:fetch_limit]
 
     results: list[dict] = []
+    matched = 0
 
     for item in messages:
         if not hasattr(item, "subject"):
             continue
 
         sender_email = item.sender.email_address if item.sender else ""
+
+        # Client-side sender filter
+        if sender and sender.lower() not in sender_email.lower():
+            continue
+
+        matched += 1
+        if matched > limit:
+            break
 
         # Check safe senders
         if _is_safe_sender(sender_email, safe_senders):
