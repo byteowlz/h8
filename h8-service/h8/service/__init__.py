@@ -317,7 +317,7 @@ async def safe_call(func, *args, **kwargs):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-app = FastAPI(title="h8-service", version="0.2.0")
+app = FastAPI(title="h8-service", version="0.5.14")
 cache: Dict[str, CacheEntry] = {}
 cache_lock = asyncio.Lock()
 
