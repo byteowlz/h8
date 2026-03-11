@@ -131,6 +131,8 @@ def create_event(account: Account, event_data: dict) -> dict:
     else:
         end_dt = end_dt.astimezone(default_tz)
 
+    is_all_day = event_data.get("is_all_day", False)
+
     calendar: Any = account.calendar
     item = CalendarItem(
         account=account,
@@ -140,6 +142,7 @@ def create_event(account: Account, event_data: dict) -> dict:
         end=EWSDateTime.from_datetime(end_dt),
         location=event_data.get("location"),
         body=event_data.get("body"),
+        is_all_day=is_all_day,
     )
     item.save()
 
@@ -376,6 +379,8 @@ def invite_event(account: Account, event_data: dict) -> dict:
             for email in event_data["attendees"]
         ]
 
+    is_all_day = event_data.get("is_all_day", False)
+
     calendar: Any = account.calendar
     item = CalendarItem(
         account=account,
@@ -387,6 +392,7 @@ def invite_event(account: Account, event_data: dict) -> dict:
         body=event_data.get("body"),
         required_attendees=required_attendees or None,
         optional_attendees=optional_attendees or None,
+        is_all_day=is_all_day,
     )
 
     # Save and send invites
