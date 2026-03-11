@@ -1,0 +1,23 @@
+{
+  "todos": [
+    {
+      "id": "7723d2e7",
+      "content": "Patch `h8 mail read` to resolve short IDs to local message IDs",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "245b5cdd",
+      "content": "Run `cargo check` in `h8-client` and fix any issues",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "f9c96111",
+      "content": "Summarize change and provide usage guidance",
+      "status": "completed",
+      "priority": "medium"
+    }
+  ],
+  "updated_at": "2026-03-11T09:28:10.168Z"
+}

@@ -1,0 +1,23 @@
+{
+  "todos": [
+    {
+      "id": "1",
+      "content": "trx-s7kk [P1 bug]: Fix 'all day' natural language parsing ignoring month",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "content": "trx-fb0y [P2 feature]: Add --from/--to options to cal show",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "3",
+      "content": "trx-wb5r [P2 feature]: Accept date-only format in cal invite",
+      "status": "completed",
+      "priority": "medium"
+    }
+  ],
+  "updated_at": "2026-03-11T10:50:37.545Z"
+}

@@ -1,47 +1,23 @@
 {
   "todos": [
     {
-      "id": "1",
-      "content": "Design ergonomic rule management CLI interface",
+      "id": "dc4bd9ee",
+      "content": "Make h8 sync --mail use the same logic as h8 mail sync",
       "status": "completed",
       "priority": "high"
     },
     {
-      "id": "2",
-      "content": "Implement Python service rules_oof.py module",
+      "id": "8f747188",
+      "content": "Optimize mail sync speed - metadata-only, no body fetch",
       "status": "completed",
       "priority": "high"
     },
     {
-      "id": "3",
-      "content": "Add API endpoints to service/__init__.py",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "4",
-      "content": "Implement Rust service client methods",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "5",
-      "content": "Add CLI commands and handlers",
-      "status": "completed",
-      "priority": "high"
-    },
-    {
-      "id": "6",
-      "content": "Test and verify implementation",
-      "status": "completed",
-      "priority": "medium"
-    },
-    {
-      "id": "59137228",
-      "content": "Implement h8 sync command to sync everything",
+      "id": "e13d467d",
+      "content": "Rebuild, install, and test",
       "status": "completed",
       "priority": "high"
     }
   ],
-  "updated_at": "2026-03-05T11:11:19.460Z"
+  "updated_at": "2026-03-09T08:01:53.512Z"
 }
