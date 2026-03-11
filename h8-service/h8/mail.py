@@ -699,18 +699,23 @@ def search_messages(
     for term in terms[1:]:
         combined_q = combined_q | _build_term_query(term)
 
-    # Add date filters
+    # Add date filters (already normalized to ISO by CLI, but handle gracefully)
     if from_date:
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
         tz = ZoneInfo("Europe/Berlin")
-        start_dt = datetime.fromisoformat(from_date).replace(tzinfo=tz)
+        try:
+            start_dt = datetime.fromisoformat(from_date).replace(tzinfo=tz)
+        except ValueError:
+            # Try date-only format
+            start_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=tz)
         combined_q = combined_q & Q(datetime_received__gte=start_dt)
     if to_date:
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
         tz = ZoneInfo("Europe/Berlin")
-        end_dt = datetime.fromisoformat(to_date).replace(tzinfo=tz)
+        try:
+            end_dt = datetime.fromisoformat(to_date).replace(tzinfo=tz)
+        except ValueError:
+            end_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(tzinfo=tz)
+        # Set to end of day
+        end_dt = end_dt.replace(hour=23, minute=59, second=59)
         combined_q = combined_q & Q(datetime_received__lte=end_dt)
 
     results = (

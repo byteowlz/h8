@@ -85,8 +85,10 @@ flags from the captured words. Use `strip_global_flags()` for global flags. For 
 | `h8 mail reply <id> [--all]` | Reply to message |
 | `h8 mail send <id>` | Send draft |
 | `h8 mail unsubscribe [OPTIONS]` | Bulk unsubscribe from marketing emails |
-| `h8 cal show [when]` | Show events (today, tomorrow, friday, kw30, next week) |
-| `h8 cal add "fri 2pm Meeting"` | Natural language event creation |
+| `h8 mail search "query" [-d N] [--from/--to]` | Search mail (OR via `\|`, field: `from:`, `subject:`, `body:`) |
+| `h8 cal show [when] [--from/--to]` | Show events (natural lang or explicit date range) |
+| `h8 cal add "fri 2pm Meeting"` | Natural language event (no time = all-day) |
+| `h8 cal add "Urlaub 03-30 bis 04-11"` | Multi-day event (till/until/bis/through) |
 | `h8 contacts list [-s search]` | List/search contacts |
 | `h8 contacts update --id <id> --phone <phone>` | Update contact |
 | `h8 agenda` | Today's calendar |

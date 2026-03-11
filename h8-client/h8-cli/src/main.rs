@@ -282,10 +282,10 @@ struct CalendarShowArgs {
     /// Date expression (e.g., today, mittwoch, 28.01, next week, kw30, feb 13, +2)
     #[arg(num_args = 0..)]
     when: Vec<String>,
-    /// Start date (ISO format, e.g., 2026-03-30)
+    /// Start date (flexible: 2026-03-30, 20260330, 30.03.2026, "last week", "past month")
     #[arg(long = "from")]
     from_date: Option<String>,
-    /// End date (ISO format, e.g., 2026-04-11)
+    /// End date (flexible: 2026-04-11, 20260411, 11.04.2026, today, friday)
     #[arg(long = "to")]
     to_date: Option<String>,
 }
@@ -329,10 +329,10 @@ struct CalendarSearchArgs {
     /// Number of days to search (default: 90)
     #[arg(short = 'd', long, default_value_t = 90)]
     days: i64,
-    /// Start date (ISO format, e.g., 2026-01-01)
+    /// Start date (flexible: 2026-01-01, 20260101, 01.01.2026, "last month")
     #[arg(long = "from")]
     from_date: Option<String>,
-    /// End date (ISO format)
+    /// End date (flexible: 2026-03-11, 20260311, 11.03.2026, today)
     #[arg(long = "to")]
     to_date: Option<String>,
     /// Maximum results to return
@@ -520,10 +520,10 @@ struct MailSearchArgs {
     /// Maximum results to return
     #[arg(short = 'n', long, default_value_t = 50)]
     limit: i64,
-    /// Start date filter (ISO format, e.g., 2026-02-01)
+    /// Start date filter (flexible: 2026-02-01, 20260201, 01.02.2026, "last week", "past month")
     #[arg(long = "from")]
     from_date: Option<String>,
-    /// End date filter (ISO format, e.g., 2026-03-11)
+    /// End date filter (flexible: 2026-03-11, 20260311, 11.03.2026, today, tomorrow)
     #[arg(long = "to")]
     to_date: Option<String>,
     /// Filter to last N days
@@ -1639,12 +1639,14 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
     let client = ctx.service_client()?;
     match cmd {
         CalendarCommand::List(args) => {
+            let from_norm = args.from_date.as_ref().map(|d| normalize_date_arg(d));
+            let to_norm = args.to_date.as_ref().map(|d| normalize_date_arg(d));
             let events = client
                 .calendar_list(
                     &account,
                     args.days,
-                    args.from_date.as_deref(),
-                    args.to_date.as_deref(),
+                    from_norm.as_deref(),
+                    to_norm.as_deref(),
                 )
                 .map_err(|e| anyhow!("{e}"))?;
 
@@ -1771,6 +1773,9 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             emit_output(&ctx.common, &result)?;
         }
         CalendarCommand::Search(args) => {
+            let from_norm = args.from_date.as_ref().map(|d| normalize_date_arg(d));
+            let to_norm = args.to_date.as_ref().map(|d| normalize_date_arg(d));
+
             // Try local cache first
             let db_path = ctx.paths.sync_db_path(&account);
             let events_with_ids = if db_path.exists() {
@@ -1802,8 +1807,8 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                             &account,
                             &args.query,
                             args.days,
-                            args.from_date.as_deref(),
-                            args.to_date.as_deref(),
+                            from_norm.as_deref(),
+                            to_norm.as_deref(),
                             args.limit,
                         )
                         .map_err(|e| anyhow!("{e}"))?;
@@ -1816,8 +1821,8 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                         &account,
                         &args.query,
                         args.days,
-                        args.from_date.as_deref(),
-                        args.to_date.as_deref(),
+                        from_norm.as_deref(),
+                        to_norm.as_deref(),
                         args.limit,
                     )
                     .map_err(|e| anyhow!("{e}"))?;
@@ -1833,10 +1838,10 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
         }
         CalendarCommand::Show(args) => {
             let (from_date, to_date, description) = if args.from_date.is_some() || args.to_date.is_some() {
-                // Explicit --from/--to flags take precedence
+                // Explicit --from/--to flags take precedence, normalize flexible formats
                 let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
-                let from = args.from_date.unwrap_or_else(|| today.clone());
-                let to = args.to_date.unwrap_or_else(|| from.clone());
+                let from = args.from_date.map(|d| normalize_date_arg(&d)).unwrap_or_else(|| today.clone());
+                let to = args.to_date.map(|d| normalize_date_arg(&d)).unwrap_or_else(|| from.clone());
                 let desc = format!("{} to {}", from, to);
                 (from, to, desc)
             } else {
@@ -1899,13 +1904,13 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             let input_text = args.input.join(" ");
 
             let payload = if args.start.is_some() || args.end.is_some() {
-                // Explicit --start/--end: use them directly, input is the subject
+                // Explicit --start/--end: normalize flexible date formats, input is the subject
                 let date_only_re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$").unwrap();
 
-                let start_raw = args.start.unwrap_or_else(|| {
+                let start_raw = args.start.map(|s| normalize_date_arg(&s)).unwrap_or_else(|| {
                     Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
                 });
-                let end_raw = args.end.unwrap_or_else(|| start_raw.clone());
+                let end_raw = args.end.map(|s| normalize_date_arg(&s)).unwrap_or_else(|| start_raw.clone());
 
                 let start_is_date_only = date_only_re.is_match(&start_raw);
                 let end_is_date_only = date_only_re.is_match(&end_raw);
@@ -2004,27 +2009,29 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             }
         }
         CalendarCommand::Invite(args) => {
-            // Detect date-only format (YYYY-MM-DD) and expand for all-day events
+            // Normalize flexible date formats, then detect date-only for all-day events
+            let start_norm = normalize_date_arg(&args.start);
+            let end_norm = normalize_date_arg(&args.end);
             let date_only_re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$").unwrap();
-            let start_is_date_only = date_only_re.is_match(&args.start);
-            let end_is_date_only = date_only_re.is_match(&args.end);
+            let start_is_date_only = date_only_re.is_match(&start_norm);
+            let end_is_date_only = date_only_re.is_match(&end_norm);
 
             let (start_str, end_str, is_all_day) = if start_is_date_only && end_is_date_only {
                 // All-day event: start at 00:00:00, end at 00:00:00 of the day AFTER end date
-                let end_date = NaiveDate::parse_from_str(&args.end, "%Y-%m-%d")
+                let end_date = NaiveDate::parse_from_str(&end_norm, "%Y-%m-%d")
                     .map_err(|e| anyhow!("Invalid end date: {e}"))?;
                 let end_next_day = end_date + ChronoDuration::days(1);
                 (
-                    format!("{}T00:00:00", args.start),
+                    format!("{}T00:00:00", start_norm),
                     format!("{}T00:00:00", end_next_day.format("%Y-%m-%d")),
                     true,
                 )
             } else if start_is_date_only {
-                (format!("{}T00:00:00", args.start), args.end.clone(), false)
+                (format!("{}T00:00:00", start_norm), end_norm.clone(), false)
             } else if end_is_date_only {
-                (args.start.clone(), format!("{}T23:59:59", args.end), false)
+                (start_norm.clone(), format!("{}T23:59:59", end_norm), false)
             } else {
-                (args.start.clone(), args.end.clone(), false)
+                (start_norm.clone(), end_norm.clone(), false)
             };
 
             let mut payload = serde_json::json!({
@@ -2485,7 +2492,29 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
         }
     }
 
-    // 5. Slash date format: "2025/02/01"
+    // 5. Compact date format: "20260311" (YYYYMMDD)
+    let compact_re = Regex::new(r"^(\d{4})(\d{2})(\d{2})$").unwrap();
+    if let Some(caps) = compact_re.captures(&text_lower) {
+        let year: i32 = caps.get(1).unwrap().as_str().parse().ok()?;
+        let month: u32 = caps.get(2).unwrap().as_str().parse().ok()?;
+        let day: u32 = caps.get(3).unwrap().as_str().parse().ok()?;
+        if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+            return Some((date, date.format("%B %d, %Y").to_string()));
+        }
+    }
+
+    // 6. US slash format: "03/11/2026" (MM/DD/YYYY)
+    let us_slash_re = Regex::new(r"^(\d{1,2})/(\d{1,2})/(\d{4})$").unwrap();
+    if let Some(caps) = us_slash_re.captures(&text_lower) {
+        let month: u32 = caps.get(1).unwrap().as_str().parse().ok()?;
+        let day: u32 = caps.get(2).unwrap().as_str().parse().ok()?;
+        let year: i32 = caps.get(3).unwrap().as_str().parse().ok()?;
+        if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+            return Some((date, date.format("%B %d, %Y").to_string()));
+        }
+    }
+
+    // 6a. ISO slash format: "2025/02/01" (YYYY/MM/DD)
     let slash_re = Regex::new(r"^(\d{4})/(\d{1,2})/(\d{1,2})$").unwrap();
     if let Some(caps) = slash_re.captures(&text_lower) {
         let year: i32 = caps.get(1).unwrap().as_str().parse().ok()?;
@@ -2496,12 +2525,12 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
         }
     }
 
-    // 6. ISO date format: "2025-02-01"
+    // 7. ISO date format: "2025-02-01"
     if let Ok(date) = NaiveDate::parse_from_str(&text_lower, "%Y-%m-%d") {
         return Some((date, date.format("%B %d, %Y").to_string()));
     }
 
-    // 7. Month names with optional day
+    // 8. Month names with optional day
     let months: &[(&str, u32)] = &[
         ("january", 1),
         ("jan", 1),
@@ -2560,7 +2589,7 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
         }
     }
 
-    // 8. Bare day number: "28" (current month, or previous month if passed)
+    // 9. Bare day number: "28" (current month, or previous month if passed)
     let bare_day_re = Regex::new(r"^(\d{1,2})$").unwrap();
     if let Some(caps) = bare_day_re.captures(&text_lower) {
         let day: u32 = caps.get(1).unwrap().as_str().parse().ok()?;
@@ -2585,6 +2614,72 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
     }
 
     None
+}
+
+/// Normalize any date argument string to ISO format (YYYY-MM-DD).
+///
+/// Accepts all formats from parse_single_date plus relative periods:
+/// - "last week" / "letzte woche" -> start of last week (Monday)
+/// - "past month" / "letzter monat" -> 30 days ago
+/// - "past 14 days" / "letzte 14 tage" -> 14 days ago
+/// - "last monday" -> most recent past Monday
+/// - Any format parse_single_date supports (ISO, German dot, US slash, compact, etc.)
+///
+/// Returns the ISO date string, or the original string if parsing fails.
+fn normalize_date_arg(text: &str) -> String {
+    use chrono::Datelike;
+    use regex::Regex;
+
+    let now = Local::now();
+    let today = now.date_naive();
+    let text_lower = text.to_lowercase().trim().to_string();
+
+    // "past N days" / "last N days" / "letzte N tage"
+    let past_days_re = Regex::new(
+        r"(?i)^(?:past|last|letzte[rn]?)\s+(\d+)\s+(?:days?|tage?)$"
+    ).unwrap();
+    if let Some(caps) = past_days_re.captures(&text_lower) {
+        if let Ok(n) = caps.get(1).unwrap().as_str().parse::<i64>() {
+            let target = today - ChronoDuration::days(n);
+            return target.format("%Y-%m-%d").to_string();
+        }
+    }
+
+    // "past week" / "last week" / "letzte woche" -> Monday of last week
+    let last_week_re = Regex::new(
+        r"(?i)^(?:past|last|letzte[rn]?)\s+(?:week|woche)$"
+    ).unwrap();
+    if last_week_re.is_match(&text_lower) {
+        let days_since_monday = now.weekday().num_days_from_monday() as i64;
+        let last_monday = today - ChronoDuration::days(days_since_monday + 7);
+        return last_monday.format("%Y-%m-%d").to_string();
+    }
+
+    // "past month" / "last month" / "letzter monat" -> 30 days ago
+    let last_month_re = Regex::new(
+        r"(?i)^(?:past|last|letzte[rn]?)\s+(?:month|monat)$"
+    ).unwrap();
+    if last_month_re.is_match(&text_lower) {
+        let target = today - ChronoDuration::days(30);
+        return target.format("%Y-%m-%d").to_string();
+    }
+
+    // "past year" / "last year" / "letztes jahr" -> 365 days ago
+    let last_year_re = Regex::new(
+        r"(?i)^(?:past|last|letzte[rs]?)\s+(?:year|jahr)$"
+    ).unwrap();
+    if last_year_re.is_match(&text_lower) {
+        let target = today - ChronoDuration::days(365);
+        return target.format("%Y-%m-%d").to_string();
+    }
+
+    // Try parse_single_date for everything else
+    if let Some((date, _)) = parse_single_date(text) {
+        return date.format("%Y-%m-%d").to_string();
+    }
+
+    // Fallback: return as-is (might already be ISO format)
+    text.to_string()
 }
 
 /// Parse a natural language date range expression for calendar viewing.
@@ -3053,9 +3148,12 @@ fn handle_mail_search(
         let from = (Local::now() - ChronoDuration::days(days))
             .format("%Y-%m-%d")
             .to_string();
-        (Some(from), args.to_date.clone())
+        (Some(from), args.to_date.as_ref().map(|d| normalize_date_arg(d)))
     } else {
-        (args.from_date.clone(), args.to_date.clone())
+        (
+            args.from_date.as_ref().map(|d| normalize_date_arg(d)),
+            args.to_date.as_ref().map(|d| normalize_date_arg(d)),
+        )
     };
 
     let messages = client
