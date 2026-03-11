@@ -1841,7 +1841,8 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 // Explicit --from/--to flags take precedence, normalize flexible formats
                 let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
                 let from = args.from_date.map(|d| normalize_date_arg(&d)).unwrap_or_else(|| today.clone());
-                let to = args.to_date.map(|d| normalize_date_arg(&d)).unwrap_or_else(|| from.clone());
+                // Default --to: today if only --from given (shows range from past to now)
+                let to = args.to_date.map(|d| normalize_date_arg(&d)).unwrap_or_else(|| today.clone());
                 let desc = format!("{} to {}", from, to);
                 (from, to, desc)
             } else {
@@ -2671,6 +2672,43 @@ fn normalize_date_arg(text: &str) -> String {
     if last_year_re.is_match(&text_lower) {
         let target = today - ChronoDuration::days(365);
         return target.format("%Y-%m-%d").to_string();
+    }
+
+    // "next week" / "nächste woche" -> Monday of next week
+    let next_week_re = Regex::new(
+        r"(?i)^(?:next|nächste[rn]?|naechste[rn]?)\s+(?:week|woche)$"
+    ).unwrap();
+    if next_week_re.is_match(&text_lower) {
+        let days_until_monday = (7 - now.weekday().num_days_from_monday()) % 7;
+        let days_until_monday = if days_until_monday == 0 { 7 } else { days_until_monday };
+        let next_monday = today + ChronoDuration::days(days_until_monday as i64);
+        return next_monday.format("%Y-%m-%d").to_string();
+    }
+
+    // "next month" / "nächster monat" -> 1st of next month
+    let next_month_re = Regex::new(
+        r"(?i)^(?:next|nächste[rn]?|naechste[rn]?)\s+(?:month|monat)$"
+    ).unwrap();
+    if next_month_re.is_match(&text_lower) {
+        let (year, month) = if now.month() == 12 {
+            (now.year() + 1, 1)
+        } else {
+            (now.year(), now.month() + 1)
+        };
+        if let Some(date) = NaiveDate::from_ymd_opt(year, month, 1) {
+            return date.format("%Y-%m-%d").to_string();
+        }
+    }
+
+    // "next N days" / "nächste N tage"
+    let next_days_re = Regex::new(
+        r"(?i)^(?:next|nächste[rn]?|naechste[rn]?)\s+(\d+)\s+(?:days?|tage?)$"
+    ).unwrap();
+    if let Some(caps) = next_days_re.captures(&text_lower) {
+        if let Ok(n) = caps.get(1).unwrap().as_str().parse::<i64>() {
+            let target = today + ChronoDuration::days(n);
+            return target.format("%Y-%m-%d").to_string();
+        }
     }
 
     // Try parse_single_date for everything else
