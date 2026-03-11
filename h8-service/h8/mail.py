@@ -631,26 +631,90 @@ def search_messages(
     query: str,
     folder: str = "inbox",
     limit: int = 50,
+    from_date: str | None = None,
+    to_date: str | None = None,
 ) -> list[dict]:
-    """Search messages by subject or sender.
+    """Search messages by subject, sender, or body.
 
-    Searches subject and sender fields using case-insensitive contains.
+    Supports OR queries (pipe-separated or 'OR' keyword):
+    - "meeting | standup" -> matches either term
+    - "meeting OR standup" -> matches either term
+    - "from:alice | from:bob" -> messages from either sender
+
+    Field-specific search:
+    - "from:alice@example.com" -> sender contains
+    - "subject:meeting" -> subject contains
+    - "body:invoice" -> body contains
+    - Plain text searches subject, sender, and body
+
+    Date filtering:
+    - from_date/to_date as ISO strings (YYYY-MM-DD)
 
     Args:
         account: EWS account
-        query: Search query string
+        query: Search query string (supports OR with | or OR keyword)
         folder: Folder to search in (default: inbox)
         limit: Maximum number of results to return
+        from_date: Optional start date filter (ISO format)
+        to_date: Optional end date filter (ISO format)
 
     Returns:
         List of matching message dictionaries
     """
+    import re
+    from exchangelib import Q
+
     mail_folder = get_folder(account, folder)
 
-    # Use subject__icontains for reliable cross-server compatibility
-    # QueryString search isn't supported on all Exchange configurations
+    # Split on OR (pipe or keyword)
+    terms = re.split(r"\s*\|\s*|\s+OR\s+", query)
+    terms = [t.strip() for t in terms if t.strip()]
+
+    if not terms:
+        return []
+
+    # Build query for each term
+    def _build_term_query(term: str) -> Q:
+        """Build an EWS Q object for a single search term."""
+        # Field-specific search
+        field_match = re.match(r"^(from|subject|body):(.+)$", term, re.IGNORECASE)
+        if field_match:
+            field = field_match.group(1).lower()
+            value = field_match.group(2).strip()
+            if field == "from":
+                return Q(sender__email_address__icontains=value)
+            elif field == "subject":
+                return Q(subject__icontains=value)
+            elif field == "body":
+                return Q(body__icontains=value)
+
+        # Default: search subject, sender, and body
+        return (
+            Q(subject__icontains=term)
+            | Q(sender__email_address__icontains=term)
+        )
+
+    # Combine terms with OR
+    combined_q = _build_term_query(terms[0])
+    for term in terms[1:]:
+        combined_q = combined_q | _build_term_query(term)
+
+    # Add date filters
+    if from_date:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Berlin")
+        start_dt = datetime.fromisoformat(from_date).replace(tzinfo=tz)
+        combined_q = combined_q & Q(datetime_received__gte=start_dt)
+    if to_date:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Berlin")
+        end_dt = datetime.fromisoformat(to_date).replace(tzinfo=tz)
+        combined_q = combined_q & Q(datetime_received__lte=end_dt)
+
     results = (
-        mail_folder.filter(subject__icontains=query)
+        mail_folder.filter(combined_q)
         .order_by("-datetime_received")
         .only(
             "id",

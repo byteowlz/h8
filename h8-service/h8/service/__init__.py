@@ -710,6 +710,8 @@ async def mail_search(
     q: str,
     folder: str = "inbox",
     limit: int = 50,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     account: Optional[str] = None,
 ):
     """Search messages by subject, sender, or body content.
@@ -717,12 +719,13 @@ async def mail_search(
     Supports:
     - Simple text: "meeting notes"
     - Field-specific: "subject:meeting" or "from:john@example.com"
-    - Boolean: "meeting AND notes"
+    - OR queries: "meeting | standup" or "meeting OR standup"
+    - Date filtering: from_date/to_date (ISO format YYYY-MM-DD)
     """
     email = current_account_email(account)
     acct = auth.get_account(email)
     return await safe_call_with_retry(
-        mail.search_messages, email, acct, q, folder, limit
+        mail.search_messages, email, acct, q, folder, limit, from_date, to_date
     )
 
 
