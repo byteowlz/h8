@@ -82,8 +82,10 @@ flags from the captured words. Use `strip_global_flags()` for global flags. For 
 | `h8 mail list [when]` | List messages (supports: today, monday, jan 15) |
 | `h8 mail read <id>` | View message in pager |
 | `h8 mail compose` | Create draft in editor |
+| `h8 mail send --draft --to X --subject Y --body Z` | Create draft non-interactively (agent-safe) |
 | `h8 mail reply <id> [--all]` | Reply to message |
 | `h8 mail send <id>` | Send draft |
+| `h8 mail send --to X --subject Y --body Z` | Send directly (no draft) |
 | `h8 mail unsubscribe [OPTIONS]` | Bulk unsubscribe from marketing emails |
 | `h8 mail search "query" [-d N] [--from/--to]` | Search mail (OR via `\|`, field: `from:`, `subject:`, `body:`) |
 | `h8 cal show [when] [--from/--to]` | Show events (natural lang or explicit date range) |
@@ -141,6 +143,13 @@ trx create "title" -t feature -p 1  # P1=high, P2=medium, P3=low
 trx close <id> -r "reason"
 trx sync                    # Commit .trx/
 ```
+
+## Flexible Date Formats
+
+All `--from`, `--to`, `--start`, `--end` flags accept flexible formats:
+- ISO: `2026-03-11`, compact: `20260311`, US: `03/11/2026`, German: `11.03.2026`
+- Relative: `"last week"`, `"past month"`, `"past 14 days"`, `"next week"`, `"next month"`
+- Natural: `today`, `tomorrow`, `friday`, `"march 15"`
 
 ## Code Style
 - **Python**: Type hints, docstrings, grouped imports (stdlib/external/local)
