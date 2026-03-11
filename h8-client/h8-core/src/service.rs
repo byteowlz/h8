@@ -69,7 +69,8 @@ impl ServiceClient {
         id: &str,
         change_key: Option<&str>,
     ) -> Result<Value> {
-        let mut url = format!("/calendar/{}?account={}", id, account);
+        let encoded_id = urlencoding::encode(id);
+        let mut url = format!("/calendar/{}?account={}", encoded_id, account);
         if let Some(ck) = change_key {
             url.push_str(&format!("&changekey={}", ck));
         }
@@ -84,7 +85,8 @@ impl ServiceClient {
         message: Option<&str>,
     ) -> Result<Value> {
         let payload = serde_json::json!({ "message": message });
-        self.post_json(&format!("/calendar/{}/cancel?account={}", id, account), payload)
+        let encoded_id = urlencoding::encode(id);
+        self.post_json(&format!("/calendar/{}/cancel?account={}", encoded_id, account), payload)
     }
 
     /// Search calendar events.
@@ -140,8 +142,9 @@ impl ServiceClient {
 
     /// Get a single mail message.
     pub fn mail_get(&self, account: &str, folder: &str, id: &str) -> Result<Value> {
+        let encoded_id = urlencoding::encode(id);
         let params = [("account", account), ("folder", folder)];
-        self.get(&format!("/mail/{}", id), &params)
+        self.get(&format!("/mail/{}", encoded_id), &params)
     }
 
     /// Search mail messages.
@@ -151,14 +154,22 @@ impl ServiceClient {
         query: &str,
         folder: &str,
         limit: i64,
+        from_date: Option<&str>,
+        to_date: Option<&str>,
     ) -> Result<Value> {
         let limit_str = limit.to_string();
-        let params = [
+        let mut params = vec![
             ("account", account),
             ("q", query),
             ("folder", folder),
-            ("limit", &limit_str),
+            ("limit", limit_str.as_str()),
         ];
+        if let Some(fd) = from_date {
+            params.push(("from_date", fd));
+        }
+        if let Some(td) = to_date {
+            params.push(("to_date", td));
+        }
         self.get("/mail/search", &params)
     }
 
@@ -240,13 +251,15 @@ impl ServiceClient {
 
     /// Delete a draft.
     pub fn draft_delete(&self, account: &str, id: &str) -> Result<Value> {
-        self.delete(&format!("/mail/draft/{}?account={}", id, account))
+        let encoded_id = urlencoding::encode(id);
+        self.delete(&format!("/mail/draft/{}?account={}", encoded_id, account))
     }
 
     /// List attachments for a message.
     pub fn mail_attachments_list(&self, account: &str, folder: &str, id: &str) -> Result<Value> {
+        let encoded_id = urlencoding::encode(id);
         let params = [("account", account), ("folder", folder)];
-        self.get(&format!("/mail/{}/attachments", id), &params)
+        self.get(&format!("/mail/{}/attachments", encoded_id), &params)
     }
 
     /// Download a specific attachment.
@@ -258,6 +271,7 @@ impl ServiceClient {
         index: usize,
         output_path: &Path,
     ) -> Result<Value> {
+        let encoded_id = urlencoding::encode(id);
         let payload = serde_json::json!({
             "index": index,
             "output_path": output_path.display().to_string(),
@@ -265,7 +279,7 @@ impl ServiceClient {
         self.post_json(
             &format!(
                 "/mail/{}/attachments/download?account={}&folder={}",
-                id, account, folder
+                encoded_id, account, folder
             ),
             payload,
         )
@@ -298,8 +312,9 @@ impl ServiceClient {
             "target_folder": target_folder,
             "create_folder": create_folder,
         });
+        let encoded_id = urlencoding::encode(id);
         self.post_json(
-            &format!("/mail/{}/move?account={}&folder={}", id, account, folder),
+            &format!("/mail/{}/move?account={}&folder={}", encoded_id, account, folder),
             payload,
         )
     }
@@ -321,7 +336,8 @@ impl ServiceClient {
             "is_spam": is_spam,
             "move": move_item,
         });
-        self.post_json(&format!("/mail/{}/spam?account={}", id, account), payload)
+        let encoded_id = urlencoding::encode(id);
+        self.post_json(&format!("/mail/{}/spam?account={}", encoded_id, account), payload)
     }
 
     /// List contacts.
@@ -343,8 +359,9 @@ impl ServiceClient {
 
     /// Get a single contact.
     pub fn contacts_get(&self, account: &str, id: &str) -> Result<Value> {
+        let encoded_id = urlencoding::encode(id);
         let params = [("account", account)];
-        self.get(&format!("/contacts/{}", id), &params)
+        self.get(&format!("/contacts/{}", encoded_id), &params)
     }
 
     /// Create a contact.
@@ -354,12 +371,14 @@ impl ServiceClient {
 
     /// Delete a contact.
     pub fn contacts_delete(&self, account: &str, id: &str) -> Result<Value> {
-        self.delete(&format!("/contacts/{}?account={}", id, account))
+        let encoded_id = urlencoding::encode(id);
+        self.delete(&format!("/contacts/{}?account={}", encoded_id, account))
     }
 
     /// Update a contact.
     pub fn contacts_update(&self, account: &str, id: &str, updates: Value) -> Result<Value> {
-        self.put_json(&format!("/contacts/{}?account={}", id, account), updates)
+        let encoded_id = urlencoding::encode(id);
+        self.put_json(&format!("/contacts/{}?account={}", encoded_id, account), updates)
     }
 
     /// Find free calendar slots.
@@ -613,8 +632,9 @@ impl ServiceClient {
             "response": response,
             "message": message,
         });
+        let encoded_id = urlencoding::encode(item_id);
         self.post_json(
-            &format!("/calendar/{}/rsvp?account={}", item_id, account),
+            &format!("/calendar/{}/rsvp?account={}", encoded_id, account),
             payload,
         )
     }
