@@ -2074,8 +2074,9 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             emit_output(&ctx.common, &invites)?;
         }
         CalendarCommand::Rsvp(args) => {
+            let remote_id = resolve_calendar_id(ctx, &account, &args.id)?;
             let result = client
-                .calendar_rsvp(&account, &args.id, args.response.as_str(), args.message.as_deref())
+                .calendar_rsvp(&account, &remote_id, args.response.as_str(), args.message.as_deref())
                 .map_err(|e| anyhow!("{e}"))?;
 
             if !ctx.common.json && !ctx.common.yaml {
@@ -2190,6 +2191,25 @@ fn resolve_calendar_id(ctx: &RuntimeContext, account: &str, id: &str) -> Result<
     }
     // Assume it's already a remote ID
     Ok(id.to_string())
+}
+
+/// Resolve a short word ID (e.g., "cold-lamp") to a remote EWS ID for mail.
+/// Falls back to the original ID if it can't be resolved.
+fn resolve_mail_id(ctx: &RuntimeContext, account: &str, id: &str) -> String {
+    if id.contains('-') && id.len() < 30 {
+        let db_path = ctx.paths.sync_db_path(account);
+        if let Ok(db) = Database::open(&db_path) {
+            let id_gen = IdGenerator::new(&db);
+            if let Ok(Some(remote)) = id_gen.resolve(id) {
+                return remote;
+            }
+            // Also try the messages table
+            if let Ok(Some(msg)) = db.get_message(id) {
+                return msg.remote_id;
+            }
+        }
+    }
+    id.to_string()
 }
 
 /// Sync calendar events from server to local cache.
@@ -3101,18 +3121,8 @@ fn handle_mail_get(
     account: &str,
     args: MailGetArgs,
 ) -> Result<()> {
-    // Try to resolve human-readable ID to remote ID
-    let db_path = ctx.paths.sync_db_path(account);
-    let remote_id = if db_path.exists() {
-        let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
-        let id_gen = IdGenerator::new(&db);
-        id_gen
-            .resolve(&args.id)
-            .map_err(|e| anyhow!("{e}"))?
-            .unwrap_or_else(|| args.id.clone())
-    } else {
-        args.id.clone()
-    };
+    // Resolve short ID to remote ID
+    let remote_id = resolve_mail_id(ctx, account, &args.id);
 
     let message = client
         .mail_get(account, &args.folder, &remote_id)
@@ -3413,9 +3423,11 @@ fn handle_mail_reply(
     account: &str,
     args: MailReplyArgs,
 ) -> Result<()> {
+    // Resolve short ID to remote ID
+    let remote_id = resolve_mail_id(ctx, account, &args.id);
     // Get original message
     let message = client
-        .mail_get(account, &args.folder, &args.id)
+        .mail_get(account, &args.folder, &remote_id)
         .map_err(|e| anyhow!("{e}"))?;
 
     let original_from = message.get("from").and_then(|v| v.as_str()).unwrap_or("");
@@ -3483,9 +3495,11 @@ fn handle_mail_forward(
     account: &str,
     args: MailForwardArgs,
 ) -> Result<()> {
+    // Resolve short ID to remote ID
+    let remote_id = resolve_mail_id(ctx, account, &args.id);
     // Get original message
     let message = client
-        .mail_get(account, &args.folder, &args.id)
+        .mail_get(account, &args.folder, &remote_id)
         .map_err(|e| anyhow!("{e}"))?;
 
     let original_from = message.get("from").and_then(|v| v.as_str()).unwrap_or("");
@@ -4078,17 +4092,7 @@ fn handle_mail_attachments(
     args: MailAttachmentsArgs,
 ) -> Result<()> {
     // Resolve human-readable ID to remote ID if needed
-    let db_path = ctx.paths.sync_db_path(account);
-    let remote_id = if db_path.exists() {
-        let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
-        let id_gen = IdGenerator::new(&db);
-        id_gen
-            .resolve(&args.id)
-            .map_err(|e| anyhow!("{e}"))?
-            .unwrap_or_else(|| args.id.clone())
-    } else {
-        args.id.clone()
-    };
+    let remote_id = resolve_mail_id(ctx, account, &args.id);
 
     if let Some(index) = args.download {
         // Download specific attachment
