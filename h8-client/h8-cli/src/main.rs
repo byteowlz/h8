@@ -282,6 +282,12 @@ struct CalendarShowArgs {
     /// Date expression (e.g., today, mittwoch, 28.01, next week, kw30, feb 13, +2)
     #[arg(num_args = 0..)]
     when: Vec<String>,
+    /// Start date (ISO format, e.g., 2026-03-30)
+    #[arg(long = "from")]
+    from_date: Option<String>,
+    /// End date (ISO format, e.g., 2026-04-11)
+    #[arg(long = "to")]
+    to_date: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -298,6 +304,12 @@ struct CalendarAddArgs {
     /// Event location
     #[arg(short = 'l', long)]
     location: Option<String>,
+    /// Explicit start date/time (ISO format: 2026-03-11 or 2026-03-11T14:00:00)
+    #[arg(long)]
+    start: Option<String>,
+    /// Explicit end date/time (ISO format: 2026-03-13 or 2026-03-13T16:00:00)
+    #[arg(long)]
+    end: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1810,13 +1822,21 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             emit_output(&ctx.common, &events_with_ids)?;
         }
         CalendarCommand::Show(args) => {
-            let when_text = if args.when.is_empty() {
-                "today".to_string()
+            let (from_date, to_date, description) = if args.from_date.is_some() || args.to_date.is_some() {
+                // Explicit --from/--to flags take precedence
+                let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
+                let from = args.from_date.unwrap_or_else(|| today.clone());
+                let to = args.to_date.unwrap_or_else(|| from.clone());
+                let desc = format!("{} to {}", from, to);
+                (from, to, desc)
             } else {
-                args.when.join(" ")
+                let when_text = if args.when.is_empty() {
+                    "today".to_string()
+                } else {
+                    args.when.join(" ")
+                };
+                parse_date_range_expr(&when_text)
             };
-
-            let (from_date, to_date, description) = parse_date_range_expr(&when_text);
 
             // Try local cache first for single-day queries
             let db_path = ctx.paths.sync_db_path(&account);
@@ -1868,10 +1888,54 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
         CalendarCommand::Add(args) => {
             let input_text = args.input.join(" ");
 
-            // Parse the natural language input via the service
-            let payload = client
-                .calendar_parse_natural(&account, &input_text, args.duration, args.location.as_deref())
-                .map_err(|e| anyhow!("{e}"))?;
+            let payload = if args.start.is_some() || args.end.is_some() {
+                // Explicit --start/--end: use them directly, input is the subject
+                let date_only_re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$").unwrap();
+
+                let start_raw = args.start.unwrap_or_else(|| {
+                    Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+                });
+                let end_raw = args.end.unwrap_or_else(|| start_raw.clone());
+
+                let start_is_date_only = date_only_re.is_match(&start_raw);
+                let end_is_date_only = date_only_re.is_match(&end_raw);
+
+                let (start_str, end_str, is_all_day) = if start_is_date_only && end_is_date_only {
+                    let end_date = NaiveDate::parse_from_str(&end_raw, "%Y-%m-%d")
+                        .map_err(|e| anyhow!("Invalid end date: {e}"))?;
+                    let end_next_day = end_date + ChronoDuration::days(1);
+                    (
+                        format!("{}T00:00:00", start_raw),
+                        format!("{}T00:00:00", end_next_day.format("%Y-%m-%d")),
+                        true,
+                    )
+                } else if start_is_date_only {
+                    (format!("{}T00:00:00", start_raw), end_raw, false)
+                } else if end_is_date_only {
+                    (start_raw, format!("{}T23:59:59", end_raw), false)
+                } else {
+                    (start_raw, end_raw, false)
+                };
+
+                let mut p = serde_json::json!({
+                    "subject": input_text,
+                    "start": start_str,
+                    "end": end_str,
+                });
+
+                if is_all_day {
+                    p.as_object_mut().unwrap().insert("is_all_day".to_string(), serde_json::json!(true));
+                }
+                if let Some(loc) = &args.location {
+                    p.as_object_mut().unwrap().insert("location".to_string(), serde_json::json!(loc));
+                }
+                p
+            } else {
+                // Natural language parsing via service
+                client
+                    .calendar_parse_natural(&account, &input_text, args.duration, args.location.as_deref())
+                    .map_err(|e| anyhow!("{e}"))?
+            };
 
             // Create the event
             let event = client
@@ -1930,15 +1994,42 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             }
         }
         CalendarCommand::Invite(args) => {
-            let payload = serde_json::json!({
+            // Detect date-only format (YYYY-MM-DD) and expand for all-day events
+            let date_only_re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$").unwrap();
+            let start_is_date_only = date_only_re.is_match(&args.start);
+            let end_is_date_only = date_only_re.is_match(&args.end);
+
+            let (start_str, end_str, is_all_day) = if start_is_date_only && end_is_date_only {
+                // All-day event: start at 00:00:00, end at 00:00:00 of the day AFTER end date
+                let end_date = NaiveDate::parse_from_str(&args.end, "%Y-%m-%d")
+                    .map_err(|e| anyhow!("Invalid end date: {e}"))?;
+                let end_next_day = end_date + ChronoDuration::days(1);
+                (
+                    format!("{}T00:00:00", args.start),
+                    format!("{}T00:00:00", end_next_day.format("%Y-%m-%d")),
+                    true,
+                )
+            } else if start_is_date_only {
+                (format!("{}T00:00:00", args.start), args.end.clone(), false)
+            } else if end_is_date_only {
+                (args.start.clone(), format!("{}T23:59:59", args.end), false)
+            } else {
+                (args.start.clone(), args.end.clone(), false)
+            };
+
+            let mut payload = serde_json::json!({
                 "subject": args.subject,
-                "start": args.start,
-                "end": args.end,
+                "start": start_str,
+                "end": end_str,
                 "required_attendees": args.to,
                 "optional_attendees": args.optional,
                 "location": args.location,
                 "body": args.body,
             });
+
+            if is_all_day {
+                payload.as_object_mut().unwrap().insert("is_all_day".to_string(), serde_json::json!(true));
+            }
 
             let result = client
                 .calendar_invite(&account, payload)
@@ -3006,9 +3097,28 @@ fn handle_mail_get(
 fn handle_mail_read(ctx: &RuntimeContext, account: &str, args: MailReadArgs) -> Result<()> {
     let mail_dir = get_mail_dir(ctx, account)?;
 
+    // Resolve short/human-readable IDs to local Maildir IDs when possible.
+    // `mail search` can return short IDs that map to remote Exchange IDs.
+    let db_path = ctx.paths.sync_db_path(account);
+    let message_id = if db_path.exists() {
+        let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+        let id_gen = IdGenerator::new(&db);
+
+        if let Some(remote_id) = id_gen.resolve(&args.id).map_err(|e| anyhow!("{e}"))? {
+            db.get_message_by_remote_id(&remote_id)
+                .map_err(|e| anyhow!("{e}"))?
+                .map(|m| m.local_id)
+                .unwrap_or_else(|| args.id.clone())
+        } else {
+            args.id.clone()
+        }
+    } else {
+        args.id.clone()
+    };
+
     // Get the message
     let msg = mail_dir
-        .get(&args.folder, &args.id)
+        .get(&args.folder, &message_id)
         .map_err(|e| anyhow!("{e}"))?
         .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
 
@@ -3054,7 +3164,7 @@ fn handle_mail_read(ctx: &RuntimeContext, account: &str, args: MailReadArgs) -> 
         let mut new_flags = msg.flags.clone();
         new_flags.mark_read();
         mail_dir
-            .update_flags(&args.folder, &args.id, &new_flags)
+            .update_flags(&args.folder, &message_id, &new_flags)
             .map_err(|e| anyhow!("{e}"))?;
     }
 

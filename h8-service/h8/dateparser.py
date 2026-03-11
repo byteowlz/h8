@@ -105,6 +105,7 @@ class ParsedDateTime:
     start: datetime
     end: datetime
     duration_minutes: int
+    is_all_day: bool = False
 
 
 def _parse_time(
@@ -215,6 +216,94 @@ def _find_time(text: str) -> Optional[tuple[str, int, int]]:
     return None
 
 
+def _normalize_compact_date(text: str) -> str:
+    """Expand compact date formats like 20260311 to 2026-03-11."""
+    return re.sub(
+        r"\b(\d{4})(\d{2})(\d{2})\b",
+        r"\1-\2-\3",
+        text,
+    )
+
+
+def _parse_single_date_expr(
+    text: str,
+    timezone: str = "Europe/Berlin",
+) -> Optional[datetime]:
+    """Parse a single date expression into a datetime (date only, time=00:00).
+
+    Handles: relative days, weekdays, month+day, ISO dates, compact dates.
+    """
+    tz = ZoneInfo(timezone)
+    now = datetime.now(tz)
+    text = text.strip()
+    if not text:
+        return None
+
+    # Normalize compact dates
+    text = _normalize_compact_date(text)
+
+    # Relative days
+    relative = _find_relative_day(text)
+    if relative:
+        _, offset = relative
+        d = (now + timedelta(days=offset)).date()
+        return datetime(d.year, d.month, d.day, 0, 0, tzinfo=tz)
+
+    # Weekday
+    weekday_match = _find_weekday(text)
+    if weekday_match:
+        _, dateutil_wd = weekday_match
+        next_day = now + relativedelta(weekday=dateutil_wd)
+        d = next_day.date()
+        return datetime(d.year, d.month, d.day, 0, 0, tzinfo=tz)
+
+    # Month name (+ optional day)
+    for month_name, month_num in MONTH_MAP.items():
+        pattern = rf"\b{re.escape(month_name)}\b"
+        if re.search(pattern, text, re.IGNORECASE):
+            day_match = re.search(r"\b(\d{1,2})\b", re.sub(pattern, "", text, flags=re.IGNORECASE))
+            day = int(day_match.group(1)) if day_match and 1 <= int(day_match.group(1)) <= 31 else 1
+            year = now.year
+            try:
+                candidate = datetime(year, month_num, day, tzinfo=tz).date()
+            except ValueError:
+                candidate = now.date()
+            if candidate < now.date():
+                year += 1
+            try:
+                return datetime(year, month_num, day, 0, 0, tzinfo=tz)
+            except ValueError:
+                pass
+
+    # ISO date: 2026-03-11
+    iso_match = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", text.strip())
+    if iso_match:
+        try:
+            d = datetime(
+                int(iso_match.group(1)),
+                int(iso_match.group(2)),
+                int(iso_match.group(3)),
+                0, 0, tzinfo=tz,
+            )
+            return d
+        except ValueError:
+            pass
+
+    # Try dateutil as fallback
+    try:
+        parsed = dateutil_parser.parse(text, fuzzy=True, dayfirst=False)
+        return datetime(parsed.year, parsed.month, parsed.day, 0, 0, tzinfo=tz)
+    except (ValueError, TypeError):
+        return None
+
+
+# Range separator pattern: "till", "until", "through", "bis", "to" (between date-like tokens)
+_RANGE_SEP_PATTERN = re.compile(
+    r"\s+(?:till|until|through|bis)\s+",
+    re.IGNORECASE,
+)
+
+
 def parse_datetime(
     text: str,
     default_duration_minutes: int = 60,
@@ -235,9 +324,81 @@ def parse_datetime(
         >>> parse_datetime("tomorrow 10:30 for 2h")
         >>> parse_datetime("jan 16 2pm-4pm")
         >>> parse_datetime("next monday 9am")
+        >>> parse_datetime("20260311 till 20260313 workshop")
+        >>> parse_datetime("tomorrow till april 24 urlaub")
     """
     tz = ZoneInfo(timezone)
     now = datetime.now(tz)
+
+    # Normalize compact dates (20260311 -> 2026-03-11)
+    text = _normalize_compact_date(text)
+
+    # Check for date range with separator (till/until/through/bis)
+    range_match = _RANGE_SEP_PATTERN.search(text)
+    if range_match:
+        before_sep = text[:range_match.start()]
+        after_sep = text[range_match.end():]
+
+        # Try to figure out which parts are dates and which is the subject
+        # Strategy: try parsing from the edges inward
+        start_dt = None
+        end_dt = None
+        subject_parts = []
+
+        # Try parsing the start from the beginning of before_sep
+        # and the end from the beginning of after_sep
+        # Words that aren't dates become the subject
+        before_words = before_sep.strip().split()
+        after_words = after_sep.strip().split()
+
+        # Try progressively longer prefixes of before_sep as start date
+        for i in range(len(before_words), 0, -1):
+            candidate = " ".join(before_words[:i])
+            parsed = _parse_single_date_expr(candidate, timezone)
+            if parsed:
+                start_dt = parsed
+                subject_parts.extend(before_words[i:])
+                break
+
+        if start_dt is None:
+            # Try the suffix (subject might come first)
+            for i in range(len(before_words)):
+                candidate = " ".join(before_words[i:])
+                parsed = _parse_single_date_expr(candidate, timezone)
+                if parsed:
+                    start_dt = parsed
+                    subject_parts.extend(before_words[:i])
+                    break
+
+        # Try progressively longer prefixes of after_sep as end date
+        for i in range(len(after_words), 0, -1):
+            candidate = " ".join(after_words[:i])
+            parsed = _parse_single_date_expr(candidate, timezone)
+            if parsed:
+                end_dt = parsed
+                subject_parts.extend(after_words[i:])
+                break
+
+        if end_dt is None:
+            # Try suffix
+            for i in range(len(after_words)):
+                candidate = " ".join(after_words[i:])
+                parsed = _parse_single_date_expr(candidate, timezone)
+                if parsed:
+                    end_dt = parsed
+                    subject_parts.extend(after_words[:i])
+                    break
+
+        if start_dt and end_dt:
+            # End date: set to 00:00 of the day AFTER for all-day semantics
+            end_dt = end_dt + timedelta(days=1)
+            duration = int((end_dt - start_dt).total_seconds() / 60)
+            return ParsedDateTime(
+                start=start_dt,
+                end=end_dt,
+                duration_minutes=duration,
+                is_all_day=True,
+            )
 
     # Start with today at a default time
     base_date = now.date()
@@ -246,8 +407,30 @@ def parse_datetime(
     end_hour: Optional[int] = None
     end_minute: Optional[int] = None
     duration_minutes = default_duration_minutes
+    is_all_day = False
 
     remaining_text = text
+
+    # 0. Check for "all day" / "ganztag" / "ganztaegig" keywords
+    all_day_pattern = re.compile(
+        r"\b(all\s*day|ganzt[aä]gig|ganztag)\b", re.IGNORECASE
+    )
+    if all_day_pattern.search(remaining_text):
+        is_all_day = True
+        remaining_text = all_day_pattern.sub("", remaining_text)
+        remaining_text = re.sub(r"\s+", " ", remaining_text).strip()
+
+    # 0b. Check for month name early (before weekday check can steal the date)
+    month_found = None
+    for month_name, month_num in MONTH_MAP.items():
+        pattern = rf"\b{re.escape(month_name)}\b"
+        if re.search(pattern, remaining_text, re.IGNORECASE):
+            month_found = (month_name, month_num)
+            remaining_text = re.sub(
+                pattern, "", remaining_text, flags=re.IGNORECASE
+            )
+            remaining_text = re.sub(r"\s+", " ", remaining_text).strip()
+            break
 
     # 1. Check for relative days (today, tomorrow)
     relative = _find_relative_day(remaining_text)
@@ -258,8 +441,8 @@ def parse_datetime(
             rf"\b{re.escape(keyword)}\b", "", remaining_text, flags=re.IGNORECASE
         )
 
-    # 2. Check for weekday
-    weekday_match = _find_weekday(remaining_text) if not relative else None
+    # 2. Check for weekday (only if no month was explicitly specified)
+    weekday_match = _find_weekday(remaining_text) if not relative and not month_found else None
     if weekday_match:
         match_str, dateutil_weekday = weekday_match
         # Calculate next occurrence of this weekday
@@ -269,23 +452,57 @@ def parse_datetime(
             rf"\b{re.escape(match_str)}\b", "", remaining_text, flags=re.IGNORECASE
         )
 
-    # 3. Check for time range (2pm-4pm)
-    time_range = _find_time_range(remaining_text)
-    if time_range:
-        match_str, start_hour, start_minute, end_hour, end_minute = time_range
-        remaining_text = remaining_text.replace(match_str, "")
-    else:
-        # 4. Check for single time
-        single_time = _find_time(remaining_text)
-        if single_time:
-            match_str, start_hour, start_minute = single_time
-            remaining_text = remaining_text.replace(match_str, "")
+    # If a month was found, resolve the date now
+    if month_found:
+        _month_name, month_num = month_found
+        # Look for a day number in remaining text
+        day_match = re.search(r"\b(\d{1,2})\b", remaining_text)
+        if day_match:
+            day = int(day_match.group(1))
+            if 1 <= day <= 31:
+                year = now.year
+                # If the date is in the past, use next year
+                try:
+                    candidate = now.replace(year=year, month=month_num, day=day).date()
+                except ValueError:
+                    candidate = now.date()
+                if candidate < now.date():
+                    year += 1
+                try:
+                    base_date = base_date.replace(year=year, month=month_num, day=day)
+                except ValueError:
+                    pass
+                remaining_text = remaining_text[:day_match.start()] + remaining_text[day_match.end():]
+                remaining_text = re.sub(r"\s+", " ", remaining_text).strip()
+        else:
+            # Month without day - use the 1st of the month
+            year = now.year
+            if month_num < now.month:
+                year += 1
+            try:
+                base_date = base_date.replace(year=year, month=month_num, day=1)
+            except ValueError:
+                pass
 
-    # 5. Check for duration
-    duration_result = _find_duration(remaining_text)
-    if duration_result:
-        match_str, duration_minutes = duration_result
-        remaining_text = remaining_text.replace(match_str, "")
+    # 3. Check for time range (2pm-4pm) - skip if all_day
+    if not is_all_day:
+        time_range = _find_time_range(remaining_text)
+        if time_range:
+            match_str, start_hour, start_minute, end_hour, end_minute = time_range
+            remaining_text = remaining_text.replace(match_str, "")
+        else:
+            # 4. Check for single time
+            single_time = _find_time(remaining_text)
+            if single_time:
+                match_str, start_hour, start_minute = single_time
+                remaining_text = remaining_text.replace(match_str, "")
+
+    # 5. Check for duration - skip if all_day
+    if not is_all_day:
+        duration_result = _find_duration(remaining_text)
+        if duration_result:
+            match_str, duration_minutes = duration_result
+            remaining_text = remaining_text.replace(match_str, "")
 
     # 6. Try to parse any remaining date-like text with dateutil
     remaining_text = remaining_text.strip()
@@ -300,7 +517,7 @@ def parse_datetime(
     )
     remaining_text = remaining_text.strip()
 
-    if remaining_text and not relative and not weekday_match:
+    if remaining_text and not relative and not weekday_match and not month_found:
         try:
             parsed = dateutil_parser.parse(remaining_text, fuzzy=True, dayfirst=False)
             base_date = parsed.date()
@@ -314,33 +531,47 @@ def parse_datetime(
             pass
 
     # Build final datetime
-    start_dt = datetime(
-        base_date.year,
-        base_date.month,
-        base_date.day,
-        start_hour,
-        start_minute,
-        tzinfo=tz,
-    )
-
-    # Calculate end time
-    if end_hour is not None:
-        end_dt = datetime(
+    if is_all_day:
+        # All-day events: 00:00 to 00:00 next day
+        start_dt = datetime(
             base_date.year,
             base_date.month,
             base_date.day,
-            end_hour,
-            end_minute or 0,
+            0,
+            0,
             tzinfo=tz,
         )
-        duration_minutes = int((end_dt - start_dt).total_seconds() / 60)
+        end_dt = start_dt + timedelta(days=1)
+        duration_minutes = 1440  # 24 hours
     else:
-        end_dt = start_dt + timedelta(minutes=duration_minutes)
+        start_dt = datetime(
+            base_date.year,
+            base_date.month,
+            base_date.day,
+            start_hour,
+            start_minute,
+            tzinfo=tz,
+        )
+
+        # Calculate end time
+        if end_hour is not None:
+            end_dt = datetime(
+                base_date.year,
+                base_date.month,
+                base_date.day,
+                end_hour,
+                end_minute or 0,
+                tzinfo=tz,
+            )
+            duration_minutes = int((end_dt - start_dt).total_seconds() / 60)
+        else:
+            end_dt = start_dt + timedelta(minutes=duration_minutes)
 
     return ParsedDateTime(
         start=start_dt,
         end=end_dt,
         duration_minutes=duration_minutes,
+        is_all_day=is_all_day,
     )
 
 

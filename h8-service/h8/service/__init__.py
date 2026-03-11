@@ -572,12 +572,17 @@ async def calendar_parse(payload: CalendarParse, account: Optional[str] = None):
     if subject_match:
         subject = subject_match.group(1)
     else:
-        # Remove time/date keywords and use what's left
+        # Remove time/date keywords, month names, range separators, and "all day" from subject
         cleaned = re.sub(
             r"\b(at|on|um|am|für|for|next|nächste[rn]?|today|tomorrow|morgen|"
             r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
             r"montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag|"
-            r"\d{1,2}:\d{2}|\d{1,2}(am|pm|uhr)?)\b",
+            r"january|february|march|april|may|june|july|august|september|october|november|december|"
+            r"januar|februar|märz|maerz|mai|juni|juli|oktober|dezember|"
+            r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|okt|nov|dec|dez|"
+            r"all\s*day|ganzt[aä]gig|ganztag|"
+            r"till|until|through|bis|"
+            r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}|\d{1,2}(am|pm|uhr)?)\b",
             "",
             remaining,
             flags=re.IGNORECASE,
@@ -591,6 +596,9 @@ async def calendar_parse(payload: CalendarParse, account: Optional[str] = None):
         "start": parsed.start.isoformat(),
         "end": parsed.end.isoformat(),
     }
+
+    if parsed.is_all_day:
+        result["is_all_day"] = True
 
     if payload.location:
         result["location"] = payload.location

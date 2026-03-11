@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `h8 mail read <id>` now resolves human-readable short IDs (from `h8 mail search`) to local Maildir message IDs before reading
+
 ## [0.5.3] - 2026-02-12
 
 ### Fixed
