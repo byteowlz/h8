@@ -322,7 +322,7 @@ wheels = [
 
 [[package]]
 name = "h8"
-version = "0.5.17"
+version = "0.5.18"
 source = { editable = "." }
 dependencies = [
     { name = "exchangelib" },
