@@ -484,18 +484,23 @@ def parse_datetime(
             except ValueError:
                 pass
 
+    # Track whether any explicit time was found
+    has_explicit_time = False
+
     # 3. Check for time range (2pm-4pm) - skip if all_day
     if not is_all_day:
         time_range = _find_time_range(remaining_text)
         if time_range:
             match_str, start_hour, start_minute, end_hour, end_minute = time_range
             remaining_text = remaining_text.replace(match_str, "")
+            has_explicit_time = True
         else:
             # 4. Check for single time
             single_time = _find_time(remaining_text)
             if single_time:
                 match_str, start_hour, start_minute = single_time
                 remaining_text = remaining_text.replace(match_str, "")
+                has_explicit_time = True
 
     # 5. Check for duration - skip if all_day
     if not is_all_day:
@@ -503,6 +508,7 @@ def parse_datetime(
         if duration_result:
             match_str, duration_minutes = duration_result
             remaining_text = remaining_text.replace(match_str, "")
+            has_explicit_time = True
 
     # 6. Try to parse any remaining date-like text with dateutil
     remaining_text = remaining_text.strip()
@@ -526,9 +532,14 @@ def parse_datetime(
                 if start_hour == 9 and start_minute == 0:
                     start_hour = parsed.hour
                     start_minute = parsed.minute
+                    has_explicit_time = True
         except (ValueError, TypeError):
             # If parsing fails, keep the base_date we have
             pass
+
+    # No explicit time found -> treat as all-day event
+    if not is_all_day and not has_explicit_time:
+        is_all_day = True
 
     # Build final datetime
     if is_all_day:
