@@ -680,6 +680,9 @@ struct MailSendArgs {
     /// Schedule delivery (e.g., "tomorrow 9am", "friday 14:00", "2026-01-20 10:30")
     #[arg(long, short = 's')]
     schedule: Option<String>,
+    /// Save as draft instead of sending (use with --to/--subject/--body)
+    #[arg(long)]
+    draft: bool,
 
     // Direct composition flags (for programmatic/agent use)
     /// Recipient email address(es) - can be specified multiple times
@@ -3440,33 +3443,60 @@ fn handle_mail_send(
             args.body.unwrap_or_default()
         };
 
-        let mut payload = serde_json::json!({
-            "to": args.to,
-            "cc": args.cc,
-            "bcc": args.bcc,
-            "subject": subject,
-            "body": body,
-            "html": args.html,
-        });
+        if args.draft {
+            // Save as draft instead of sending
+            let draft = h8_core::types::DraftSave {
+                to: args.to.clone(),
+                cc: args.cc.clone(),
+                bcc: args.bcc.clone(),
+                subject: subject.clone(),
+                body: body.clone(),
+                html: args.html,
+                in_reply_to: None,
+                references: None,
+            };
 
-        if let Some(ref schedule) = schedule_at {
-            payload["schedule_at"] = serde_json::Value::String(schedule.clone());
-        }
+            let result = client
+                .draft_save(account, &draft)
+                .map_err(|e| anyhow!("{e}"))?;
 
-        let result = client
-            .mail_send(account, payload)
-            .map_err(|e| anyhow!("{e}"))?;
-
-        // User-friendly output
-        if !ctx.common.json && !ctx.common.yaml {
-            if schedule_at.is_some() {
-                println!("Scheduled: {}", subject);
-            } else {
-                println!("Sent: {}", subject);
+            if !ctx.common.json && !ctx.common.yaml {
+                println!("Draft saved: {}", subject);
+                println!("  To: {}", args.to.join(", "));
+                if !args.cc.is_empty() {
+                    println!("  CC: {}", args.cc.join(", "));
+                }
             }
-            println!("  To: {}", args.to.join(", "));
+            emit_output(&ctx.common, &result)?;
+        } else {
+            let mut payload = serde_json::json!({
+                "to": args.to,
+                "cc": args.cc,
+                "bcc": args.bcc,
+                "subject": subject,
+                "body": body,
+                "html": args.html,
+            });
+
+            if let Some(ref schedule) = schedule_at {
+                payload["schedule_at"] = serde_json::Value::String(schedule.clone());
+            }
+
+            let result = client
+                .mail_send(account, payload)
+                .map_err(|e| anyhow!("{e}"))?;
+
+            // User-friendly output
+            if !ctx.common.json && !ctx.common.yaml {
+                if schedule_at.is_some() {
+                    println!("Scheduled: {}", subject);
+                } else {
+                    println!("Sent: {}", subject);
+                }
+                println!("  To: {}", args.to.join(", "));
+            }
+            emit_output(&ctx.common, &result)?;
         }
-        emit_output(&ctx.common, &result)?;
     } else if args.file.is_some() {
         // Read from file
         let mut payload = read_json_payload(args.file.as_ref())?;
