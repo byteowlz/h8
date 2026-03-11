@@ -510,7 +510,8 @@ struct MailListArgs {
 
 #[derive(Debug, Args)]
 struct MailSearchArgs {
-    /// Search query (subject, sender, body)
+    /// Search query (subject, sender, body). Supports OR: "meeting | standup",
+    /// field-specific: "from:alice", "subject:invoice", "body:budget"
     #[arg(required = true)]
     query: String,
     /// Folder to search in
@@ -519,6 +520,15 @@ struct MailSearchArgs {
     /// Maximum results to return
     #[arg(short = 'n', long, default_value_t = 50)]
     limit: i64,
+    /// Start date filter (ISO format, e.g., 2026-02-01)
+    #[arg(long = "from")]
+    from_date: Option<String>,
+    /// End date filter (ISO format, e.g., 2026-03-11)
+    #[arg(long = "to")]
+    to_date: Option<String>,
+    /// Filter to last N days
+    #[arg(short = 'd', long)]
+    days: Option<i64>,
 }
 
 #[derive(Debug, Args)]
@@ -3018,8 +3028,25 @@ fn handle_mail_search(
     account: &str,
     args: MailSearchArgs,
 ) -> Result<()> {
+    // Resolve date filters: --days takes precedence, then --from/--to
+    let (from_date, to_date) = if let Some(days) = args.days {
+        let from = (Local::now() - ChronoDuration::days(days))
+            .format("%Y-%m-%d")
+            .to_string();
+        (Some(from), args.to_date.clone())
+    } else {
+        (args.from_date.clone(), args.to_date.clone())
+    };
+
     let messages = client
-        .mail_search(account, &args.query, &args.folder, args.limit)
+        .mail_search(
+            account,
+            &args.query,
+            &args.folder,
+            args.limit,
+            from_date.as_deref(),
+            to_date.as_deref(),
+        )
         .map_err(|e| anyhow!("{e}"))?;
 
     if !ctx.common.json && !ctx.common.yaml {
@@ -3583,7 +3610,7 @@ fn handle_mail_move(ctx: &RuntimeContext, account: &str, args: MailMoveArgs) -> 
     let (ids, target) = if let Some(ref query) = args.query {
         // Search for messages matching query
         let results = service
-            .mail_search(account, query, &args.folder, args.limit)
+            .mail_search(account, query, &args.folder, args.limit, None, None)
             .map_err(|e| anyhow!("{e}"))?;
 
         let search_ids: Vec<String> = results
