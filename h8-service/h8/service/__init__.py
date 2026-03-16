@@ -574,7 +574,7 @@ async def calendar_parse(payload: CalendarParse, account: Optional[str] = None):
     else:
         # Remove time/date keywords, month names, range separators, and "all day" from subject
         cleaned = re.sub(
-            r"\b(at|on|um|am|für|for|next|nächste[rn]?|today|tomorrow|morgen|"
+            r"\b(at|on|um|am|für|for|next|after|week|woche|nächste[rn]?|übernächsten?|uebernächsten?|uebernachsten?|today|tomorrow|morgen|"
             r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
             r"montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag|"
             r"january|february|march|april|may|june|july|august|september|october|november|december|"

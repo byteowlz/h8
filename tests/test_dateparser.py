@@ -325,3 +325,98 @@ class TestParseDateRange:
 
         assert result.start.date() == now.date()
         assert result.description == "today"
+
+
+class TestNextWeekdayResolution:
+    """Test 'next <weekday>' and '<weekday> after next' patterns."""
+
+    def test_next_weekday_skips_today(self):
+        """'next <today's weekday>' should go to next week."""
+        now = datetime.now(ZoneInfo("Europe/Berlin"))
+        weekday_names = [
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        ]
+        today_name = weekday_names[now.weekday()]
+
+        result = parse_datetime(f"next {today_name} 9am")
+        # Should be exactly 7 days from today
+        expected = (now + timedelta(days=7)).date()
+        assert result.start.date() == expected
+
+    def test_next_weekday_future(self):
+        """'next <future weekday>' goes to next occurrence."""
+        now = datetime.now(ZoneInfo("Europe/Berlin"))
+        # Pick a weekday that's 2 days ahead (won't be today)
+        future_idx = (now.weekday() + 2) % 7
+        weekday_names = [
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        ]
+        future_name = weekday_names[future_idx]
+
+        result = parse_datetime(f"next {future_name} 10am")
+        assert result.start.weekday() == future_idx
+        assert result.start.date() > now.date()
+
+    def test_weekday_after_next(self):
+        """'<weekday> after next' should be 2 occurrences away (skipping next)."""
+        now = datetime.now(ZoneInfo("Europe/Berlin"))
+        result = parse_datetime("friday after next 2pm")
+
+        # Should be a Friday
+        assert result.start.weekday() == 4
+        # Should be at least 14 days from today if today is Friday,
+        # or at least 8 days otherwise
+        if now.weekday() == 4:  # today is Friday
+            assert result.start.date() >= (now + timedelta(days=14)).date()
+        else:
+            assert result.start.date() > (now + timedelta(days=7)).date()
+
+    def test_next_weekday_all_day(self):
+        """'next friday' without time should create all-day event."""
+        result = parse_datetime("next friday")
+
+        assert result.is_all_day is True
+        assert result.start.weekday() == 4
+
+    def test_weekday_after_next_all_day(self):
+        """'friday after next' without time should create all-day event."""
+        result = parse_datetime("friday after next")
+
+        assert result.is_all_day is True
+        assert result.start.weekday() == 4
+
+    def test_next_friday_date_range(self):
+        """parse_date_range('next friday') should skip today if today is friday."""
+        now = datetime.now(ZoneInfo("Europe/Berlin"))
+        result = parse_date_range("next friday")
+
+        assert result.start.weekday() == 4  # Friday
+        # If today is Friday, it should go to next Friday
+        if now.weekday() == 4:
+            expected = (now + timedelta(days=7)).date()
+            assert result.start.date() == expected
+
+    def test_friday_after_next_date_range(self):
+        """parse_date_range('friday after next') works."""
+        result = parse_date_range("friday after next")
+
+        assert result.start.weekday() == 4  # Friday
+
+    def test_standalone_weekday_without_time_is_all_day(self):
+        """'friday' without time should be an all-day event for cal add."""
+        result = parse_datetime("Blocker friday")
+
+        assert result.is_all_day is True
+        assert result.start.weekday() == 4
