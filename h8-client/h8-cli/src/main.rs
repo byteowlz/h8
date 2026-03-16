@@ -3098,7 +3098,7 @@ fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
         MailCommand::List(args) => handle_mail_list(ctx, &client, &account, args),
         MailCommand::Search(args) => handle_mail_search(ctx, &client, &account, args),
         MailCommand::Get(args) => handle_mail_get(ctx, &client, &account, args),
-        MailCommand::Read(args) => handle_mail_read(ctx, &account, args),
+        MailCommand::Read(args) => handle_mail_read(ctx, &client, &account, args),
         MailCommand::Fetch(args) => handle_mail_fetch(ctx, &client, &account, args),
         MailCommand::Send(args) => handle_mail_send(ctx, &client, &account, args),
         MailCommand::Compose(args) => handle_mail_compose(ctx, &account, args),
@@ -3318,33 +3318,118 @@ fn handle_mail_get(
     Ok(())
 }
 
-fn handle_mail_read(ctx: &RuntimeContext, account: &str, args: MailReadArgs) -> Result<()> {
+fn handle_mail_read(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    args: MailReadArgs,
+) -> Result<()> {
     let mail_dir = get_mail_dir(ctx, account)?;
 
     // Resolve short/human-readable IDs to local Maildir IDs when possible.
     // `mail search` can return short IDs that map to remote Exchange IDs.
     let db_path = ctx.paths.sync_db_path(account);
-    let message_id = if db_path.exists() {
+    let (message_id, remote_id_resolved) = if db_path.exists() {
         let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
         let id_gen = IdGenerator::new(&db);
 
         if let Some(remote_id) = id_gen.resolve(&args.id).map_err(|e| anyhow!("{e}"))? {
-            db.get_message_by_remote_id(&remote_id)
+            let local = db
+                .get_message_by_remote_id(&remote_id)
                 .map_err(|e| anyhow!("{e}"))?
                 .map(|m| m.local_id)
-                .unwrap_or_else(|| args.id.clone())
+                .unwrap_or_else(|| args.id.clone());
+            (local, Some(remote_id))
         } else {
-            args.id.clone()
+            // Also try the messages table directly (local_id lookup)
+            let remote = db
+                .get_message(&args.id)
+                .ok()
+                .flatten()
+                .map(|m| m.remote_id);
+            (args.id.clone(), remote)
         }
     } else {
-        args.id.clone()
+        (args.id.clone(), None)
     };
 
-    // Get the message
-    let msg = mail_dir
-        .get(&args.folder, &message_id)
-        .map_err(|e| anyhow!("{e}"))?
-        .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
+    // Get the message from Maildir, or auto-fetch from server if not found
+    let msg = match mail_dir.get(&args.folder, &message_id).map_err(|e| anyhow!("{e}"))? {
+        Some(m) => m,
+        None => {
+            // Message not in Maildir - try fetching from server
+            let remote_id = remote_id_resolved
+                .or_else(|| {
+                    // Last resort: try resolve_mail_id
+                    let resolved = resolve_mail_id(ctx, account, &args.id);
+                    if resolved != args.id { Some(resolved) } else { None }
+                })
+                .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
+
+            if !ctx.common.quiet {
+                eprintln!("Fetching message from server...");
+            }
+
+            let server_msg = client
+                .mail_get(account, &args.folder, &remote_id)
+                .map_err(|e| anyhow!("failed to fetch message: {e}"))?;
+
+            if server_msg.get("error").is_some() {
+                return Err(anyhow!(
+                    "message not found: {}",
+                    server_msg.get("error").and_then(|v| v.as_str()).unwrap_or(&args.id)
+                ));
+            }
+
+            // Build RFC822-ish content from server response
+            let subject = server_msg.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
+            let from = server_msg.get("from").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let to_list: Vec<&str> = server_msg
+                .get("to")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let cc_list: Vec<&str> = server_msg
+                .get("cc")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let date = server_msg.get("datetime_received").and_then(|v| v.as_str()).unwrap_or("");
+            let body = server_msg.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let body_type = server_msg.get("body_type").and_then(|v| v.as_str()).unwrap_or("text");
+
+            let mut content = format!("Subject: {}\nFrom: {}\nDate: {}\n", subject, from, date);
+            if !to_list.is_empty() {
+                content.push_str(&format!("To: {}\n", to_list.join(", ")));
+            }
+            if !cc_list.is_empty() {
+                content.push_str(&format!("Cc: {}\n", cc_list.join(", ")));
+            }
+            if body_type == "html" {
+                content.push_str("Content-Type: text/html; charset=utf-8\n");
+            } else {
+                content.push_str("Content-Type: text/plain; charset=utf-8\n");
+            }
+            content.push('\n');
+            content.push_str(body);
+
+            // Store in Maildir for future reads
+            let is_read = server_msg.get("is_read").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut flags = h8_core::maildir::MessageFlags::default();
+            if is_read {
+                flags.mark_read();
+            }
+
+            mail_dir
+                .store_with_id(&args.folder, content.as_bytes(), &flags, &message_id)
+                .map_err(|e| anyhow!("failed to store message locally: {e}"))?;
+
+            mail_dir
+                .get(&args.folder, &message_id)
+                .map_err(|e| anyhow!("{e}"))?
+                .ok_or_else(|| anyhow!("message not found after fetch: {}", args.id))?
+        }
+    };
 
     let raw_content = msg.read_content().map_err(|e| anyhow!("{e}"))?;
 
