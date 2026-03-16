@@ -2460,6 +2460,54 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
         }
     }
 
+    // 3b. "<weekday> after next" / "next <weekday> after next" / "übernächsten <weekday>"
+    let after_next_re = Regex::new(r"(?i)(?:(?:next\s+)?(\w+)\s+after\s+next|übernächsten?\s+(\w+)|uebernächsten?\s+(\w+)|uebernachsten?\s+(\w+))").unwrap();
+    if let Some(caps) = after_next_re.captures(&text_lower) {
+        let day_name = caps.get(1)
+            .or_else(|| caps.get(2))
+            .or_else(|| caps.get(3))
+            .or_else(|| caps.get(4))
+            .map(|m| m.as_str());
+        if let Some(day_name) = day_name {
+            for (name, weekday) in weekdays {
+                if day_name == *name {
+                    // "after next" = 2 weeks from the next occurrence
+                    let today_offset = today.weekday().num_days_from_monday() as i64;
+                    let target_offset = weekday.num_days_from_monday() as i64;
+                    let mut days_diff = target_offset - today_offset;
+                    if days_diff <= 0 {
+                        days_diff += 7;
+                    }
+                    // Add another week to get "after next"
+                    days_diff += 7;
+                    let target = today + ChronoDuration::days(days_diff);
+                    return Some((target, format!("{} after next", *name)));
+                }
+            }
+        }
+    }
+
+    // 3c. "next <weekday>" pattern (e.g., "next friday", "nächsten freitag")
+    // If today IS that weekday, skip to next week's occurrence
+    let next_weekday_re = Regex::new(r"(?i)^(?:next|nächsten?|naechsten?)\s+(\w+)$").unwrap();
+    if let Some(caps) = next_weekday_re.captures(&text_lower) {
+        let day_name = caps.get(1).unwrap().as_str();
+        for (name, weekday) in weekdays {
+            if day_name == *name {
+                let today_offset = today.weekday().num_days_from_monday() as i64;
+                let target_offset = weekday.num_days_from_monday() as i64;
+                let mut days_diff = target_offset - today_offset;
+                // "next <weekday>" always means a future date, at least 1 day away
+                // If today IS that weekday (days_diff == 0), go to next week
+                if days_diff <= 0 {
+                    days_diff += 7;
+                }
+                let target = today + ChronoDuration::days(days_diff);
+                return Some((target, format!("next {}", *name)));
+            }
+        }
+    }
+
     for (name, weekday) in weekdays {
         if text_lower == *name {
             let today_weekday = today.weekday();

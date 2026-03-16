@@ -133,15 +133,92 @@ def _parse_time(
 
 
 def _find_weekday(text: str) -> Optional[tuple[str, weekday]]:
-    """Find a weekday name in the text and return (match, dateutil_weekday)."""
+    """Find a weekday name in the text and return (match, dateutil_weekday).
+
+    Supports:
+    - "friday" -> this week's occurrence (may be today or past)
+    - "next friday" -> always future, skips today if today is that weekday
+    - "friday after next" / "next friday after next" -> 2 weeks out
+    - "friday next week" -> next week's occurrence
+    """
     text_lower = text.lower()
 
+    # Check for "<weekday> after next" / "next <weekday> after next" pattern
+    after_next_match = re.search(
+        r"\b(?:next\s+)?(\w+)\s+after\s+next\b", text_lower
+    )
+    if after_next_match:
+        day_name = after_next_match.group(1)
+        if day_name in WEEKDAY_MAP:
+            # "after next" means skip the next occurrence and get the one after
+            # dateutil counts today as an occurrence if today matches, so:
+            # - If today IS that weekday: +1=today, +2=next week, +3=week after -> need +3
+            # - If today is NOT that weekday: +1=next occurrence, +2=the one after -> need +2
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo as _ZI
+
+            tz = _ZI("Europe/Berlin")
+            now = _dt.now(tz)
+            target_wd = WEEKDAY_MAP[day_name]
+            if now.weekday() == target_wd.weekday:
+                return after_next_match.group(0), target_wd(+3)
+            else:
+                return after_next_match.group(0), target_wd(+2)
+
+    # Check for German "übernächsten <weekday>" pattern
+    uebernext_match = re.search(
+        r"\b(?:übernächsten?|uebernächsten?|uebernachsten?)\s+(\w+)\b", text_lower
+    )
+    if uebernext_match:
+        day_name = uebernext_match.group(1)
+        if day_name in WEEKDAY_MAP:
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo as _ZI
+
+            tz = _ZI("Europe/Berlin")
+            now = _dt.now(tz)
+            target_wd = WEEKDAY_MAP[day_name]
+            if now.weekday() == target_wd.weekday:
+                return uebernext_match.group(0), target_wd(+3)
+            else:
+                return uebernext_match.group(0), target_wd(+2)
+
+    # Check for "<weekday> next week" / "next week <weekday>" pattern
+    next_week_match = re.search(
+        r"\b(?:(\w+)\s+next\s+week|next\s+week\s+(\w+)|(\w+)\s+nächste\s+woche|nächste\s+woche\s+(\w+))\b",
+        text_lower,
+    )
+    if next_week_match:
+        day_name = next(
+            (g for g in (next_week_match.group(i) for i in range(1, 5)) if g),
+            None,
+        )
+        if day_name and day_name in WEEKDAY_MAP:
+            return next_week_match.group(0), WEEKDAY_MAP[day_name](+2)
+
     # Check for "next <weekday>" pattern
-    next_match = re.search(r"\bnext\s+(\w+)", text_lower)
+    # "next <weekday>" always means a future date; if today IS that weekday, skip to next week
+    next_match = re.search(
+        r"\b(?:next|nächsten?|naechsten?)\s+(\w+)\b", text_lower
+    )
     if next_match:
         day_name = next_match.group(1)
         if day_name in WEEKDAY_MAP:
-            return next_match.group(0), WEEKDAY_MAP[day_name](+1)
+            # Use +2 to guarantee we skip today if today is that weekday
+            # dateutil's weekday(+1) means "next occurrence including today"
+            # dateutil's weekday(+2) means "second next occurrence"
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo as _ZI
+
+            tz = _ZI("Europe/Berlin")
+            now = _dt.now(tz)
+            target_wd = WEEKDAY_MAP[day_name]
+            # Check if today is the target weekday
+            # dateutil weekday constants: MO=0, TU=1, ... SU=6
+            if now.weekday() == target_wd.weekday:
+                return next_match.group(0), target_wd(+2)
+            else:
+                return next_match.group(0), target_wd(+1)
 
     # Check for standalone weekday
     for name, wd in WEEKDAY_MAP.items():
