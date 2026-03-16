@@ -1,0 +1,29 @@
+{
+  "todos": [
+    {
+      "id": "30b0ca97",
+      "content": "Fix 'next friday' date resolution when today is friday",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "a3f92a46",
+      "content": "Fix 'friday after next' date resolution",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2311ba11",
+      "content": "Make cal add without time create all-day event",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "9c6d4591",
+      "content": "Ensure uniform date resolution across all commands",
+      "status": "completed",
+      "priority": "medium"
+    }
+  ],
+  "updated_at": "2026-03-13T09:01:36.626Z"
+}
