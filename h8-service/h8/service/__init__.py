@@ -573,6 +573,8 @@ async def calendar_parse(payload: CalendarParse, account: Optional[str] = None):
         subject = subject_match.group(1)
     else:
         # Remove time/date keywords, month names, range separators, and "all day" from subject
+        # Note: time patterns are ordered longest-first so "9:30am" is matched as one unit
+        # (not split into "9", ":", "30am" leaving an orphan colon)
         cleaned = re.sub(
             r"\b(at|on|um|am|für|for|next|after|week|woche|nächste[rn]?|übernächsten?|uebernächsten?|uebernachsten?|today|tomorrow|morgen|"
             r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
@@ -582,11 +584,13 @@ async def calendar_parse(payload: CalendarParse, account: Optional[str] = None):
             r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|okt|nov|dec|dez|"
             r"all\s*day|ganzt[aä]gig|ganztag|"
             r"till|until|through|bis|"
-            r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}|\d{1,2}(am|pm|uhr)?)\b",
+            r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}\s*(am|pm|uhr)?|\d{1,2}(am|pm|uhr)?)\b",
             "",
             remaining,
             flags=re.IGNORECASE,
         )
+        # Clean up orphaned punctuation (colons, dashes) left after removing time tokens
+        cleaned = re.sub(r"(?<!\w)[:;,\-]+(?!\w)", "", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         subject = cleaned if cleaned else "Event"
 
