@@ -634,6 +634,68 @@ impl Database {
         Ok(events)
     }
 
+    /// Delete calendar events in a date range whose remote_id is NOT in the given set.
+    /// Returns the list of (local_id, remote_id) pairs that were deleted, so callers
+    /// can free the corresponding short IDs from the pool.
+    pub fn delete_stale_calendar_events(
+        &self,
+        start_date: &str,
+        end_date: &str,
+        server_remote_ids: &std::collections::HashSet<String>,
+    ) -> Result<Vec<(String, String)>> {
+        // Build the same bounds as list_calendar_events_range
+        let start_bound = if start_date.contains('T') {
+            start_date.to_string()
+        } else {
+            format!("{}T00:00:00", start_date)
+        };
+        let end_bound = if end_date.contains('T') {
+            end_date.to_string()
+        } else {
+            format!("{}T23:59:59", end_date)
+        };
+        let start_date_only = &start_date[..10.min(start_date.len())];
+        let end_date_only = &end_date[..10.min(end_date.len())];
+
+        // Fetch all local events in the range
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT local_id, remote_id
+            FROM calendar_events
+            WHERE (start >= ?1 AND start <= ?2)
+               OR (start < ?1 AND end > ?1)
+               OR (is_all_day = 1 AND start >= ?3 AND start <= ?4)
+            "#,
+        )?;
+        let mut rows = stmt.query(params![
+            start_bound,
+            end_bound,
+            start_date_only,
+            end_date_only
+        ])?;
+
+        let mut stale = Vec::new();
+        while let Some(row) = rows.next()? {
+            let local_id: String = row.get(0)?;
+            let remote_id: String = row.get(1)?;
+            if !server_remote_ids.contains(&remote_id) {
+                stale.push((local_id, remote_id));
+            }
+        }
+        drop(rows);
+        drop(stmt);
+
+        // Delete stale events
+        for (local_id, _) in &stale {
+            self.conn.execute(
+                "DELETE FROM calendar_events WHERE local_id = ?1",
+                params![local_id],
+            )?;
+        }
+
+        Ok(stale)
+    }
+
     /// Delete old calendar events (before a given date).
     pub fn delete_old_calendar_events(&self, before_date: &str) -> Result<usize> {
         let count = self.conn.execute(

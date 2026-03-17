@@ -1654,7 +1654,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 .map_err(|e| anyhow!("{e}"))?;
 
             // Sync events to local DB and assign word IDs
-            let events_with_ids = sync_calendar_events(ctx, &account, &events)?;
+            let events_with_ids = sync_calendar_events(ctx, &account, &events, None)?;
             emit_output(&ctx.common, &events_with_ids)?;
         }
         CalendarCommand::Create(args) => {
@@ -1664,7 +1664,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 .map_err(|e| anyhow!("{e}"))?;
 
             // Sync newly created event
-            let events_with_ids = sync_calendar_events(ctx, &account, &serde_json::json!([event]))?;
+            let events_with_ids = sync_calendar_events(ctx, &account, &serde_json::json!([event]), None)?;
             if let Some(e) = events_with_ids.as_array().and_then(|a| a.first()) {
                 emit_output(&ctx.common, e)?;
             } else {
@@ -1815,7 +1815,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                             args.limit,
                         )
                         .map_err(|e| anyhow!("{e}"))?;
-                    sync_calendar_events(ctx, &account, &events)?
+                    sync_calendar_events(ctx, &account, &events, None)?
                 }
             } else {
                 // No cache, use server
@@ -1829,7 +1829,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                         args.limit,
                     )
                     .map_err(|e| anyhow!("{e}"))?;
-                sync_calendar_events(ctx, &account, &events)?
+                sync_calendar_events(ctx, &account, &events, None)?
             };
 
             if !ctx.common.json && !ctx.common.yaml {
@@ -1887,14 +1887,14 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                     let events = client
                         .calendar_list(&account, 0, Some(&from_date), Some(&to_date))
                         .map_err(|e| anyhow!("{e}"))?;
-                    sync_calendar_events(ctx, &account, &events)?
+                    sync_calendar_events(ctx, &account, &events, None)?
                 }
             } else {
                 // Range query or no cache - fetch from server
                 let events = client
                     .calendar_list(&account, 0, Some(&from_date), Some(&to_date))
                     .map_err(|e| anyhow!("{e}"))?;
-                sync_calendar_events(ctx, &account, &events)?
+                sync_calendar_events(ctx, &account, &events, None)?
             };
 
             if !ctx.common.json && !ctx.common.yaml {
@@ -1962,7 +1962,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 .map_err(|e| anyhow!("{e}"))?;
 
             // Sync newly created event
-            let events_with_ids = sync_calendar_events(ctx, &account, &serde_json::json!([event]))?;
+            let events_with_ids = sync_calendar_events(ctx, &account, &serde_json::json!([event]), None)?;
 
             if !ctx.common.json && !ctx.common.yaml {
                 let subject = payload.get("subject").and_then(|v| v.as_str()).unwrap_or("Event");
@@ -2104,7 +2104,12 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
 }
 
 /// Sync calendar events to local DB and assign word IDs.
-fn sync_calendar_events(ctx: &RuntimeContext, account: &str, events: &Value) -> Result<Value> {
+fn sync_calendar_events(
+    ctx: &RuntimeContext,
+    account: &str,
+    events: &Value,
+    date_range: Option<(&str, &str)>,
+) -> Result<Value> {
     use h8_core::types::CalendarEventSync;
 
     let db_path = ctx.paths.sync_db_path(account);
@@ -2125,6 +2130,7 @@ fn sync_calendar_events(ctx: &RuntimeContext, account: &str, events: &Value) -> 
 
     let mut result = Vec::new();
     let now = chrono::Utc::now().to_rfc3339();
+    let mut server_remote_ids = std::collections::HashSet::new();
 
     for event in events_array {
         let remote_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -2132,6 +2138,8 @@ fn sync_calendar_events(ctx: &RuntimeContext, account: &str, events: &Value) -> 
             result.push(event.clone());
             continue;
         }
+
+        server_remote_ids.insert(remote_id.to_string());
 
         // Check if we already have this event
         let local_id = if let Ok(Some(existing)) = db.get_calendar_event_by_remote_id(remote_id) {
@@ -2180,6 +2188,15 @@ fn sync_calendar_events(ctx: &RuntimeContext, account: &str, events: &Value) -> 
             obj.insert("id".to_string(), serde_json::json!(local_id));
         }
         result.push(out_event);
+    }
+
+    // Prune stale events: delete local events that no longer exist on the server
+    if let Some((start, end)) = date_range {
+        if let Ok(stale) = db.delete_stale_calendar_events(start, end, &server_remote_ids) {
+            for (local_id, _remote_id) in &stale {
+                let _ = id_gen.free(local_id);
+            }
+        }
     }
 
     Ok(serde_json::json!(result))
@@ -2273,12 +2290,15 @@ fn handle_calendar_sync(
 
     let sync_time = chrono::Utc::now().to_rfc3339();
     let mut synced = 0;
+    let mut server_remote_ids = std::collections::HashSet::new();
 
     for event in events_array {
         let remote_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
         if remote_id.is_empty() {
             continue;
         }
+
+        server_remote_ids.insert(remote_id.to_string());
 
         // Check if we already have this event
         let local_id = if let Ok(Some(existing)) = db.get_calendar_event_by_remote_id(remote_id) {
@@ -2323,6 +2343,14 @@ fn handle_calendar_sync(
         synced += 1;
     }
 
+    // Prune stale events: remove local events no longer present on the server
+    let pruned = db
+        .delete_stale_calendar_events(&start_date, &end_date, &server_remote_ids)
+        .map_err(|e| anyhow!("{e}"))?;
+    for (local_id, _) in &pruned {
+        let _ = id_gen.free(local_id);
+    }
+
     // Update sync state
     db.set_calendar_sync_state(&sync_time)
         .map_err(|e| anyhow!("{e}"))?;
@@ -2337,6 +2365,9 @@ fn handle_calendar_sync(
 
     if !ctx.common.quiet {
         println!("Synced {} events", synced);
+        if !pruned.is_empty() {
+            println!("Pruned {} stale events", pruned.len());
+        }
         if deleted > 0 {
             println!("Cleaned up {} old events", deleted);
         }
@@ -7389,7 +7420,7 @@ fn fetch_agenda_from_server(
         .map_err(|e| anyhow!("{e}"))?;
 
     // Sync to local cache
-    let _ = sync_calendar_events(ctx, account, &events_val);
+    let _ = sync_calendar_events(ctx, account, &events_val, None);
 
     Ok(events_val)
 }
@@ -10035,11 +10066,22 @@ fn handle_sync(ctx: &RuntimeContext, args: SyncArgs) -> Result<()> {
         if !ctx.common.quiet {
             println!("Syncing calendar...");
         }
+
+        // Compute explicit date range so the server returns all events
+        // (including past events from today) and we can prune stale entries
+        let cal_now = Local::now();
+        let cal_start = (cal_now - ChronoDuration::weeks(2))
+            .format("%Y-%m-%dT00:00:00")
+            .to_string();
+        let cal_end = (cal_now + ChronoDuration::weeks(args.weeks))
+            .format("%Y-%m-%dT23:59:59")
+            .to_string();
+
         match client.calendar_list(
             &account,
-            args.weeks * 7,
-            None,
-            None,
+            0,
+            Some(&cal_start),
+            Some(&cal_end),
         ) {
             Ok(events) => {
                 // Sync to local database
@@ -10054,7 +10096,7 @@ fn handle_sync(ctx: &RuntimeContext, args: SyncArgs) -> Result<()> {
                                 let _ = id_gen.init_pool(&words);
                             }
                         }
-                        if let Ok(synced) = sync_calendar_events(ctx, &account, &events) {
+                        if let Ok(synced) = sync_calendar_events(ctx, &account, &events, Some((&cal_start, &cal_end))) {
                             results.insert("calendar".to_string(), json!({
                                 "status": "ok",
                                 "events_synced": synced.as_array().map(|a| a.len()).unwrap_or(0),
