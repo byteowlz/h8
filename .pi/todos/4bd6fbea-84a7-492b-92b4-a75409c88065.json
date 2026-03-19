@@ -1,0 +1,23 @@
+{
+  "todos": [
+    {
+      "id": "1",
+      "content": "Investigate why calendar sync misses events from non-default calendar folders",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "content": "Add support for _Booking items (Microsoft Bookings) in list_events and search_events",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "3",
+      "content": "Test the fix",
+      "status": "completed",
+      "priority": "high"
+    }
+  ],
+  "updated_at": "2026-03-19T11:08:10.358Z"
+}

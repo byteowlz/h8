@@ -1,0 +1,35 @@
+{
+  "todos": [
+    {
+      "id": "1",
+      "content": "Add delete_stale_calendar_events method to Database (db.rs)",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "content": "Update sync_calendar_events to prune stale events after sync",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "3",
+      "content": "Update handle_calendar_sync to prune stale events",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "4",
+      "content": "Update handle_sync calendar path to pass date range",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "5",
+      "content": "Compile and test",
+      "status": "completed",
+      "priority": "high"
+    }
+  ],
+  "updated_at": "2026-03-17T14:00:57.104Z"
+}
