@@ -10,6 +10,7 @@ from typing import Optional, Any
 from exchangelib import EWSDateTime, EWSTimeZone, CalendarItem, Attendee, Mailbox
 from exchangelib.account import Account
 from exchangelib.items import MeetingRequest
+from exchangelib.items.calendar_item import _Booking
 
 
 # Pattern to extract online meeting URLs from body
@@ -21,6 +22,147 @@ MEETING_URL_PATTERN = re.compile(
     r'[^\s<>"\']*webex\.com/[^\s<>"\']+|'
     r'dialin\.teams\.microsoft\.com/[^\s<>"\']+)'
 )
+
+# Timezone mapping for iCalendar TZID values to IANA timezone names
+_ICAL_TZ_MAP = {
+    "W. Europe Standard Time": "Europe/Berlin",
+    "Central Europe Standard Time": "Europe/Budapest",
+    "Romance Standard Time": "Europe/Paris",
+    "Central European Standard Time": "Europe/Warsaw",
+    "GMT Standard Time": "Europe/London",
+    "Greenwich Standard Time": "Atlantic/Reykjavik",
+    "E. Europe Standard Time": "Europe/Bucharest",
+    "FLE Standard Time": "Europe/Helsinki",
+    "GTB Standard Time": "Europe/Athens",
+    "Russian Standard Time": "Europe/Moscow",
+    "Eastern Standard Time": "America/New_York",
+    "Central Standard Time": "America/Chicago",
+    "Mountain Standard Time": "America/Denver",
+    "Pacific Standard Time": "America/Los_Angeles",
+    "US Mountain Standard Time": "America/Phoenix",
+    "Atlantic Standard Time": "America/Halifax",
+    "Tokyo Standard Time": "Asia/Tokyo",
+    "China Standard Time": "Asia/Shanghai",
+    "India Standard Time": "Asia/Kolkata",
+    "AUS Eastern Standard Time": "Australia/Sydney",
+    "UTC": "UTC",
+}
+
+
+def _parse_booking_from_mime(
+    item: _Booking, account: Optional[Account] = None
+) -> Optional[dict]:
+    """Extract calendar data from a _Booking item via its MIME/iCalendar content.
+
+    Microsoft Bookings items (IPM.Appointment.Microsoft.OnlineBooking) are stored
+    as Item, not CalendarItem, so exchangelib cannot access start/end/location
+    directly. We parse these from the MIME content which contains iCalendar data.
+
+    If mime_content is not loaded (e.g. from a .only() query), the item is
+    re-fetched from Exchange using the provided account.
+    """
+    mime = getattr(item, "mime_content", None)
+
+    # Re-fetch the full item if mime_content wasn't loaded (e.g. from .only())
+    if not mime and account and item.id:
+        from exchangelib.properties import ItemId
+
+        full_items = list(
+            account.fetch(ids=[ItemId(id=item.id, changekey=item.changekey)])
+        )
+        if full_items:
+            mime = getattr(full_items[0], "mime_content", None)
+            # Also grab body from re-fetched item if needed
+            if not getattr(item, "body", None) and getattr(full_items[0], "body", None):
+                item.body = full_items[0].body
+
+    if not mime:
+        return None
+
+    try:
+        text = mime.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+    dtstart = None
+    dtend = None
+    location = None
+    dtstart_tz = None
+
+    for line in text.split("\n"):
+        line = line.strip()
+        # Match DTSTART;TZID=...:YYYYMMDDTHHmmss (timed event in VEVENT)
+        if line.startswith("DTSTART;TZID="):
+            parts = line.split(":", 1)
+            if len(parts) == 2:
+                tzid = parts[0].replace("DTSTART;TZID=", "")
+                dtstart = parts[1].strip()
+                dtstart_tz = _ICAL_TZ_MAP.get(tzid, tzid)
+        elif line.startswith("DTSTART:"):
+            val = line.split(":", 1)[1].strip()
+            # Skip VTIMEZONE sentinel values like 16010101T...
+            if not val.startswith("1601"):
+                dtstart = val
+        elif line.startswith("DTEND;TZID="):
+            parts = line.split(":", 1)
+            if len(parts) == 2:
+                dtend = parts[1].strip()
+        elif line.startswith("DTEND:"):
+            val = line.split(":", 1)[1].strip()
+            if not val.startswith("1601"):
+                dtend = val
+        elif line.startswith("LOCATION"):
+            parts = line.split(":", 1)
+            if len(parts) == 2:
+                loc = parts[1].strip()
+                if loc:
+                    location = loc
+
+    if not dtstart:
+        return None
+
+    # Parse the iCalendar datetime format (YYYYMMDDTHHmmss)
+    # Convert to UTC to match exchangelib's CalendarItem output format
+    def _ical_to_iso(val: str, tz_name: Optional[str] = None) -> str:
+        if "T" in val:
+            # Timed event: 20260319T133000
+            dt = datetime.strptime(val[:15], "%Y%m%dT%H%M%S")
+            if tz_name:
+                tz = ZoneInfo(tz_name)
+                dt = dt.replace(tzinfo=tz)
+                # Convert to UTC to match other events' format
+                dt = dt.astimezone(ZoneInfo("UTC"))
+            return dt.isoformat()
+        else:
+            # All-day event: 20260319
+            return f"{val[:4]}-{val[4:6]}-{val[6:8]}"
+
+    start_str = _ical_to_iso(dtstart, dtstart_tz)
+    end_str = _ical_to_iso(dtend, dtstart_tz) if dtend else start_str
+    is_all_day = "T" not in dtstart
+
+    # Extract meeting URL from body
+    meeting_url = None
+    body = getattr(item, "body", None)
+    if body:
+        meeting_url = _extract_meeting_url(str(body))
+
+    event = {
+        "id": item.id,
+        "changekey": item.changekey,
+        "subject": item.subject,
+        "start": start_str,
+        "end": end_str,
+        "location": location,
+        "organizer": None,
+        "is_all_day": is_all_day,
+        "is_cancelled": False,
+    }
+
+    if meeting_url:
+        event["meeting_url"] = meeting_url
+
+    return event
 
 
 def _extract_meeting_url(body: str) -> Optional[str]:
@@ -72,6 +214,14 @@ def list_events(
 
     events = []
     for item in query:
+        # Handle Microsoft Bookings items (IPM.Appointment.Microsoft.OnlineBooking)
+        # These are _Booking objects that lack start/end fields
+        if isinstance(item, _Booking):
+            booking_event = _parse_booking_from_mime(item, account)
+            if booking_event:
+                events.append(booking_event)
+            continue
+
         if not hasattr(item, "start"):
             continue
 
@@ -282,6 +432,24 @@ def search_events(
     events = []
 
     for item in view:
+        # Handle Microsoft Bookings items
+        if isinstance(item, _Booking):
+            booking_event = _parse_booking_from_mime(item, account)
+            if booking_event:
+                # Apply search filter to booking events too
+                subject = (booking_event.get("subject") or "").lower()
+                location = (booking_event.get("location") or "").lower()
+                body = (str(getattr(item, "body", "")) if getattr(item, "body", None) else "").lower()
+                if (
+                    query_lower in subject
+                    or query_lower in location
+                    or query_lower in body
+                ):
+                    events.append(booking_event)
+                    if len(events) >= limit:
+                        break
+            continue
+
         if not hasattr(item, "start"):
             continue
 
