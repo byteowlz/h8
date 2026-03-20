@@ -2553,7 +2553,8 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
     }
 
     // 4. German dot format: "28.01", "28.01.2026", "28.1", "28.1.26"
-    let dot_re = Regex::new(r"^(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?$").unwrap();
+    // Use word boundaries to find date anywhere in string (e.g., "nrw 22.04" -> "22.04")
+    let dot_re = Regex::new(r"\b(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\b").unwrap();
     if let Some(caps) = dot_re.captures(&text_lower) {
         let day: u32 = caps.get(1).unwrap().as_str().parse().ok()?;
         let month: u32 = caps.get(2).unwrap().as_str().parse().ok()?;
