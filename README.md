@@ -21,6 +21,62 @@ h8 relies on oama to obtain OAuth2 access tokens for Microsoft 365. You must con
 
 h8's Python service calls `oama access <email>` to get fresh tokens as needed.
 
+### Headless Server Deployment
+
+On headless Linux servers (no display), GPG's pinentry can hang because it tries to open a GUI/TUI dialog. h8-service detects headless environments and automatically configures GPG loopback pinentry on startup, but you still need a GPG key that works non-interactively.
+
+**Option A: Pre-cache your existing key's passphrase**
+
+If your GPG key has a passphrase, extend the agent cache and unlock once after each reboot:
+
+```bash
+# Extend cache to 24 hours
+echo "default-cache-ttl 86400" >> ~/.gnupg/gpg-agent.conf
+echo "max-cache-ttl 86400" >> ~/.gnupg/gpg-agent.conf
+gpgconf --kill gpg-agent
+
+# Unlock the key (run once after reboot, e.g. in a systemd ExecStartPre)
+echo "YOUR_PASSPHRASE" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback --sign /dev/null
+```
+
+**Option B: Use a passphrase-less GPG key**
+
+> **Security note:** A passphrase-less key means anyone with access to the server's filesystem can decrypt the stored OAuth tokens. Only use this on servers with restricted access and appropriate filesystem permissions. Consider disk encryption as an additional layer of protection.
+
+1. Generate a key without a passphrase:
+
+```bash
+gpg --batch --gen-key <<EOF
+%no-protection
+Key-Type: RSA
+Key-Length: 2048
+Name-Real: h8-service
+Name-Email: h8-service@localhost
+Expire-Date: 0
+%commit
+EOF
+```
+
+2. Update `~/.config/oama/config.yaml` to use the new key:
+
+```yaml
+encryption:
+  tag: GPG
+  contents: h8-service@localhost
+```
+
+3. Re-authorize oama (tokens must be re-encrypted with the new key):
+
+```bash
+oama authorize microsoft/your.email@example.com
+```
+
+4. Verify it works non-interactively:
+
+```bash
+oama access your.email@example.com
+```
+
 ## Architecture
 
 - A Python service (FastAPI) talks to EWS via `exchangelib`, handles geocoding and routing via public APIs (Nominatim, OSRM), and caches data locally.

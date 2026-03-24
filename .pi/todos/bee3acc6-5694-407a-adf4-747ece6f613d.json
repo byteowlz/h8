@@ -9,15 +9,15 @@
     {
       "id": "2",
       "content": "Commit changes with descriptive message",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "high"
     },
     {
       "id": "3",
       "content": "Create git tag v0.5.23",
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     }
   ],
-  "updated_at": "2026-03-20T10:42:59.128Z"
+  "updated_at": "2026-03-20T10:43:03.533Z"
 }
