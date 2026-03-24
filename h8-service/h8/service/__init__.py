@@ -432,6 +432,8 @@ async def refresh_tokens():
 async def startup() -> None:
     level = getattr(logging, LOG_LEVEL, logging.INFO)
     logging.basicConfig(level=level)
+    # Configure GPG for headless environments before any token operations
+    auth.ensure_gpg_headless()
     # Refresh tokens immediately on startup to ensure we have valid tokens
     await refresh_tokens()
     app.state.refresh_task = asyncio.create_task(_refresh_loop())

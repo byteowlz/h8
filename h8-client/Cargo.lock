@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "h8"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "chrono",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "h8-core"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "chrono",
@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "h8-tui"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "chrono",
