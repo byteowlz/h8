@@ -22,6 +22,74 @@ log = logging.getLogger(__name__)
 
 # oama GitHub release info
 OAMA_REPO = "pdobsan/oama"
+
+
+def ensure_gpg_headless() -> None:
+    """Configure GPG for headless (non-interactive) operation.
+
+    On systems without a display (headless servers), GPG's pinentry can hang
+    waiting for a GUI/TUI that will never appear. This function:
+    1. Sets GPG_TTY if a tty is available
+    2. Enables loopback pinentry mode in gpg-agent.conf
+    3. Sets pinentry-mode loopback in gpg.conf
+    4. Restarts gpg-agent to pick up changes
+
+    Safe to call multiple times -- only modifies config if needed.
+    """
+    display = os.environ.get("DISPLAY", "")
+    wayland = os.environ.get("WAYLAND_DISPLAY", "")
+
+    # Only apply headless fixes when no display server is available
+    if display or wayland:
+        log.debug("Display detected (%s), skipping headless GPG setup", display or wayland)
+        return
+
+    log.info("No display detected, configuring GPG for headless operation")
+
+    # Set GPG_TTY
+    try:
+        tty = subprocess.check_output(["tty"], stderr=subprocess.PIPE, timeout=5).decode().strip()
+        if tty and "not a tty" not in tty:
+            os.environ["GPG_TTY"] = tty
+            log.debug("Set GPG_TTY=%s", tty)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        log.debug("No tty available, GPG_TTY not set")
+
+    gnupg_dir = Path.home() / ".gnupg"
+    gnupg_dir.mkdir(mode=0o700, exist_ok=True)
+
+    # Enable loopback pinentry in gpg-agent.conf
+    agent_conf = gnupg_dir / "gpg-agent.conf"
+    _ensure_config_line(agent_conf, "allow-loopback-pinentry")
+
+    # Set pinentry-mode loopback in gpg.conf
+    gpg_conf = gnupg_dir / "gpg.conf"
+    _ensure_config_line(gpg_conf, "pinentry-mode loopback")
+
+    # Restart gpg-agent to pick up changes
+    try:
+        subprocess.run(
+            ["gpgconf", "--kill", "gpg-agent"],
+            capture_output=True, timeout=10,
+        )
+        log.debug("Restarted gpg-agent")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        log.debug("Could not restart gpg-agent")
+
+
+def _ensure_config_line(path: Path, line: str) -> None:
+    """Add a line to a config file if not already present."""
+    if path.exists():
+        content = path.read_text()
+        if line in content:
+            return
+        if not content.endswith("\n"):
+            content += "\n"
+        content += line + "\n"
+    else:
+        content = line + "\n"
+    path.write_text(content)
+    log.debug("Added '%s' to %s", line, path)
 OAMA_INSTALL_DIR = Path.home() / ".local" / "bin"
 
 # Token refresh interval - refresh 5 minutes before expected expiry
@@ -245,7 +313,9 @@ def install_oama(version: Optional[str] = None) -> Path:
 
 
 def ensure_oama() -> None:
-    """Ensure oama is installed, installing it if necessary."""
+    """Ensure oama is installed and GPG is configured for the environment."""
+    ensure_gpg_headless()
+
     if is_oama_installed():
         return
 
