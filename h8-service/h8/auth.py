@@ -36,6 +36,15 @@ def ensure_gpg_headless() -> None:
 
     Safe to call multiple times -- only modifies config if needed.
     """
+    import platform
+
+    # On macOS, pinentry-mac handles GUI/headless correctly -- skip loopback config
+    # which would kill the agent (dropping cached passphrases) and cause plain-text
+    # passphrase prompts to bleed into the terminal
+    if platform.system() == "Darwin":
+        log.debug("macOS detected, skipping headless GPG setup (pinentry-mac handles it)")
+        return
+
     display = os.environ.get("DISPLAY", "")
     wayland = os.environ.get("WAYLAND_DISPLAY", "")
 
