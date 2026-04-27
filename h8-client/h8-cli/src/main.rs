@@ -8863,11 +8863,11 @@ fn pretty_print_item(v: &Value) {
                     if is_cancelled {
                         println!("{} (CANCELED)", "Canceled".red().bold());
                     }
-                    println!("{}", subject.bold());
+                    println!("{}", subject.bold().green());
                     if is_all_day {
-                        println!("  All day: {}", start.split('T').next().unwrap_or(&start));
+                        println!("  {}: {}", "All day".cyan(), start.split('T').next().unwrap_or(&start));
                     } else {
-                        println!("  {}", time_range.cyan());
+                        println!("  {}", time_range.cyan().bold());
                     }
                 } else {
                     if is_cancelled {
@@ -8882,18 +8882,42 @@ fn pretty_print_item(v: &Value) {
                 }
 
                 if let Some(org) = organizer {
-                    println!("  Organizer: {}", org);
+                    if use_color {
+                        println!("  {}: {}", "Organizer".yellow(), org);
+                    } else {
+                        println!("  Organizer: {}", org);
+                    }
                     if let Some(name) = organizer_name {
-                        println!("  Organizer name: {}", name);
+                        println!("           {}", name.dimmed());
                     }
                 }
 
                 if let Some(resp) = my_response {
-                    println!("  Your response: {}", resp);
+                    if use_color {
+                        print!("  {}: ", "Your response".yellow());
+                        match resp {
+                            "Accept" => println!("{}", "Accept".green()),
+                            "Decline" => println!("{}", "Decline".red()),
+                            "Tentative" => println!("{}", "Tentative".yellow()),
+                            _ => println!("{}", "No response".dimmed()),
+                        }
+                    } else {
+                        let resp_str = match resp {
+                            "Accept" => "Accept",
+                            "Decline" => "Decline",
+                            "Tentative" => "Tentative",
+                            _ => "No response",
+                        };
+                        println!("  Your response: {}", resp_str);
+                    }
                 }
 
                 if !location.is_empty() {
-                    println!("  Location: {}", location);
+                    if use_color {
+                        println!("  {}: {}", "Location".yellow(), location.dimmed());
+                    } else {
+                        println!("  Location: {}", location);
+                    }
                 }
 
                 if let Some(url) = meeting_url {
@@ -8902,28 +8926,55 @@ fn pretty_print_item(v: &Value) {
 
                 if let Some(imp) = importance {
                     if imp != "Normal" {
-                        println!("  Importance: {}", imp);
+                        if use_color {
+                            println!("  {}: {}", "Importance".yellow(), imp.cyan());
+                        } else {
+                            println!("  Importance: {}", imp);
+                        }
                     }
                 }
 
                 if let Some(sens) = sensitivity {
                     if sens != "Normal" {
-                        println!("  Sensitivity: {}", sens);
+                        if use_color {
+                            println!("  {}: {}", "Sensitivity".yellow(), sens.cyan());
+                        } else {
+                            println!("  Sensitivity: {}", sens);
+                        }
                     }
                 }
 
                 // Required attendees
                 if let Some(att) = required_attendees {
                     if !att.is_empty() {
-                        println!("  Required attendees ({}):", att.len());
+                        let label = format!("  Required attendees ({}):", att.len());
+                        if use_color {
+                            println!("{}", label.yellow());
+                        } else {
+                            println!("{}", label);
+                        }
                         for a in att.iter().take(10) {
                             let email = a.get("email").and_then(|v| v.as_str()).unwrap_or("");
                             let name = a.get("name").and_then(|v| v.as_str());
-                            let resp = a.get("response").and_then(|v| v.as_str());
-                            if let Some(n) = name {
-                                println!("    - {} <{}> [{}]", n, email, resp.unwrap_or("?"));
+                            let resp = a.get("response").and_then(|v| v.as_str()).unwrap_or("?");
+                            if use_color {
+                                let resp_formatted = match resp {
+                                    "Accept" => format!("[{}]", resp.green()),
+                                    "Decline" => format!("[{}]", resp.red()),
+                                    "Tentative" => format!("[{}]", resp.yellow()),
+                                    _ => format!("[{}]", resp.dimmed()),
+                                };
+                                if let Some(n) = name {
+                                    println!("    - {} <{}> {}", n, email, resp_formatted);
+                                } else {
+                                    println!("    - {} {}", email, resp_formatted);
+                                }
                             } else {
-                                println!("    - {} [{}]", email, resp.unwrap_or("?"));
+                                if let Some(n) = name {
+                                    println!("    - {} <{}> [{}]", n, email, resp);
+                                } else {
+                                    println!("    - {} [{}]", email, resp);
+                                }
                             }
                         }
                         if att.len() > 10 {
@@ -8935,7 +8986,12 @@ fn pretty_print_item(v: &Value) {
                 // Optional attendees
                 if let Some(att) = optional_attendees {
                     if !att.is_empty() {
-                        println!("  Optional attendees ({}):", att.len());
+                        let label = format!("  Optional attendees ({}):", att.len());
+                        if use_color {
+                            println!("{}", label.yellow());
+                        } else {
+                            println!("{}", label);
+                        }
                         for a in att.iter().take(5) {
                             let email = a.get("email").and_then(|v| v.as_str()).unwrap_or("");
                             let name = a.get("name").and_then(|v| v.as_str());
