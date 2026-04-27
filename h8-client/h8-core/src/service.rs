@@ -57,6 +57,15 @@ impl ServiceClient {
         self.get("/calendar", &params)
     }
 
+    /// Get full details for a single calendar event.
+    pub fn calendar_get(&self, account: &str, id: &str) -> Result<Value> {
+        let encoded_id = urlencoding::encode(id);
+        self.get(
+            &format!("/calendar/{}?account={}", encoded_id, account),
+            &[],
+        )
+    }
+
     /// Create a calendar event.
     pub fn calendar_create(&self, account: &str, payload: Value) -> Result<Value> {
         self.post_json(&format!("/calendar?account={}", account), payload)
