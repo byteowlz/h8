@@ -503,6 +503,14 @@ async def calendar_list(
     )
 
 
+@app.get("/calendar/{item_id}")
+async def calendar_get(item_id: str, account: Optional[str] = None):
+    """Get full details for a single calendar event."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(calendar.get_event, email, acct, item_id)
+
+
 @app.post("/calendar")
 async def calendar_create(payload: CalendarCreate, account: Optional[str] = None):
     email = current_account_email(account)

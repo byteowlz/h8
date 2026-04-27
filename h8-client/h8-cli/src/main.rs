@@ -249,6 +249,8 @@ enum CalendarCommand {
     List(CalendarListArgs),
     /// Show events with natural language dates (e.g., 'next week', 'friday', 'kw30')
     Show(CalendarShowArgs),
+    /// Get full details for a single event by ID (e.g., 'h8 cal get cold-lamp')
+    Get(CalendarGetArgs),
     /// Add event with natural language (e.g., 'friday 2pm "Meeting" with alice')
     Add(CalendarAddArgs),
     /// Search events by subject, location, or body
@@ -288,6 +290,16 @@ struct CalendarShowArgs {
     /// End date (flexible: 2026-04-11, 20260411, 11.04.2026, today, friday)
     #[arg(long = "to")]
     to_date: Option<String>,
+    /// Show full details for each event (organizer, attendees, body, etc.)
+    #[arg(short, long, default_value_t = false)]
+    details: bool,
+}
+
+#[derive(Debug, Args)]
+struct CalendarGetArgs {
+    /// Short ID of the calendar event (e.g., 'cold-lamp')
+    #[arg(required = true)]
+    id: String,
 }
 
 #[derive(Debug, Args)]
@@ -1902,7 +1914,59 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 println!("({} to {})\n", from_date, to_date);
             }
 
-            emit_output(&ctx.common, &events_with_ids)?;
+            // If --details flag is set, fetch full details for each event
+            let output = if args.details {
+                let mut detailed_events = Vec::new();
+                if let Some(arr) = events_with_ids.as_array() {
+                    for event in arr {
+                        let remote_id = event.get("remote_id").and_then(|v| v.as_str());
+                        if let Some(id) = remote_id {
+                            match client.calendar_get(&account, id) {
+                                Ok(details) => {
+                                    // Preserve the local_id from the cached version
+                                    let mut detailed = details.clone();
+                                    if let Some(local_id) = event.get("id") {
+                                        detailed.as_object_mut().map(|obj| {
+                                            obj.insert("local_id".to_string(), local_id.clone());
+                                        });
+                                    }
+                                    detailed_events.push(detailed);
+                                }
+                                Err(_e) => {
+                                    // Fall back to cached data if fetch fails
+                                    detailed_events.push(event.clone());
+                                }
+                            }
+                        } else {
+                            detailed_events.push(event.clone());
+                        }
+                    }
+                }
+                serde_json::json!(detailed_events)
+            } else {
+                events_with_ids
+            };
+
+            emit_output(&ctx.common, &output)?;
+        }
+        CalendarCommand::Get(args) => {
+            // Resolve short ID to remote ID
+            let remote_id = resolve_calendar_id(ctx, &account, &args.id)?;
+
+            // Fetch full event details from server
+            let event = client
+                .calendar_get(&account, &remote_id)
+                .map_err(|e| anyhow!("{e}"))?;
+
+            // Check for errors
+            if let Some(success) = event.get("success").and_then(|v| v.as_bool()) {
+                if !success {
+                    let err = event.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                    return Err(anyhow!("{}", err));
+                }
+            }
+
+            emit_output(&ctx.common, &event)?;
         }
         CalendarCommand::Add(args) => {
             let input_text = args.input.join(" ");

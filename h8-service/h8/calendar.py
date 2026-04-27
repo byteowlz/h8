@@ -307,6 +307,102 @@ def create_event(account: Account, event_data: dict) -> dict:
     }
 
 
+def get_event(account: Account, item_id: str) -> dict:
+    """Get full details for a single calendar event by ID."""
+    from exchangelib import ItemId
+
+    # Fetch full item including all details
+    try:
+        items = list(
+            account.fetch(ids=[ItemId(id=item_id)])
+        )
+        if not items or items[0] is None:
+            return {"success": False, "error": "Event not found"}
+
+        item = items[0]
+
+        # Check if it's a calendar item
+        if not isinstance(item, CalendarItem):
+            return {"success": False, "error": "Item is not a calendar event"}
+
+        # Extract start/end
+        start_str = item.start.isoformat() if hasattr(item.start, "isoformat") else str(item.start)
+        end_str = item.end.isoformat() if hasattr(item.end, "isoformat") else str(item.end)
+
+        # Extract meeting URL if online meeting
+        meeting_url = None
+        is_online = getattr(item, "is_online_meeting", False)
+        if is_online and item.body:
+            meeting_url = _extract_meeting_url(str(item.body))
+
+        # Build attendees list
+        required_attendees = []
+        optional_attendees = []
+        if item.required_attendees:
+            for att in item.required_attendees:
+                email = getattr(getattr(att, "mailbox", None), "email_address", None) or getattr(att, "email_address", None)
+                name = getattr(getattr(att, "mailbox", None), "name", None) or getattr(att, "name", None)
+                required_attendees.append({
+                    "email": email,
+                    "name": name,
+                    "response": str(att.response_type) if att.response_type else None,
+                })
+        if item.optional_attendees:
+            for att in item.optional_attendees:
+                email = getattr(getattr(att, "mailbox", None), "email_address", None) or getattr(att, "email_address", None)
+                name = getattr(getattr(att, "mailbox", None), "name", None) or getattr(att, "name", None)
+                optional_attendees.append({
+                    "email": email,
+                    "name": name,
+                    "response": str(att.response_type) if att.response_type else None,
+                })
+
+        # Get body (may be HTML or plain text)
+        body = None
+        if item.body:
+            body = str(item.body)
+
+        # Get recurrence info if present
+        recurrence = None
+        if item.recurrence:
+            recurrence = {
+                "pattern": str(item.recurrence.recurrence_pattern_type) if item.recurrence.recurrence_pattern_type else None,
+                "range": str(item.recurrence.recurrence_range_type) if item.recurrence.recurrence_range_type else None,
+            }
+
+        # Get my response status
+        my_response = None
+        if item.my_response_type:
+            my_response = str(item.my_response_type)
+
+        event = {
+            "success": True,
+            "id": item.id,
+            "changekey": item.changekey,
+            "subject": item.subject,
+            "start": start_str,
+            "end": end_str,
+            "location": item.location,
+            "organizer": item.organizer.email_address if item.organizer else None,
+            "organizer_name": item.organizer.name if item.organizer else None,
+            "is_all_day": item.is_all_day,
+            "is_cancelled": item.is_cancelled,
+            "is_online_meeting": is_online,
+            "meeting_url": meeting_url,
+            "required_attendees": required_attendees,
+            "optional_attendees": optional_attendees,
+            "my_response": my_response,
+            "body": body,
+            "recurrence": recurrence,
+            "sensitivity": str(item.sensitivity) if item.sensitivity else None,
+            "importance": str(item.importance) if item.importance else None,
+        }
+
+        return event
+    except Exception as e:
+        return {"success": False, "error": f"Failed to get event: {e}"}
+
+
 def delete_event(account: Account, item_id: str) -> dict:
     """Delete a calendar event by ID (without notifying attendees)."""
     from exchangelib import ItemId
