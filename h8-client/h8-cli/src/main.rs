@@ -8836,24 +8836,185 @@ fn pretty_print_item(v: &Value) {
             let end = obj.get("end").and_then(|v| v.as_str()).unwrap_or("");
             let location = obj.get("location").and_then(|v| v.as_str()).unwrap_or("");
             let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let is_all_day = obj.get("is_all_day").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_cancelled = obj.get("is_cancelled").and_then(|v| v.as_bool()).unwrap_or(false);
+            let organizer = obj.get("organizer").and_then(|v| v.as_str());
+            let organizer_name = obj.get("organizer_name").and_then(|v| v.as_str());
+            let my_response = obj.get("my_response").and_then(|v| v.as_str());
+            let meeting_url = obj.get("meeting_url").and_then(|v| v.as_str());
+            let body = obj.get("body").and_then(|v| v.as_str());
+            let required_attendees = obj.get("required_attendees").and_then(|v| v.as_array());
+            let optional_attendees = obj.get("optional_attendees").and_then(|v| v.as_array());
+            let importance = obj.get("importance").and_then(|v| v.as_str());
+            let sensitivity = obj.get("sensitivity").and_then(|v| v.as_str());
 
             // Format start/end times
             let time_range = format_calendar_time_range(start, end);
 
-            if use_color {
-                println!("{} {} [{}]", time_range.cyan(), subject.bold(), id.dimmed());
-            } else {
-                println!("{} {} [{}]", time_range, subject, id);
-            }
+            // Check if this is a detailed event (has extra fields beyond basic)
+            let is_detailed = body.is_some()
+                || required_attendees.is_some()
+                || optional_attendees.is_some()
+                || organizer.is_some();
 
-            if !location.is_empty() {
+            if is_detailed {
+                // Detailed format for cal get or cal show --details
                 if use_color {
-                    println!("  {}", location.dimmed());
+                    if is_cancelled {
+                        println!("{} (CANCELED)", "Canceled".red().bold());
+                    }
+                    println!("{}", subject.bold());
+                    if is_all_day {
+                        println!("  All day: {}", start.split('T').next().unwrap_or(&start));
+                    } else {
+                        println!("  {}", time_range.cyan());
+                    }
                 } else {
-                    println!("  {}", location);
+                    if is_cancelled {
+                        println!("{} (CANCELED)", "Canceled");
+                    }
+                    println!("{}", subject);
+                    if is_all_day {
+                        println!("  All day: {}", start.split('T').next().unwrap_or(&start));
+                    } else {
+                        println!("  {}", time_range);
+                    }
                 }
+
+                if let Some(org) = organizer {
+                    println!("  Organizer: {}", org);
+                    if let Some(name) = organizer_name {
+                        println!("  Organizer name: {}", name);
+                    }
+                }
+
+                if let Some(resp) = my_response {
+                    println!("  Your response: {}", resp);
+                }
+
+                if !location.is_empty() {
+                    println!("  Location: {}", location);
+                }
+
+                if let Some(url) = meeting_url {
+                    println!("  Meeting URL: {}", url);
+                }
+
+                if let Some(imp) = importance {
+                    if imp != "Normal" {
+                        println!("  Importance: {}", imp);
+                    }
+                }
+
+                if let Some(sens) = sensitivity {
+                    if sens != "Normal" {
+                        println!("  Sensitivity: {}", sens);
+                    }
+                }
+
+                // Required attendees
+                if let Some(att) = required_attendees {
+                    if !att.is_empty() {
+                        println!("  Required attendees ({}):", att.len());
+                        for a in att.iter().take(10) {
+                            let email = a.get("email").and_then(|v| v.as_str()).unwrap_or("");
+                            let name = a.get("name").and_then(|v| v.as_str());
+                            let resp = a.get("response").and_then(|v| v.as_str());
+                            if let Some(n) = name {
+                                println!("    - {} <{}> [{}]", n, email, resp.unwrap_or("?"));
+                            } else {
+                                println!("    - {} [{}]", email, resp.unwrap_or("?"));
+                            }
+                        }
+                        if att.len() > 10 {
+                            println!("    ... and {} more", att.len() - 10);
+                        }
+                    }
+                }
+
+                // Optional attendees
+                if let Some(att) = optional_attendees {
+                    if !att.is_empty() {
+                        println!("  Optional attendees ({}):", att.len());
+                        for a in att.iter().take(5) {
+                            let email = a.get("email").and_then(|v| v.as_str()).unwrap_or("");
+                            let name = a.get("name").and_then(|v| v.as_str());
+                            if let Some(n) = name {
+                                println!("    - {} <{}>", n, email);
+                            } else {
+                                println!("    - {}", email);
+                            }
+                        }
+                        if att.len() > 5 {
+                            println!("    ... and {} more", att.len() - 5);
+                        }
+                    }
+                }
+
+                // Body - show plain text version
+                if let Some(b) = body {
+                    if !b.is_empty() {
+                        // Strip HTML, comments, and style content for display
+                        let re_tags = regex::Regex::new(r"<[^>]+>").unwrap();
+                        let re_comments = regex::Regex::new(r"<!--.*?-->").unwrap();
+                        let re_style = regex::Regex::new(r"(?s)<style[^>]*>.*?</style>").unwrap();
+                        let re_head = regex::Regex::new(r"(?s)<head[^>]*>.*?</head>").unwrap();
+
+                        let text = re_style.replace_all(b, "")
+                            .replace("</style>", "")
+                            .replace("<style>", "");
+                        let text = re_head.replace_all(&text, "");
+                        let text = re_comments.replace_all(&text, "");
+                        let text = re_tags.replace_all(&text, "");
+                        let text = text
+                            .replace("&nbsp;", " ")
+                            .replace("&lt;", "<")
+                            .replace("&gt;", ">")
+                            .replace("&amp;", "&")
+                            .replace("\n\n\n", "\n\n")
+                            .trim()
+                            .to_string();
+                        if !text.is_empty() {
+                            println!("  Notes:");
+                            for line in text.lines().take(10) {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    println!("    {}", trimmed);
+                                }
+                            }
+                            if text.lines().count() > 10 {
+                                println!("    ...");
+                            }
+                        }
+                    }
+                }
+
+                println!();
+            } else {
+                // Basic format for cal show (no --details)
+                if use_color {
+                    if is_cancelled {
+                        println!("{} {} [{}]", time_range.cyan(), subject.strikethrough().bold(), id.dimmed());
+                    } else {
+                        println!("{} {} [{}]", time_range.cyan(), subject.bold(), id.dimmed());
+                    }
+                } else {
+                    if is_cancelled {
+                        println!("{} {} [{}]", time_range, format!("{} (CANCELED)", subject), id);
+                    } else {
+                        println!("{} {} [{}]", time_range, subject, id);
+                    }
+                }
+
+                if !location.is_empty() {
+                    if use_color {
+                        println!("  {}", location.dimmed());
+                    } else {
+                        println!("  {}", location);
+                    }
+                }
+                println!();
             }
-            println!();
         }
         return;
     }
