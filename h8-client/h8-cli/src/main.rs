@@ -249,6 +249,10 @@ enum CalendarCommand {
     List(CalendarListArgs),
     /// Show events with natural language dates (e.g., 'next week', 'friday', 'kw30')
     Show(CalendarShowArgs),
+    /// Quick week grid view (e.g., 'h8 cal weeks', 'h8 cal weeks 4', 'h8 cal weeks --past 2')
+    Weeks(CalendarWeeksArgs),
+    /// Quick month grid view (e.g., 'h8 cal months', 'h8 cal months 3')
+    Months(CalendarMonthsArgs),
     /// Get full details for a single event by ID (e.g., 'h8 cal get cold-lamp')
     Get(CalendarGetArgs),
     /// Add event with natural language (e.g., 'friday 2pm "Meeting" with alice')
@@ -293,6 +297,38 @@ struct CalendarShowArgs {
     /// Show full details for each event (organizer, attendees, body, etc.)
     #[arg(short, long, default_value_t = false)]
     details: bool,
+}
+
+#[derive(Debug, Args)]
+struct CalendarWeeksArgs {
+    /// Number of weeks to show (default: 1)
+    #[arg(default_value_t = 1)]
+    count: i64,
+    /// Look backward instead of forward (show past weeks)
+    #[arg(short, long, default_value_t = false)]
+    past: bool,
+    /// Include weekends in the grid (default: true)
+    #[arg(long, default_value_t = true)]
+    weekends: bool,
+    /// Start from a specific date (e.g., "2026-03-01", "monday", "today")
+    #[arg(short, long)]
+    from: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct CalendarMonthsArgs {
+    /// Number of months to show (default: 1)
+    #[arg(default_value_t = 1)]
+    count: i64,
+    /// Look backward instead of forward (show past months)
+    #[arg(short, long, default_value_t = false)]
+    past: bool,
+    /// Include weekends in the grid (default: true)
+    #[arg(long, default_value_t = true)]
+    weekends: bool,
+    /// Start from a specific month (e.g., "march", "2026-03")
+    #[arg(short, long)]
+    from: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1949,6 +1985,24 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
 
             emit_output(&ctx.common, &output)?;
         }
+        CalendarCommand::Weeks(args) => {
+            let (from_date, to_date) = compute_week_range(&args)?;
+            let events = fetch_events_range(ctx, &account, &from_date, &to_date)?;
+            if ctx.common.json || ctx.common.yaml || !io::stdout().is_terminal() {
+                emit_output(&ctx.common, &events)?;
+            } else {
+                render_calendar_grid(&events, &from_date, &to_date, args.weekends, &account)?;
+            }
+        }
+        CalendarCommand::Months(args) => {
+            let (from_date, to_date) = compute_month_range(&args)?;
+            let events = fetch_events_range(ctx, &account, &from_date, &to_date)?;
+            if ctx.common.json || ctx.common.yaml || !io::stdout().is_terminal() {
+                emit_output(&ctx.common, &events)?;
+            } else {
+                render_calendar_grid(&events, &from_date, &to_date, args.weekends, &account)?;
+            }
+        }
         CalendarCommand::Get(args) => {
             // Resolve short ID to remote ID
             let remote_id = resolve_calendar_id(ctx, &account, &args.id)?;
@@ -3015,6 +3069,144 @@ fn parse_date_range_expr(text: &str) -> (String, String, String) {
         today.format("%Y-%m-%d").to_string(),
         "today".to_string(),
     )
+}
+
+/// Compute the date range for `h8 cal weeks`.
+fn compute_week_range(args: &CalendarWeeksArgs) -> Result<(NaiveDate, NaiveDate)> {
+    use chrono::Datelike;
+    let today = Local::now().date_naive();
+
+    let start = if let Some(ref from) = args.from {
+        if let Some((date, _)) = parse_single_date(from) {
+            date
+        } else {
+            NaiveDate::parse_from_str(&normalize_date_arg(from), "%Y-%m-%d")
+                .unwrap_or(today)
+        }
+    } else if args.past {
+        today - ChronoDuration::weeks(args.count)
+    } else {
+        today
+    };
+
+    // Align to Monday
+    let days_since_monday = start.weekday().num_days_from_monday() as i64;
+    let monday = start - ChronoDuration::days(days_since_monday);
+
+    let end = if args.past {
+        monday + ChronoDuration::weeks(args.count) - ChronoDuration::days(1)
+    } else {
+        monday + ChronoDuration::weeks(args.count) - ChronoDuration::days(1)
+    };
+
+    Ok((monday, end))
+}
+
+/// Compute the date range for `h8 cal months`.
+fn compute_month_range(args: &CalendarMonthsArgs) -> Result<(NaiveDate, NaiveDate)> {
+    use chrono::Datelike;
+    let today = Local::now().date_naive();
+
+    let start_month = if let Some(ref from) = args.from {
+        // Try month name first
+        let months: &[(&str, u32)] = &[
+            ("january", 1), ("jan", 1), ("januar", 1),
+            ("february", 2), ("feb", 2), ("februar", 2),
+            ("march", 3), ("mar", 3), ("maerz", 3), ("märz", 3),
+            ("april", 4), ("apr", 4),
+            ("may", 5), ("mai", 5),
+            ("june", 6), ("jun", 6), ("juni", 6),
+            ("july", 7), ("jul", 7), ("juli", 7),
+            ("august", 8), ("aug", 8),
+            ("september", 9), ("sep", 9), ("sept", 9),
+            ("october", 10), ("oct", 10), ("oktober", 10), ("okt", 10),
+            ("november", 11), ("nov", 11),
+            ("december", 12), ("dec", 12), ("dezember", 12), ("dez", 12),
+        ];
+        let from_lower = from.to_lowercase();
+        let mut found_month: Option<u32> = None;
+        for (name, num) in months {
+            if from_lower.contains(name) {
+                found_month = Some(*num);
+                break;
+            }
+        }
+        if let Some(m) = found_month {
+            let year = today.year();
+            NaiveDate::from_ymd_opt(year, m, 1).unwrap_or(today)
+        } else if let Ok(d) = NaiveDate::parse_from_str(from, "%Y-%m") {
+            d
+        } else {
+            NaiveDate::parse_from_str(&normalize_date_arg(from), "%Y-%m-%d")
+                .unwrap_or(today)
+        }
+    } else if args.past {
+        let mut year = today.year();
+        let mut month = today.month() as i64 - args.count;
+        while month <= 0 {
+            year -= 1;
+            month += 12;
+        }
+        NaiveDate::from_ymd_opt(year, month as u32, 1).unwrap_or(today)
+    } else {
+        NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today)
+    };
+
+    // Find end of the range: last day of the final month
+    let mut end_year = start_month.year();
+    let mut end_month = start_month.month() as i64 + args.count - 1;
+    while end_month > 12 {
+        end_year += 1;
+        end_month -= 12;
+    }
+    let next_month_first = NaiveDate::from_ymd_opt(end_year, end_month as u32 + 1, 1)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(end_year + 1, 1, 1).unwrap());
+    let end = next_month_first - ChronoDuration::days(1);
+
+    Ok((start_month, end))
+}
+
+/// Fetch calendar events for a date range, using local cache when available.
+fn fetch_events_range(
+    ctx: &RuntimeContext,
+    account: &str,
+    from: &NaiveDate,
+    to: &NaiveDate,
+) -> Result<Value> {
+    let from_str = from.format("%Y-%m-%d").to_string();
+    let to_str = to.format("%Y-%m-%d").to_string();
+
+    let db_path = ctx.paths.sync_db_path(account);
+    if db_path.exists() {
+        let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+        let cached = db
+            .list_calendar_events_range(&from_str, &to_str)
+            .map_err(|e| anyhow!("{e}"))?;
+        if !cached.is_empty() {
+            let events_json: Vec<serde_json::Value> = cached
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.local_id,
+                        "remote_id": e.remote_id,
+                        "subject": e.subject,
+                        "location": e.location,
+                        "start": e.start,
+                        "end": e.end,
+                        "is_all_day": e.is_all_day,
+                    })
+                })
+                .collect();
+            return Ok(serde_json::json!(events_json));
+        }
+    }
+
+    let client = ctx.service_client()?;
+    let events = client
+        .calendar_list(account, 0, Some(&from_str), Some(&to_str))
+        .map_err(|e| anyhow!("{e}"))?;
+    let events_with_ids = sync_calendar_events(ctx, account, &events, None)?;
+    Ok(events_with_ids)
 }
 
 /// Parse a natural language date expression and return a single date.
@@ -9812,6 +10004,230 @@ fn parse_datetime_local(raw: &str, tz: chrono_tz::Tz) -> Option<DateTime<chrono_
 fn open_database(ctx: &RuntimeContext, account: &str) -> Result<Database> {
     let db_path = ctx.paths.sync_db_path(account);
     Database::open(&db_path).map_err(|e| anyhow!("{e}"))
+}
+
+/// Render a fixed-width calendar grid with box-drawing borders.
+///
+/// ANSI styling is applied *after* padding so column widths stay exact.
+/// For short ranges (14 days or fewer) all events are shown.
+fn render_calendar_grid(
+    events: &Value,
+    from_date: &NaiveDate,
+    to_date: &NaiveDate,
+    show_weekends: bool,
+    account: &str,
+) -> Result<()> {
+    use chrono::Datelike;
+    use owo_colors::OwoColorize;
+
+    let today = Local::now().date_naive();
+    let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let visible: Vec<usize> = if show_weekends {
+        vec![0, 1, 2, 3, 4, 5, 6]
+    } else {
+        vec![0, 1, 2, 3, 4]
+    };
+    let cols = visible.len();
+    let total_days = (*to_date - *from_date).num_days() + 1;
+    let event_cap: usize = if total_days <= 14 { usize::MAX } else { 3 };
+
+    // Build a map of date -> events
+    let mut events_by_day: std::collections::HashMap<NaiveDate, Vec<(String, bool)>> =
+        std::collections::HashMap::new();
+
+    if let Some(arr) = events.as_array() {
+        for ev in arr {
+            let subject = ev
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no subject)");
+            let start = ev.get("start").and_then(|v| v.as_str()).unwrap_or("");
+            let is_all_day = ev
+                .get("is_all_day")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || start.len() == 10;
+
+            if let Ok(date) = NaiveDate::parse_from_str(&start[..10.min(start.len())], "%Y-%m-%d") {
+                events_by_day.entry(date).or_default().push((subject.to_string(), is_all_day));
+            }
+        }
+    }
+
+    // Print title
+    let range_label = if from_date == to_date {
+        from_date.format("%B %Y").to_string()
+    } else if from_date.year() == to_date.year() && from_date.month() == to_date.month() {
+        format!("{} {} - {}", from_date.format("%B"), from_date.day(), to_date.day())
+    } else if from_date.year() == to_date.year() {
+        format!(
+            "{} {} - {} {}",
+            from_date.format("%B"),
+            from_date.day(),
+            to_date.format("%B"),
+            to_date.day()
+        )
+    } else {
+        format!(
+            "{} {} - {} {}",
+            from_date.format("%b %Y"),
+            from_date.day(),
+            to_date.format("%b %Y"),
+            to_date.day()
+        )
+    };
+    println!("\n{}  {}", ICON_CALENDAR, range_label.bold());
+    println!("{} {}\n", "Account:".dimmed(), account.dimmed());
+
+    // Fixed cell width from terminal
+    let term_width = terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(120);
+    let border_overhead = cols + 1; // left/right border + inner separators
+    let cell_width = ((term_width.saturating_sub(border_overhead)) / cols)
+        .max(10)
+        .min(22);
+
+    // ── Box-drawing border helpers ──
+    let build_border = |l: char, m: char, r: char| {
+        let mut s = String::new();
+        s.push(l);
+        for i in 0..cols {
+            s.push_str(&"─".repeat(cell_width));
+            if i < cols - 1 {
+                s.push(m);
+            }
+        }
+        s.push(r);
+        s
+    };
+    let top = build_border('┌', '┬', '┐');
+    let mid = build_border('├', '┼', '┤');
+    let bot = build_border('└', '┴', '┘');
+
+    let truncate_cell = |s: &str| {
+        if s.chars().count() <= cell_width {
+            s.to_string()
+        } else {
+            let t: String = s.chars().take(cell_width.saturating_sub(1)).collect();
+            format!("{}…", t)
+        }
+    };
+    let pad = |s: &str| {
+        let t = truncate_cell(s);
+        format!("{:<cw$}", t, cw = cell_width)
+    };
+
+    // ── Header ──
+    let headers: Vec<String> = visible
+        .iter()
+        .map(|&i| {
+            let p = pad(day_names[i]);
+            if i >= 5 {
+                format!("{}", p.dimmed())
+            } else {
+                p
+            }
+        })
+        .collect();
+    println!("{}", top);
+    println!("│{}│", headers.join("│"));
+    println!("{}", mid);
+
+    // ── Weeks ──
+    let mut current = *from_date;
+    while current <= *to_date {
+        let days_since_mon = current.weekday().num_days_from_monday() as i64;
+        let week_start = current - ChronoDuration::days(days_since_mon);
+        let days: Vec<NaiveDate> = visible
+            .iter()
+            .map(|&off| week_start + ChronoDuration::days(off as i64))
+            .collect();
+
+        // Row height = tallest cell across this week
+        let mut max_lines = 1;
+        for day in &days {
+            if day < from_date || day > to_date {
+                continue;
+            }
+            let count = events_by_day.get(day).map(|v| v.len()).unwrap_or(0);
+            let shown = count.min(event_cap);
+            let overflow = if count > event_cap { 1 } else { 0 };
+            max_lines = max_lines.max(1 + shown + overflow);
+        }
+
+        let mut grid: Vec<Vec<String>> = vec![vec![]; max_lines];
+        for day in &days {
+            let in_range = *day >= *from_date && *day <= *to_date;
+            let is_today = *day == today;
+            let is_weekend = day.weekday().num_days_from_monday() >= 5;
+
+            if !in_range {
+                for row in &mut grid {
+                    row.push(" ".repeat(cell_width));
+                }
+                continue;
+            }
+
+            let mut line = 0;
+
+            // Day number
+            let num = day.day().to_string();
+            let padded = pad(&num);
+            let styled = if is_today {
+                format!("{}", padded.on_bright_blue().white().bold())
+            } else if is_weekend {
+                format!("{}", padded.dimmed())
+            } else {
+                padded
+            };
+            grid[line].push(styled);
+            line += 1;
+
+            // Events
+            if let Some(list) = events_by_day.get(day) {
+                let to_show = list.len().min(event_cap);
+                for (subj, all_day) in list.iter().take(to_show) {
+                    let plain = truncate_cell(&clean_subject(subj));
+                    let padded = pad(&plain);
+                    let styled = if *all_day {
+                        format!("{}", padded.yellow())
+                    } else {
+                        format!("{}", padded.cyan())
+                    };
+                    grid[line].push(styled);
+                    line += 1;
+                }
+                if list.len() > event_cap {
+                    let more = format!("+{} more", list.len() - event_cap);
+                    let padded = pad(&more);
+                    grid[line].push(format!("{}", padded.dimmed()));
+                    line += 1;
+                }
+            }
+
+            // Pad
+            while line < max_lines {
+                grid[line].push(" ".repeat(cell_width));
+                line += 1;
+            }
+        }
+
+        for row in grid {
+            println!("│{}│", row.join("│"));
+        }
+
+        current = week_start + ChronoDuration::days(7);
+        if current <= *to_date {
+            println!("{}", mid);
+        } else {
+            println!("{}", bot);
+        }
+    }
+
+    let total: usize = events_by_day.values().map(|v| v.len()).sum();
+    println!("{} events across {} days\n", total, total_days);
+    Ok(())
 }
 
 /// Resolve a rule ID to its remote ID.
