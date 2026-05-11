@@ -41,6 +41,9 @@ pager = "less -R"
 # Folders to sync
 sync_folders = ["inbox", "sent", "drafts"]
 
+# Default target folder for `h8 mail archive`
+archive_folder = "archive"
+
 # Email signature (use multi-line string)
 signature = '''
 --

@@ -926,6 +926,79 @@ async def mail_empty_folder(
     return await safe_call_with_retry(mail.empty_folder, email, acct, folder_name)
 
 
+class MailBatchMoveOld(BaseModel):
+    """Request model for moving old messages in bulk."""
+
+    folder: str = "inbox"
+    target_folder: str
+    older_than_days: int = 7
+    query: Optional[str] = None
+    limit: int = 500
+    create_folder: bool = True
+    dry_run: bool = False
+
+
+class MailBatchMark(BaseModel):
+    """Request model for bulk mark read/unread."""
+
+    folder: str = "inbox"
+    read: bool
+    ids: List[str] = Field(default_factory=list)
+    older_than_days: Optional[int] = None
+    query: Optional[str] = None
+    limit: int = 500
+    dry_run: bool = False
+
+    @field_validator("ids", mode="before")
+    @classmethod
+    def _coerce_ids(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v]
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        raise ValueError("must be a string or list of strings")
+
+
+@app.post("/mail/move-old")
+async def mail_move_old(payload: MailBatchMoveOld, account: Optional[str] = None):
+    """Move old messages in bulk."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        mail.batch_move_messages,
+        email,
+        acct,
+        payload.folder,
+        payload.target_folder,
+        payload.older_than_days,
+        payload.query,
+        payload.limit,
+        payload.create_folder,
+        payload.dry_run,
+    )
+
+
+@app.post("/mail/mark")
+async def mail_mark_batch(payload: MailBatchMark, account: Optional[str] = None):
+    """Mark messages as read/unread in bulk."""
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+    return await safe_call_with_retry(
+        mail.batch_mark_messages,
+        email,
+        acct,
+        payload.folder,
+        payload.read,
+        payload.ids,
+        payload.older_than_days,
+        payload.query,
+        payload.limit,
+        payload.dry_run,
+    )
+
+
 class MailSpam(BaseModel):
     """Request model for marking a message as spam."""
 

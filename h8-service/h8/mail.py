@@ -4,7 +4,7 @@ import os
 import email
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -984,6 +984,176 @@ def empty_folder(account: Account, folder_name: str = "trash") -> dict:
         return {"success": False, "error": str(e)}
     except Exception as e:
         return {"success": False, "error": f"Failed to empty folder: {e}"}
+
+
+def batch_move_messages(
+    account: Account,
+    folder: str,
+    target_folder: str,
+    older_than_days: int,
+    query: str | None = None,
+    limit: int = 500,
+    create_folder: bool = True,
+    dry_run: bool = False,
+) -> dict:
+    """Move messages in bulk based on age and optional query.
+
+    Args:
+        account: EWS account
+        folder: Source folder
+        target_folder: Destination folder
+        older_than_days: Move messages received on/before now-days
+        query: Optional simple text query (subject or sender)
+        limit: Maximum number of messages to process
+        create_folder: Create destination folder if missing
+        dry_run: If True, only return matches
+
+    Returns:
+        Batch operation summary
+    """
+    from exchangelib import Q
+
+    source = get_folder(account, folder)
+
+    try:
+        target = get_folder(account, target_folder)
+    except ValueError:
+        if create_folder:
+            target = _create_folder(account, target_folder)
+        else:
+            return {"success": False, "error": f"Target folder not found: {target_folder}"}
+
+    cutoff = datetime.now(ZoneInfo("Europe/Berlin")) - timedelta(days=older_than_days)
+    q = Q(datetime_received__lte=cutoff)
+
+    if query:
+        q = q & (
+            Q(subject__icontains=query) | Q(sender__email_address__icontains=query)
+        )
+
+    candidates = (
+        source.filter(q)
+        .order_by("-datetime_received")
+        .only("id", "subject", "sender", "datetime_received")[:limit]
+    )
+
+    matched = []
+    moved = 0
+    errors: list[str] = []
+
+    for item in candidates:
+        if not hasattr(item, "id"):
+            continue
+        matched.append(
+            {
+                "id": item.id,
+                "subject": item.subject,
+                "from": item.sender.email_address if item.sender else None,
+                "datetime_received": item.datetime_received.isoformat()
+                if item.datetime_received
+                else None,
+            }
+        )
+        if dry_run:
+            continue
+        try:
+            item.move(target)
+            moved += 1
+        except Exception as exc:
+            errors.append(f"{item.id}: {exc}")
+
+    return {
+        "success": True,
+        "action": "move-old",
+        "folder": folder,
+        "target_folder": target_folder,
+        "older_than_days": older_than_days,
+        "query": query,
+        "limit": limit,
+        "dry_run": dry_run,
+        "matched_count": len(matched),
+        "moved_count": moved if not dry_run else 0,
+        "errors": errors,
+        "matches": matched,
+    }
+
+
+def batch_mark_messages(
+    account: Account,
+    folder: str,
+    read: bool,
+    ids: list[str] | None = None,
+    older_than_days: int | None = None,
+    query: str | None = None,
+    limit: int = 500,
+    dry_run: bool = False,
+) -> dict:
+    """Mark messages as read or unread in bulk."""
+    from exchangelib import ItemId, Q
+
+    matched = []
+    errors: list[str] = []
+    updated = 0
+
+    items = []
+    if ids:
+        try:
+            fetched = list(account.fetch(ids=[ItemId(id=i) for i in ids]))
+            items = [i for i in fetched if i is not None]
+        except Exception as exc:
+            return {"success": False, "error": f"Failed to fetch IDs: {exc}"}
+    else:
+        source = get_folder(account, folder)
+        q_filter = Q()
+        if older_than_days is not None:
+            cutoff = datetime.now(ZoneInfo("Europe/Berlin")) - timedelta(days=older_than_days)
+            q_filter = q_filter & Q(datetime_received__lte=cutoff)
+        if query:
+            q_filter = q_filter & (
+                Q(subject__icontains=query) | Q(sender__email_address__icontains=query)
+            )
+
+        items = list(
+            source.filter(q_filter)
+            .order_by("-datetime_received")
+            .only("id", "subject", "sender", "datetime_received", "is_read")[:limit]
+        )
+
+    for item in items:
+        matched.append(
+            {
+                "id": item.id,
+                "subject": getattr(item, "subject", None),
+                "from": item.sender.email_address if getattr(item, "sender", None) else None,
+                "datetime_received": item.datetime_received.isoformat()
+                if getattr(item, "datetime_received", None)
+                else None,
+                "is_read": getattr(item, "is_read", None),
+            }
+        )
+        if dry_run:
+            continue
+        try:
+            item.is_read = read
+            item.save(update_fields=["is_read"])
+            updated += 1
+        except Exception as exc:
+            errors.append(f"{item.id}: {exc}")
+
+    return {
+        "success": True,
+        "action": "mark",
+        "folder": folder,
+        "read": read,
+        "older_than_days": older_than_days,
+        "query": query,
+        "limit": limit,
+        "dry_run": dry_run,
+        "matched_count": len(matched),
+        "updated_count": updated if not dry_run else 0,
+        "errors": errors,
+        "matches": matched,
+    }
 
 
 def mark_as_spam(
