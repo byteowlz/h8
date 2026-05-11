@@ -7,8 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.26] - 2026-05-11
+
+### Added
+
+- `h8 mail move-old --days <N> --to <folder>` to move messages older than N days in bulk (supports `--query`, `--limit`, `--dry-run`, and folder auto-create)
+- `h8 mail archive --days <N>` convenience command that uses configurable `[mail].archive_folder` by default (`--to` overrides it)
+- Bulk read/unread operations via `h8 mail mark`:
+  - `h8 mail mark <id> --read|--unread`
+  - `h8 mail mark --older-than <N> --read|--unread`
+  - `h8 mail mark --query "<text>" --read|--unread`
+- New service endpoints for automation:
+  - `POST /mail/move-old`
+  - `POST /mail/mark`
+
 ### Fixed
 
+- Bulk mail operations now use an extended HTTP timeout to avoid failing after 60 seconds on large mailboxes
+- Bulk mail commands now print explicit progress messages while server-side processing is running
 - `h8 mail read <id>` now resolves human-readable short IDs (from `h8 mail search`) to local Maildir message IDs before reading
 
 ## [0.5.3] - 2026-02-12

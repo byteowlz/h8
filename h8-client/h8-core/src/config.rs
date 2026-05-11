@@ -289,6 +289,8 @@ pub struct MailConfig {
     pub pager: String,
     /// Folders to sync.
     pub sync_folders: Vec<String>,
+    /// Default target folder for `h8 mail archive`.
+    pub archive_folder: String,
     /// Email signature.
     pub signature: String,
     /// Compose settings.
@@ -307,6 +309,7 @@ impl Default for MailConfig {
                 "sent".to_string(),
                 "drafts".to_string(),
             ],
+            archive_folder: "archive".to_string(),
             signature: String::new(),
             compose: ComposeConfig::default(),
         }
@@ -460,6 +463,7 @@ impl AppConfig {
             .set_default("free_slots.end_hour", 17)?
             .set_default("free_slots.exclude_weekends", true)?
             .set_default("mail.pager", "less -R")?
+            .set_default("mail.archive_folder", "archive")?
             .set_default("mail.compose.format", "text")?
             .set_default("mail.compose.quote_style", "> ")?
             .set_default("mail.compose.include_signature", true)?;
@@ -536,6 +540,7 @@ mod tests {
         let config = MailConfig::default();
         assert_eq!(config.pager, "less -R");
         assert_eq!(config.sync_folders, vec!["inbox", "sent", "drafts"]);
+        assert_eq!(config.archive_folder, "archive");
         assert!(config.signature.is_empty());
     }
 

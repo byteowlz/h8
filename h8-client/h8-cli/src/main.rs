@@ -510,6 +510,10 @@ enum MailCommand {
     /// Move a message to another folder
     #[command(alias = "mv")]
     Move(MailMoveArgs),
+    /// Move messages older than N days to another folder
+    MoveOld(MailMoveOldArgs),
+    /// Archive old messages to the configured archive folder (or --to override)
+    Archive(MailArchiveArgs),
     /// Delete a message (move to trash)
     #[command(alias = "rm")]
     Delete(MailDeleteArgs),
@@ -838,10 +842,61 @@ struct MailDeleteArgs {
 }
 
 #[derive(Debug, Args)]
+struct MailMoveOldArgs {
+    /// Source folder
+    #[arg(short = 'f', long, default_value = "inbox")]
+    folder: String,
+    /// Target folder
+    #[arg(short = 't', long = "to")]
+    target: String,
+    /// Move messages older than N days
+    #[arg(long, default_value_t = 7)]
+    days: i64,
+    /// Optional filter query (subject/sender contains)
+    #[arg(short = 'q', long)]
+    query: Option<String>,
+    /// Maximum messages to process
+    #[arg(short = 'n', long, default_value_t = 500)]
+    limit: i64,
+    /// Create target folder if missing
+    #[arg(short = 'c', long, default_value_t = true)]
+    create: bool,
+    /// Dry run - show matches without moving
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct MailArchiveArgs {
+    /// Source folder
+    #[arg(short = 'f', long, default_value = "inbox")]
+    folder: String,
+    /// Override archive target folder (defaults to [mail].archive_folder)
+    #[arg(short = 't', long = "to")]
+    target: Option<String>,
+    /// Archive messages older than N days
+    #[arg(long, default_value_t = 7)]
+    days: i64,
+    /// Optional filter query (subject/sender contains)
+    #[arg(short = 'q', long)]
+    query: Option<String>,
+    /// Maximum messages to process
+    #[arg(short = 'n', long, default_value_t = 500)]
+    limit: i64,
+    /// Create target folder if missing
+    #[arg(short = 'c', long, default_value_t = true)]
+    create: bool,
+    /// Dry run - show matches without moving
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
 struct MailMarkArgs {
-    /// Message ID to mark
-    id: String,
-    /// Folder containing the message
+    /// Message ID(s) to mark (space or comma separated). Optional when --query/--older-than is used.
+    #[arg(num_args = 0..)]
+    ids: Vec<String>,
+    /// Folder containing the message(s)
     #[arg(short = 'f', long, default_value = "inbox")]
     folder: String,
     /// Mark as read
@@ -850,12 +905,18 @@ struct MailMarkArgs {
     /// Mark as unread
     #[arg(long, conflicts_with = "read")]
     unread: bool,
-    /// Mark as flagged/starred
-    #[arg(long, conflicts_with = "unflag")]
-    flag: bool,
-    /// Remove flagged/starred
-    #[arg(long, conflicts_with = "flag")]
-    unflag: bool,
+    /// Optional query filter (subject/sender contains)
+    #[arg(short = 'q', long)]
+    query: Option<String>,
+    /// Only process messages older than N days
+    #[arg(long)]
+    older_than: Option<i64>,
+    /// Maximum messages to process
+    #[arg(short = 'n', long, default_value_t = 500)]
+    limit: i64,
+    /// Dry run - show matches without updating
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -3393,6 +3454,8 @@ fn handle_mail(ctx: &RuntimeContext, cmd: MailCommand) -> Result<()> {
         MailCommand::Reply(args) => handle_mail_reply(ctx, &client, &account, args),
         MailCommand::Forward(args) => handle_mail_forward(ctx, &client, &account, args),
         MailCommand::Move(args) => handle_mail_move(ctx, &account, args),
+        MailCommand::MoveOld(args) => handle_mail_move_old(ctx, &client, &account, args),
+        MailCommand::Archive(args) => handle_mail_archive(ctx, &client, &account, args),
         MailCommand::Delete(args) => handle_mail_delete(ctx, &account, args),
         MailCommand::Mark(args) => handle_mail_mark(ctx, &account, args),
         MailCommand::Drafts(args) => handle_mail_drafts(ctx, &account, args),
@@ -4342,6 +4405,69 @@ fn handle_mail_move(ctx: &RuntimeContext, account: &str, args: MailMoveArgs) -> 
     Ok(())
 }
 
+fn handle_mail_move_old(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    args: MailMoveOldArgs,
+) -> Result<()> {
+    if !ctx.common.quiet && !ctx.common.json && !ctx.common.yaml {
+        eprintln!(
+            "Processing bulk move on server (this can take a while for large inboxes)..."
+        );
+    }
+
+    let result = client
+        .mail_move_old(
+            account,
+            &args.folder,
+            &args.target,
+            args.days,
+            args.query.as_deref(),
+            args.limit,
+            args.create,
+            args.dry_run,
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+
+    emit_output(&ctx.common, &result)?;
+    Ok(())
+}
+
+fn handle_mail_archive(
+    ctx: &RuntimeContext,
+    client: &ServiceClient,
+    account: &str,
+    args: MailArchiveArgs,
+) -> Result<()> {
+    let target = args
+        .target
+        .unwrap_or_else(|| ctx.config.mail.archive_folder.clone());
+
+    if !ctx.common.quiet && !ctx.common.json && !ctx.common.yaml {
+        eprintln!(
+            "Archiving old messages to '{}' (this can take a while for large inboxes)...",
+            target
+        );
+    }
+
+    let result = client
+        .mail_move_old(
+            account,
+            &args.folder,
+            &target,
+            args.days,
+            args.query.as_deref(),
+            args.limit,
+            args.create,
+            args.dry_run,
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+
+    emit_output(&ctx.common, &result)?;
+    Ok(())
+}
+
 fn handle_mail_delete(ctx: &RuntimeContext, account: &str, args: MailDeleteArgs) -> Result<()> {
     let ids = parse_message_ids(&args.ids);
 
@@ -4460,33 +4586,34 @@ fn handle_mail_delete(ctx: &RuntimeContext, account: &str, args: MailDeleteArgs)
 }
 
 fn handle_mail_mark(ctx: &RuntimeContext, account: &str, args: MailMarkArgs) -> Result<()> {
-    let mail_dir = get_mail_dir(ctx, account)?;
-
-    let msg = mail_dir
-        .get(&args.folder, &args.id)
-        .map_err(|e| anyhow!("{e}"))?
-        .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
-
-    let mut flags = msg.flags.clone();
-
-    if args.read {
-        flags.seen = true;
-    }
-    if args.unread {
-        flags.seen = false;
-    }
-    if args.flag {
-        flags.flagged = true;
-    }
-    if args.unflag {
-        flags.flagged = false;
+    if !args.read && !args.unread {
+        return Err(anyhow!("either --read or --unread is required"));
     }
 
-    mail_dir
-        .update_flags(&args.folder, &args.id, &flags)
+    let ids = parse_message_ids(&args.ids);
+    let read = args.read;
+    let service = ctx.service_client()?;
+
+    if !ctx.common.quiet && !ctx.common.json && !ctx.common.yaml {
+        eprintln!(
+            "Processing bulk mark on server (this can take a while for many messages)..."
+        );
+    }
+
+    let result = service
+        .mail_mark_batch(
+            account,
+            &args.folder,
+            read,
+            &ids,
+            args.older_than,
+            args.query.as_deref(),
+            args.limit,
+            args.dry_run,
+        )
         .map_err(|e| anyhow!("{e}"))?;
 
-    println!("Updated flags for {}", args.id);
+    emit_output(&ctx.common, &result)?;
     Ok(())
 }
 
