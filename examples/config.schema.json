@@ -91,6 +91,12 @@
           "items": { "type": "string" },
           "default": ["inbox", "sent", "drafts"]
         },
+        "archive_folder": {
+          "type": "string",
+          "description": "Default target folder for `h8 mail archive`",
+          "default": "archive",
+          "examples": ["archive", "00_Ablage"]
+        },
         "signature": {
           "type": "string",
           "description": "Email signature (can be multi-line)",

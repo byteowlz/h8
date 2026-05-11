@@ -333,6 +333,70 @@ impl ServiceClient {
         self.delete(&format!("/mail/folder/{}?account={}", folder, account))
     }
 
+    /// Move old messages in bulk.
+    /// Uses an extended timeout because Exchange move operations can be slow.
+    pub fn mail_move_old(
+        &self,
+        account: &str,
+        folder: &str,
+        target_folder: &str,
+        older_than_days: i64,
+        query: Option<&str>,
+        limit: i64,
+        create_folder: bool,
+        dry_run: bool,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "folder": folder,
+            "target_folder": target_folder,
+            "older_than_days": older_than_days,
+            "query": query,
+            "limit": limit,
+            "create_folder": create_folder,
+            "dry_run": dry_run,
+        });
+
+        // Use extended timeout for potentially long-running bulk operations.
+        let url = format!("{}{}", self.base_url, format!("/mail/move-old?account={}", account));
+        let http = Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()?;
+        let resp = http.post(&url).json(&payload).send()?;
+        self.handle_response(resp)
+    }
+
+    /// Mark messages as read/unread in bulk.
+    /// Uses an extended timeout because Exchange updates can be slow for many items.
+    pub fn mail_mark_batch(
+        &self,
+        account: &str,
+        folder: &str,
+        read: bool,
+        ids: &[String],
+        older_than_days: Option<i64>,
+        query: Option<&str>,
+        limit: i64,
+        dry_run: bool,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "folder": folder,
+            "read": read,
+            "ids": ids,
+            "older_than_days": older_than_days,
+            "query": query,
+            "limit": limit,
+            "dry_run": dry_run,
+        });
+
+        // Use extended timeout for potentially long-running bulk operations.
+        let url = format!("{}{}", self.base_url, format!("/mail/mark?account={}", account));
+        let http = Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()?;
+        let resp = http.post(&url).json(&payload).send()?;
+        self.handle_response(resp)
+    }
+
     /// Mark a message as spam or not spam.
     pub fn mail_mark_spam(
         &self,
