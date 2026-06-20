@@ -199,6 +199,52 @@ impl ServiceClient {
         self.post_json(&format!("/mail/send?account={}", account), payload)
     }
 
+    /// Send an email with file attachments using multipart/form-data.
+    ///
+    /// Each item in `attachments` is a `(filename, content)` tuple. Recipients
+    /// in `to` and `cc` are sent as repeated form fields. More efficient than
+    /// base64-encoding attachments into the JSON `/mail/send` payload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mail_send_with_attachments(
+        &self,
+        account: &str,
+        to: &[String],
+        cc: &[String],
+        subject: &str,
+        body: &str,
+        html: bool,
+        schedule_at: Option<&str>,
+        attachments: &[(String, Vec<u8>)],
+    ) -> Result<Value> {
+        use reqwest::blocking::multipart;
+
+        let mut form = multipart::Form::new();
+        for addr in to {
+            form = form.text("to", addr.clone());
+        }
+        for addr in cc {
+            form = form.text("cc", addr.clone());
+        }
+        form = form
+            .text("subject", subject.to_string())
+            .text("body", body.to_string())
+            .text("html", html.to_string());
+        if let Some(schedule) = schedule_at {
+            form = form.text("schedule_at", schedule.to_string());
+        }
+        for (name, content) in attachments {
+            let part = multipart::Part::bytes(content.clone()).file_name(name.clone());
+            form = form.part("attachments", part);
+        }
+
+        let url = format!(
+            "{}/mail/send-files?account={}",
+            self.base_url, account
+        );
+        let resp = self.http.post(&url).multipart(form).send()?;
+        self.handle_response(resp)
+    }
+
     /// Fetch messages to local storage.
     /// Uses a 5-minute timeout since mail fetch can take a long time.
     pub fn mail_fetch(

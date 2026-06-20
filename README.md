@@ -166,6 +166,7 @@ h8 mail list -f sent -l 50             # sent folder, 50 items
 h8 mail read <id>                      # view in pager
 h8 mail compose                        # opens editor, saves draft
 h8 mail send <draft-id>                # send a draft
+h8 mail send --to X --subject Y --attach ./report.pdf   # send with attachment
 h8 mail reply <id>                     # reply to sender
 h8 mail reply <id> --all               # reply all
 h8 mail forward <id>                   # forward

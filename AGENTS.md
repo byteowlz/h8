@@ -86,6 +86,7 @@ flags from the captured words. Use `strip_global_flags()` for global flags. For 
 | `h8 mail reply <id> [--all]` | Reply to message |
 | `h8 mail send <id>` | Send draft |
 | `h8 mail send --to X --subject Y --body Z` | Send directly (no draft) |
+| `h8 mail send --to X --subject Y --attach F` | Send with attachment (repeat `--attach`) |
 | `h8 mail unsubscribe [OPTIONS]` | Bulk unsubscribe from marketing emails |
 | `h8 mail search "query" [-d N] [--from/--to]` | Search mail (OR via `\|`, field: `from:`, `subject:`, `body:`) |
 | `h8 cal show [when] [--from/--to]` | Show events (natural lang or explicit date range) |
