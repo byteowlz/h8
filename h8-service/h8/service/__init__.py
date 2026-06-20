@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import uvicorn
 from fastapi import FastAPI
-from fastapi import HTTPException
+from fastapi import File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 
@@ -777,6 +777,47 @@ async def mail_send(payload: SendEmail, account: Optional[str] = None):
     acct = auth.get_account(email)
     return await safe_call_with_retry(
         mail.send_message, email, acct, payload.model_dump()
+    )
+
+
+@app.post("/mail/send-files")
+async def mail_send_files(
+    to: List[str] = Form(default_factory=list),
+    cc: List[str] = Form(default_factory=list),
+    subject: str = Form(""),
+    body: str = Form(""),
+    html: bool = Form(False),
+    schedule_at: Optional[str] = Form(None),
+    attachments: List[UploadFile] = File(default_factory=list),
+    account: Optional[str] = None,
+):
+    """Send an email with file attachments using multipart/form-data.
+
+    This complements ``/mail/send`` (JSON, supports base64 attachments) with an
+    efficient streaming upload path for binary files. ``to`` and ``cc`` may each
+    be repeated to supply multiple recipients.
+    """
+    email = current_account_email(account)
+    acct = auth.get_account(email)
+
+    att_specs = []
+    for upload in attachments:
+        content = await upload.read()
+        att_specs.append(
+            {"name": upload.filename or "attachment", "content": content}
+        )
+
+    message_data = {
+        "to": to,
+        "cc": cc,
+        "subject": subject,
+        "body": body,
+        "html": html,
+        "schedule_at": schedule_at,
+        "attachments": att_specs,
+    }
+    return await safe_call_with_retry(
+        mail.send_message, email, acct, message_data
     )
 
 

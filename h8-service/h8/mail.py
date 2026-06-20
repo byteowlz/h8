@@ -252,6 +252,41 @@ def _item_to_email(item) -> email.message.EmailMessage:
     return msg
 
 
+def build_file_attachments(specs):
+    """Build exchangelib ``FileAttachment`` objects from attachment specs.
+
+    Each spec is a dict with:
+      - name: attachment filename (optional; inferred from ``path`` if absent)
+      - content: file content as ``bytes``, or a base64-encoded ``str``
+      - path: path to a local file (alternative to ``content``)
+
+    Returns a list of ``FileAttachment`` objects (empty if no specs).
+    """
+    import base64
+    from exchangelib import FileAttachment
+
+    attachments = []
+    for spec in specs or []:
+        content = spec.get("content")
+        path = spec.get("path")
+
+        if content is None and path:
+            with open(path, "rb") as fh:
+                content = fh.read()
+        elif isinstance(content, str):
+            content = base64.b64decode(content)
+
+        if content is None:
+            continue
+
+        name = spec.get("name") or (
+            os.path.basename(path) if path else "attachment"
+        )
+        attachments.append(FileAttachment(name=name, content=content))
+
+    return attachments
+
+
 def send_message(account: Account, message_data: dict) -> dict:
     """Send an email message, optionally scheduled for later delivery.
 
@@ -264,6 +299,7 @@ def send_message(account: Account, message_data: dict) -> dict:
             - cc: list of CC recipients
             - html: if True, body is HTML
             - schedule_at: ISO datetime string for delayed delivery (optional)
+            - attachments: list of attachment specs (see build_file_attachments)
 
     Returns:
         Dict with success status and message info
@@ -275,12 +311,15 @@ def send_message(account: Account, message_data: dict) -> dict:
     if message_data.get("html", False):
         body = HTMLBody(body)
 
+    attachments = build_file_attachments(message_data.get("attachments"))
+
     msg = Message(
         account=account,
         subject=message_data["subject"],
         body=body,
         to_recipients=to_recipients,
         cc_recipients=cc_recipients if cc_recipients else None,
+        attachments=attachments if attachments else None,
     )
 
     # Handle scheduled/deferred sending
@@ -323,6 +362,7 @@ def send_message(account: Account, message_data: dict) -> dict:
             "schedule_at": send_time.isoformat(),
             "subject": message_data["subject"],
             "to": message_data["to"],
+            "attachments": [a.name for a in attachments],
         }
 
     # Immediate send
@@ -332,6 +372,7 @@ def send_message(account: Account, message_data: dict) -> dict:
         "success": True,
         "subject": message_data["subject"],
         "to": message_data["to"],
+        "attachments": [a.name for a in attachments],
     }
 
 

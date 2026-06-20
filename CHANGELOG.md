@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `h8 mail send --attach <FILE>` to attach files to a directly-composed email (repeatable for multiple attachments); uses an efficient multipart upload path
+- `/mail/send-files` service endpoint for multipart/form-data email with file attachments
+
 ## [0.5.26] - 2026-05-11
 
 ### Added

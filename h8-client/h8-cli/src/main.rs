@@ -755,6 +755,9 @@ struct MailSendArgs {
     /// Treat body as HTML
     #[arg(long)]
     html: bool,
+    /// Attach a file (repeatable; works with --to/--subject/--body)
+    #[arg(long, value_name = "FILE")]
+    attach: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -3900,6 +3903,13 @@ fn handle_mail_send(
         None
     };
 
+    if !args.attach.is_empty() && args.to.is_empty() {
+        return Err(anyhow!(
+            "--attach requires --to/--subject/--body (direct composition mode). \
+             Attachments are not supported with draft IDs or --file."
+        ));
+    }
+
     if args.all {
         // Send all drafts
         let mail_dir = get_mail_dir(ctx, account)?;
@@ -3953,22 +3963,50 @@ fn handle_mail_send(
             }
             emit_output(&ctx.common, &result)?;
         } else {
-            let mut payload = serde_json::json!({
-                "to": args.to,
-                "cc": args.cc,
-                "bcc": args.bcc,
-                "subject": subject,
-                "body": body,
-                "html": args.html,
-            });
-
-            if let Some(ref schedule) = schedule_at {
-                payload["schedule_at"] = serde_json::Value::String(schedule.clone());
+            // Read attachment files (if any)
+            let mut attachments: Vec<(String, Vec<u8>)> = Vec::new();
+            for path in &args.attach {
+                let content = std::fs::read(path).map_err(|e| {
+                    anyhow!("Failed to read attachment '{}': {e}", path.display())
+                })?;
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                attachments.push((name, content));
             }
 
-            let result = client
-                .mail_send(account, payload)
-                .map_err(|e| anyhow!("{e}"))?;
+            let result = if attachments.is_empty() {
+                let mut payload = serde_json::json!({
+                    "to": args.to,
+                    "cc": args.cc,
+                    "bcc": args.bcc,
+                    "subject": subject,
+                    "body": body,
+                    "html": args.html,
+                });
+
+                if let Some(ref schedule) = schedule_at {
+                    payload["schedule_at"] = serde_json::Value::String(schedule.clone());
+                }
+
+                client
+                    .mail_send(account, payload)
+                    .map_err(|e| anyhow!("{e}"))?
+            } else {
+                client
+                    .mail_send_with_attachments(
+                        account,
+                        &args.to,
+                        &args.cc,
+                        &subject,
+                        &body,
+                        args.html,
+                        schedule_at.as_deref(),
+                        &attachments,
+                    )
+                    .map_err(|e| anyhow!("{e}"))?
+            };
 
             // User-friendly output
             if !ctx.common.json && !ctx.common.yaml {
@@ -3978,6 +4016,11 @@ fn handle_mail_send(
                     println!("Sent: {}", subject);
                 }
                 println!("  To: {}", args.to.join(", "));
+                if !attachments.is_empty() {
+                    let names: Vec<&str> =
+                        attachments.iter().map(|(n, _)| n.as_str()).collect();
+                    println!("  Attachments: {}", names.join(", "));
+                }
             }
             emit_output(&ctx.common, &result)?;
         }
