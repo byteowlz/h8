@@ -795,6 +795,11 @@ def _refresh_default_backend() -> None:
 async def refresh_defaults() -> None:
     """Refresh default cached queries for the configured default account."""
     try:
+        resolve_account(None)
+    except AccountResolutionError:
+        log.warning("no default account configured; skipping background refresh")
+        return
+    try:
         await get_or_set(
             cache_key("calendar", account=None, days=7, from_date=None, to_date=None),
             partial(safe_call_with_retry, None, CAP_CALENDAR, "list_events", 7, None, None),

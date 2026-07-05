@@ -2,7 +2,7 @@
 
 # h8
 
-Rust CLI for MS365 Exchange Web Services (EWS) covering calendar, mail, contacts, free-slot search, resource management, booking, and business trip planning. Works when Graph or IMAP are blocked but EWS is available.
+Rust CLI for calendar, mail, contacts, free-slot search, resource management, booking, and business trip planning, with a multi-provider backend: Microsoft 365 via Exchange Web Services (EWS) and Google Workspace (Gmail/Calendar/People), behind one stable JSON contract. EWS stays supported for the case where Graph or IMAP are blocked but EWS is available; Microsoft Graph is a planned backend for the same account type.
 
 ## Requirements
 
@@ -87,6 +87,10 @@ headless host, h8 prints an authorization URL: open it elsewhere, approve
 access, then paste the full `http://localhost/...` redirect URL back into the
 prompt to complete the login.
 
+For a fuller step-by-step walkthrough (GCP project setup, publishing the
+consent screen, and a manual smoke-test checklist), see
+[`docs/google-setup.md`](docs/google-setup.md).
+
 ### Managing logins
 
 ```bash
@@ -99,6 +103,37 @@ h8-service auth status
 h8-service auth login work
 h8-service auth logout work
 ```
+
+### Scoped access for agents
+
+`h8-service` requires a bearer API key on every request (`/health` and
+`/capabilities` excepted). On first run it auto-generates a root key
+(`*:*` scope) and writes it to `~/.local/state/h8/client.key` -- fine for a
+single human user, but an agent should get its own restricted key instead of
+using the root key:
+
+```bash
+h8 keys create --name claude --scopes mail:read,calendar:read
+# -> prints the raw token once: h8k_...  (store it, e.g. as H8_TOKEN for the agent)
+
+h8 keys create --name claude-scheduler --scopes "mail:read,calendar:*" --accounts work
+h8 keys list
+h8 keys revoke k_x7ab
+```
+
+Scopes are `<resource>:<action>` pairs -- resources: `mail`, `calendar`,
+`contacts`, `addr`, `resources`, `trip`, `rules`, `oof`, `unsubscribe`, `auth`,
+`keys`, `admin`; actions: `read`, `write`, `send`; `*` wildcards either side
+(`mail:*`, `*:read`, `*:*`). Access is deny-by-default: a key can only do what
+its scopes list. An optional `--accounts a,b` restriction limits which account
+aliases/emails the key may target; omitted, a key can use any configured
+account. A request with a valid but insufficiently-scoped key gets HTTP 403
+with the missing `required_scope` named in the response.
+
+Every authenticated request is logged to
+`~/.local/state/h8/audit.jsonl` (one JSON line per request: timestamp, key id/
+name, method, path, account, status, duration). Set `H8_SERVICE_AUDIT=0` to
+disable it.
 
 ## Architecture
 

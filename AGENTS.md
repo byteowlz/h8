@@ -10,22 +10,41 @@ uv run pytest tests/  # Python tests
 
 ## Architecture
 ```
-h8-service/           Python FastAPI (exchangelib for EWS, routing APIs)
-  h8/contacts.py      Contact CRUD functions
-  h8/mail.py          Mail operations
-  h8/calendar.py      Calendar operations
+h8-service/           Python FastAPI (routing APIs; EWS + Google Workspace backends)
+  h8/providers/       Provider abstraction -- the backend seam
+    base.py           Backend contract: domain mixins (Mail/Calendar/Contacts/
+                       Availability/Directory/Settings), capability constants
+                       (CAP_*), exceptions (BackendAuthError, BackendBusyError,
+                       BackendNotSupported). FROZEN method signatures.
+    registry.py       get_backend(account_ref) -> cached Backend instance;
+                       provider id -> factory in _FACTORIES
+    ews/__init__.py   EwsBackend: thin adapter delegating to h8/mail.py,
+                       calendar.py, contacts.py, etc. (unchanged EWS logic)
+    google/           GoogleBackend: Gmail, Calendar, People API
+                       (client.py, mail.py, calendar.py, contacts.py, settings.py)
+  h8/oauth/           Integrated OAuth (no external daemon, no GPG)
+    microsoft.py      MSAL device-code login + silent token refresh
+    google.py         google-auth loopback/URL-paste login + refresh
+    store.py          TokenStore: OS keyring, falls back to
+                       $XDG_STATE_HOME/h8/tokens.json (0600)
+  h8/accounts.py      [accounts.*] config resolution: alias/email -> AccountConfig
+  h8/security.py      Service auth: h8k_ bearer keys, scope grammar, KeyStore
+                       ($XDG_STATE_HOME/h8/keys.json), audit log
+  h8/contacts.py      Contact CRUD functions (EWS implementation detail)
+  h8/mail.py          Mail operations (EWS implementation detail)
+  h8/calendar.py      Calendar operations (EWS implementation detail)
   h8/resolve.py       EWS ResolveNames for GAL search + email validation
   h8/resources.py     Resource availability via EWS
   h8/routing.py       Geocoding (Nominatim), car routing (OSRM), transit (DB HAFAS)
-  h8/unsubscribe.py   Bulk unsubscribe: link extraction, HTTP visiting
-  h8/service/__init__.py  FastAPI routes (add endpoints here)
+  h8/unsubscribe.py   Bulk unsubscribe: link extraction, HTTP visiting (SSRF-guarded)
+  h8/service/__init__.py  FastAPI routes + auth wiring (add endpoints here)
 
 h8-client/            Rust workspace
   h8-core/src/
     config.rs         Config types: AppConfig, TripConfig, Location, ResourceEntry, etc.
-    service.rs        HTTP client (add client methods here)
+    service.rs        HTTP client (add client methods here); bearer token discovery
     types.rs          Shared types
-  h8-cli/src/main.rs  CLI commands (commands + handlers)
+  h8-cli/src/main.rs  CLI commands (commands + handlers), incl. `auth`/`keys`
 ```
 
 ## Adding a Feature (example: contacts update)
@@ -58,6 +77,38 @@ pub fn contacts_update(&self, account: &str, id: &str, updates: Value) -> Result
    - Add variant to enum: `Update(ContactsUpdateArgs)`
    - Add args struct: `struct ContactsUpdateArgs { ... }`
    - Add match arm in handler: `ContactsCommand::Update(args) => { ... }`
+
+## Adding a Provider Backend
+
+1. Implement only the domain mixins you support (`MailBackend`, `CalendarBackend`,
+   `ContactsBackend`, `AvailabilityBackend`, `DirectoryBackend`, `SettingsBackend`)
+   in `h8/providers/<name>/`, against the frozen method names/signatures in
+   `h8/providers/base.py`. Unimplemented methods raise `NotImplementedError` by
+   default -- that's fine as long as the capability isn't advertised.
+2. Set `capabilities: frozenset[CAP_*]` on the backend class to exactly what you
+   implement. Routes gate on capability before calling the method and return
+   HTTP 501 (`missing_capability`) otherwise -- never let an unadvertised method
+   get called.
+3. Register the provider id -> factory mapping in
+   `h8/providers/registry.py` (`_FACTORIES`).
+4. Response shapes are FROZEN to the existing EWS-derived JSON (`id`, `changekey`
+   nullable, ISO-8601 datetimes with offset) -- adapt to that shape, don't
+   change existing endpoint contracts. See `docs/design/multi-provider.md`
+   section 4 for the Google mapping as a worked example.
+
+## Auth Model (for agents)
+
+- Every request needs `Authorization: Bearer h8k_...` (401 without one, except
+  `/health` and `/capabilities`). A root key (`*:*` scope) is auto-generated on
+  first run at `~/.local/state/h8/client.key`.
+- Keys carry scopes `<resource>:<action>` (`mail:read`, `calendar:write`, ...),
+  with `*` wildcard on either side (`mail:*`, `*:read`, `*:*`). Deny by default.
+  Keys may also carry an `accounts` restriction list.
+- Insufficient scope -> 403 with `required_scope` in the response body (surfaced
+  by the Rust client's error message).
+- Use `GET /capabilities?account=` (unauthenticated) to introspect what a given
+  account's provider supports before calling an endpoint that might 501.
+- Manage keys with `h8 keys` / `h8-service keys` (see the commands table below).
 
 ## CLI Patterns
 
@@ -111,12 +162,20 @@ flags from the captured words. Use `strip_global_flags()` for global flags. For 
 | `h8 trip <dest> <when> --car --book` | Plan trip + book a car |
 | `h8 trip <dest> <when> --car --create` | Plan trip + create calendar events |
 | `h8 trip <dest> <when> --car --sap --json` | Trip plan as SAP-compatible JSON |
+| `h8 auth login [account]` | Sign in (device-code for MS, browser/URL flow for Google) |
+| `h8 auth status [account]` | Show login state and token expiry |
+| `h8 auth logout [account]` | Delete stored credentials for an account |
+| `h8 keys create --name N --scopes s1,s2 [--accounts a,b]` | Create a scoped API key (shown once) |
+| `h8 keys list` / `h8 keys revoke <id>` | List / revoke API keys |
+| `h8-service auth login\|status\|logout [account]` | Same as `h8 auth`, server-side, no HTTP round trip |
+| `h8-service keys create\|list\|revoke ...` | Same as `h8 keys`, direct against the key store |
 
 ## Config Sections
 
 | Section | Purpose |
 |---------|---------|
-| `account`, `timezone`, `service_url` | Core settings |
+| `account`, `timezone`, `service_url`, `service_token` | Core settings |
+| `[accounts.<alias>]` | Named accounts: `email`, `provider` (ews/google/graph), `client_id`, `tenant`, provider-specific extras |
 | `[calendar]` | Display preferences (default_view) |
 | `[free_slots]` | Working hours, weekend exclusion |
 | `[mail]` | Pager, editor, signature, compose settings |

@@ -3,7 +3,8 @@
 # h8 configuration (Rust CLI)
 # Place this at ~/.config/h8/config.toml or $XDG_CONFIG_HOME/h8/config.toml
 
-# Default email account
+# Default email account (alias into [accounts.*] below, or a bare email for
+# legacy/implicit EWS accounts)
 account = "your.email@example.com"
 
 # Timezone for calendar operations
@@ -11,6 +12,26 @@ timezone = "Europe/Berlin"
 
 # Service endpoint
 service_url = "http://127.0.0.1:8787"
+
+# Bearer token for the h8-service API (optional). Discovery order: H8_TOKEN env
+# var, this field, then $XDG_STATE_HOME/h8/client.key (auto-generated root key).
+# Usually left unset on a single-user box -- the root key file is enough.
+# service_token = "h8k_..."
+
+# Named accounts. Each account picks a provider and its own OAuth client.
+# `account` above (or a bare email/--account flag) selects one by alias or by
+# email. Sign in once per account with `h8 auth login <alias>`.
+# [accounts.work]
+# email = "you@example.com"
+# provider = "ews"                     # "ews" | "google" | "graph" (later)
+# client_id = "00000000-0000-0000-0000-000000000000"   # Azure app registration id
+# tenant = "organizations"             # or your tenant GUID/domain
+
+# [accounts.personal]
+# email = "you@gmail.com"
+# provider = "google"
+# client_id = "xxxx.apps.googleusercontent.com"   # Google Cloud OAuth client (Desktop app)
+# client_secret = "xxxx"                          # installed-app secret, not confidential
 
 # Calendar display settings
 [calendar]

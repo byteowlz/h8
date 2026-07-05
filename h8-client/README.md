@@ -1,6 +1,9 @@
 # h8 (Rust)
 
-Rust CLI for Microsoft 365 Exchange Web Services. Supports calendar, mail, contacts, and free-slot discovery using OAuth2 tokens from `oama`.
+Rust CLI for calendar, mail, contacts, and free-slot discovery against a
+multi-provider backend (Microsoft 365 Exchange Web Services and Google
+Workspace today). OAuth (MSAL / google-auth) runs in-process in the Python
+service -- there is no external token daemon such as `oama`.
 
 ## Quick Start
 
