@@ -8,79 +8,110 @@ Rust CLI for MS365 Exchange Web Services (EWS) covering calendar, mail, contacts
 
 - Rust stable toolchain
 - Python 3.12+ with `uv`
-- [oama](https://github.com/pdobsan/oama) - OAuth credential manager for issuing access tokens
 
-### oama Setup
+OAuth is handled in-process: MSAL (Microsoft) and google-auth (Google) acquire
+and refresh tokens directly, storing them in the OS keyring with a 0600 file
+fallback at `$XDG_STATE_HOME/h8/tokens.json`. There is no external token daemon
+and no GPG/pinentry setup.
 
-h8 relies on oama to obtain OAuth2 access tokens for Microsoft 365. You must configure oama before using h8:
+Accounts are declared in `config.toml` under `[accounts.*]` and each names a
+`provider` (`ews`, `google`, or `graph`). You sign in once per account with
+`h8 auth login <account>`; tokens refresh silently afterwards.
 
-1. Install oama (see [oama README](https://github.com/pdobsan/oama#installation))
-2. Configure your Microsoft 365 account in oama's config file
-3. Complete the initial OAuth2 authorization flow: `oama authorize <email>`
-4. Verify tokens work: `oama access <email>` should print an access token
+### Microsoft 365 setup (provider `ews`)
 
-h8's Python service calls `oama access <email>` to get fresh tokens as needed.
+Microsoft accounts authenticate through an Azure AD (Entra) app registration and
+the OAuth device-code flow.
 
-### Headless Server Deployment
+1. In the [Azure portal](https://portal.azure.com) go to **Entra ID -> App
+   registrations -> New registration**. Give it a name and register it as a
+   public client.
+2. Under **Authentication**, enable **Allow public client flows** (required for
+   device code), and add the **Mobile and desktop applications** platform.
+3. Under **API permissions**, add these delegated permissions and grant consent:
+   - Office 365 Exchange Online: `EWS.AccessAsUser.All`
+   - Microsoft Graph: `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`,
+     `Contacts.ReadWrite`, `MailboxSettings.ReadWrite`, `People.Read`,
+     `User.ReadBasic.All`
+4. Copy the **Application (client) ID** and put it in the account config:
 
-On headless Linux servers (no display), GPG's pinentry can hang because it tries to open a GUI/TUI dialog. h8-service detects headless environments and automatically configures GPG loopback pinentry on startup, but you still need a GPG key that works non-interactively.
+```toml
+account = "work"                       # default account (alias or bare email)
 
-**Option A: Pre-cache your existing key's passphrase**
-
-If your GPG key has a passphrase, extend the agent cache and unlock once after each reboot:
-
-```bash
-# Extend cache to 24 hours
-echo "default-cache-ttl 86400" >> ~/.gnupg/gpg-agent.conf
-echo "max-cache-ttl 86400" >> ~/.gnupg/gpg-agent.conf
-gpgconf --kill gpg-agent
-
-# Unlock the key (run once after reboot, e.g. in a systemd ExecStartPre)
-echo "YOUR_PASSPHRASE" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback --sign /dev/null
+[accounts.work]
+email = "you@example.com"
+provider = "ews"
+client_id = "00000000-0000-0000-0000-000000000000"   # your app registration id
+tenant = "organizations"                              # or your tenant GUID/domain
 ```
 
-**Option B: Use a passphrase-less GPG key**
-
-> **Security note:** A passphrase-less key means anyone with access to the server's filesystem can decrypt the stored OAuth tokens. Only use this on servers with restricted access and appropriate filesystem permissions. Consider disk encryption as an additional layer of protection.
-
-1. Generate a key without a passphrase:
+5. Sign in (opens the device-code flow -- visit the URL and enter the code):
 
 ```bash
-gpg --batch --gen-key <<EOF
-%no-protection
-Key-Type: RSA
-Key-Length: 2048
-Name-Real: h8-service
-Name-Email: h8-service@localhost
-Expire-Date: 0
-%commit
-EOF
+h8 auth login work
 ```
 
-2. Update `~/.config/oama/config.yaml` to use the new key:
+### Google Workspace setup (provider `google`)
 
-```yaml
-encryption:
-  tag: GPG
-  contents: h8-service@localhost
+Google accounts authenticate through a Google Cloud OAuth client and either a
+loopback browser flow or a headless URL-paste flow.
+
+1. In the [Google Cloud Console](https://console.cloud.google.com) create (or
+   pick) a project and enable the **Gmail API**, **Google Calendar API**, and
+   **People API**.
+2. Configure the **OAuth consent screen**. It **must be published to "In
+   Production"** -- while it stays in "Testing", Google issues refresh tokens
+   that **expire after 7 days**, which silently breaks background refresh. For
+   personal use the "unverified app" warning on the consent screen is
+   click-through-able; publishing to Production is still required for durable
+   refresh tokens.
+3. Create an **OAuth client ID** of type **Desktop app**. Copy the client id and
+   client secret (the installed-app secret is not confidential) into the config:
+
+```toml
+[accounts.personal]
+email = "you@gmail.com"
+provider = "google"
+client_id = "xxxx.apps.googleusercontent.com"
+client_secret = "xxxx"
 ```
 
-3. Re-authorize oama (tokens must be re-encrypted with the new key):
+4. Sign in:
 
 ```bash
-oama authorize microsoft/your.email@example.com
+h8 auth login personal
 ```
 
-4. Verify it works non-interactively:
+On a machine with a browser, this opens a loopback authorization page. On a
+headless host, h8 prints an authorization URL: open it elsewhere, approve
+access, then paste the full `http://localhost/...` redirect URL back into the
+prompt to complete the login.
+
+### Managing logins
 
 ```bash
-oama access your.email@example.com
+h8 auth status [account]     # show login state and token expiry
+h8 auth login  <account>     # sign in (device code for MS, URL flow for Google)
+h8 auth logout <account>     # delete stored credentials
+
+# The same commands are available server-side without the HTTP service running:
+h8-service auth status
+h8-service auth login work
+h8-service auth logout work
 ```
 
 ## Architecture
 
-- A Python service (FastAPI) talks to EWS via `exchangelib`, handles geocoding and routing via public APIs (Nominatim, OSRM), and caches data locally.
-- The Rust CLI calls the local service for all calendar/mail/contact/resource/routing operations.
+- A Python service (FastAPI) exposes a provider-agnostic backend seam: EWS today
+  (via `exchangelib`), with Google Workspace and Microsoft Graph backends behind
+  the same interface. It also handles geocoding and routing via public APIs
+  (Nominatim, OSRM) and caches data locally.
+- Each account is resolved to a provider backend; capabilities are introspectable
+  via `GET /capabilities` and unsupported operations return HTTP 501.
+- OAuth (MSAL and google-auth) runs in-process; tokens live in the OS keyring
+  with a 0600 file fallback.
+- The Rust CLI calls the local service for all calendar/mail/contact/resource/
+  routing operations, and drives login via `h8 auth`.
 
 ## Setup
 

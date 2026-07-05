@@ -1,48 +1,37 @@
 """Tests for the auth module.
 
-Account construction and caching moved into the provider registry
-(``h8.providers.registry``) and the EWS backend (``h8.providers.ews``). What
-remains in ``h8.auth`` is the oama token machinery plus thin ``get_account`` /
-``refresh_account`` shims that delegate to the registry for the legacy direct CLI.
+Account construction and caching live in the provider registry
+(``h8.providers.registry``) and the EWS backend (``h8.providers.ews``). OAuth
+token acquisition lives in ``h8.oauth`` (MSAL / google-auth) -- the external
+``oama`` binary and its GPG machinery have been removed. What remains in
+``h8.auth`` is the :class:`AuthLoginRequired` exception plus thin
+``get_account`` / ``refresh_account`` shims that delegate to the registry for the
+legacy direct CLI.
 """
 
-import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from h8.auth import (
+    AuthLoginRequired,
     clear_account_cache,
     get_account,
-    get_token,
     refresh_account,
 )
+from h8.providers.base import BackendAuthError
 
 
-class TestGetToken:
-    """Tests for get_token function (oama access)."""
+class TestAuthLoginRequired:
+    """AuthLoginRequired belongs to the BackendAuthError family."""
 
-    @patch("h8.auth.ensure_oama")
-    @patch("subprocess.check_output")
-    def test_get_token_success(self, mock_subprocess, mock_ensure):
-        """get_token should return the trimmed token from oama."""
-        mock_subprocess.return_value = b"  test_token_value  \n"
+    def test_is_backend_auth_error_subclass(self):
+        """It must subclass BackendAuthError so routes can catch either."""
+        assert issubclass(AuthLoginRequired, BackendAuthError)
 
-        token = get_token("test@example.com")
-
-        assert token == "test_token_value"
-        mock_subprocess.assert_called_once()
-
-    @patch("h8.auth.ensure_oama")
-    @patch("subprocess.check_output")
-    def test_get_token_subprocess_error(self, mock_subprocess, mock_ensure):
-        """get_token should raise on subprocess error after a failed renew."""
-        mock_subprocess.side_effect = subprocess.CalledProcessError(
-            1, "oama", stderr=b"Authentication failed"
-        )
-
-        with pytest.raises(subprocess.CalledProcessError):
-            get_token("test@example.com", attempt_renew=False)
+    def test_carries_message(self):
+        err = AuthLoginRequired("run h8 auth login work")
+        assert "run h8 auth login work" in str(err)
 
 
 class TestAccountShims:

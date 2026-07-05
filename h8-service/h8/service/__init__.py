@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from functools import partial
@@ -31,7 +32,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
-from h8 import auth
+from h8.auth import AuthLoginRequired
 from h8.accounts import AccountResolutionError, resolve_account
 from h8.config import resolve_person_alias
 from h8.providers.base import (
@@ -327,6 +328,12 @@ async def safe_call_with_retry(
             )
         except AccountResolutionError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        except AuthLoginRequired as exc:
+            # Interactive login required -- refresh+retry cannot help. Map
+            # straight to 401 with the "run h8 auth login" guidance. Must be
+            # caught before BackendAuthError (it is a subclass).
+            log.warning("Login required for %s: %s", account_ref, exc)
+            raise HTTPException(status_code=401, detail=str(exc))
         except BackendAuthError as exc:
             if do_refresh:
                 log.error("Retry failed with BackendAuthError for %s", account_ref)
@@ -382,10 +389,8 @@ async def lifespan(app: FastAPI):
     """Startup/shutdown: configure logging, warm tokens, run background loops."""
     level = getattr(logging, LOG_LEVEL, logging.INFO)
     logging.basicConfig(level=level)
-    # Configure GPG for headless environments before any token operations (oama).
-    with contextlib.suppress(Exception):
-        await run_in_threadpool(auth.ensure_gpg_headless)
     # Refresh tokens immediately on startup to ensure we have valid tokens.
+    # (No credentials yet -> logged as a warning; run `h8 auth login <account>`.)
     await refresh_tokens()
     refresh_task = asyncio.create_task(_refresh_loop())
     token_refresh_task = asyncio.create_task(_token_refresh_loop())
@@ -1689,7 +1694,356 @@ async def mail_unsubscribe_execute(
     )
 
 
+# === Auth endpoints (OAuth login/status/logout) ===
+#
+# ADMIN-SCOPE MARKER: these /auth/* endpoints will require admin-scoped API keys
+# once service authentication (Epic D / trx-x706) lands. They are intentionally
+# left open for now.
+
+
+class AuthLoginRequest(BaseModel):
+    """Request model for starting a login flow."""
+
+    account: str
+
+
+class AuthFinishRequest(BaseModel):
+    """Request model for finishing the Google URL-paste flow."""
+
+    redirect_url: str
+
+
+class AuthLogoutRequest(BaseModel):
+    """Request model for logging an account out."""
+
+    account: str
+
+
+def _list_account_configs() -> List[Any]:
+    """Return every configured account plus the legacy default (deduped by ref).
+
+    Runs off the event loop (config read only). Order: ``[accounts.*]`` tables
+    first, then the legacy top-level ``account`` if it is not already listed.
+    """
+    from h8.config import get_config
+
+    cfg = get_config()
+    result: List[Any] = []
+    seen: set = set()
+
+    tables = cfg.get("accounts")
+    if isinstance(tables, dict):
+        for alias in tables:
+            try:
+                acct = resolve_account(alias)
+            except AccountResolutionError:
+                continue
+            if acct.ref in seen:
+                continue
+            seen.add(acct.ref)
+            result.append(acct)
+
+    if cfg.get("account"):
+        try:
+            acct = resolve_account(None)
+        except AccountResolutionError:
+            acct = None
+        if acct is not None and acct.ref not in seen:
+            seen.add(acct.ref)
+            result.append(acct)
+
+    return result
+
+
+def _auth_accounts() -> List[dict]:
+    """Build the /auth/accounts payload (login state via the OAuth facade)."""
+    from h8 import oauth
+
+    out: List[dict] = []
+    for acct in _list_account_configs():
+        status = oauth.login_status(acct)
+        out.append(
+            {
+                "alias": acct.alias,
+                "email": acct.email,
+                "provider": acct.provider,
+                "logged_in": status.get("logged_in", False),
+                "expires_at": status.get("expires_at"),
+            }
+        )
+    return out
+
+
+def _auth_start_login(account_ref: str) -> dict:
+    """Start a login flow for ``account_ref`` (device-code or google URL)."""
+    from h8 import oauth
+    from h8.oauth import LoginRequired
+
+    acct = resolve_account(account_ref)
+    try:
+        if acct.provider in ("ews", "graph"):
+            device = oauth.start_device_login(acct)
+            return {
+                "flow": "device_code",
+                "session_id": device.session_id,
+                "verification_url": device.verification_url,
+                "user_code": device.user_code,
+            }
+        if acct.provider == "google":
+            session = oauth.google.start_login(acct, headless=True)
+            return {
+                "flow": "auth_url",
+                "session_id": session.session_id,
+                "auth_url": session.auth_url,
+            }
+    except LoginRequired as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    raise HTTPException(
+        status_code=400,
+        detail=f"Unsupported provider '{acct.provider}' for login",
+    )
+
+
+def _normalize_poll(status: str) -> dict:
+    """Turn a provider poll string into ``{"status", "detail"?}``."""
+    if status.startswith("error"):
+        _, _, detail = status.partition(":")
+        return {"status": "error", "detail": detail.strip() or "unknown error"}
+    return {"status": status}
+
+
+def _auth_poll_login(session_id: str) -> dict:
+    """Poll a login session across both providers and normalize the result.
+
+    On completion, drop cached backends so the next request rebuilds with the
+    freshly stored credentials. (The registry only exposes a full cache clear;
+    backends rebuild lazily and tokens are cached in the store, so this is cheap.)
+    """
+    from h8 import oauth
+    from h8.providers import registry
+
+    status = oauth.poll_device_login(session_id)
+    if status == "error: unknown session":
+        status = oauth.poll_login(session_id)  # google session?
+
+    if status == "done":
+        registry.clear_cache()
+    return _normalize_poll(status)
+
+
+def _auth_finish_login(session_id: str, redirect_url: str) -> dict:
+    """Complete the Google URL-paste flow and clear cached backends."""
+    from h8 import oauth
+    from h8.oauth import LoginRequired
+    from h8.providers import registry
+
+    try:
+        oauth.finish_url_login(session_id, redirect_url)
+    except LoginRequired as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    registry.clear_cache()
+    return {"status": "done"}
+
+
+def _auth_logout(account_ref: str) -> dict:
+    """Delete stored OAuth state for the account and clear cached backends."""
+    from h8 import oauth
+    from h8.providers import registry
+
+    acct = resolve_account(account_ref)
+    oauth.logout(acct)
+    registry.clear_cache()
+    return {"status": "ok", "account": acct.ref}
+
+
+@app.get("/auth/accounts")
+async def auth_accounts():
+    """List every configured account with its login state (admin-scoped later)."""
+    return await run_in_threadpool(_auth_accounts)
+
+
+@app.post("/auth/login")
+async def auth_login(payload: AuthLoginRequest):
+    """Start a login flow for an account (device-code or google auth URL)."""
+    try:
+        return await run_in_threadpool(_auth_start_login, payload.account)
+    except AccountResolutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/auth/login/{session_id}")
+async def auth_login_status(session_id: str):
+    """Poll a login session: ``{"status": pending|done|error, "detail"?}``."""
+    return await run_in_threadpool(_auth_poll_login, session_id)
+
+
+@app.post("/auth/login/{session_id}/finish")
+async def auth_login_finish(session_id: str, payload: AuthFinishRequest):
+    """Finish the Google URL-paste flow with the pasted redirect URL."""
+    return await run_in_threadpool(
+        _auth_finish_login, session_id, payload.redirect_url
+    )
+
+
+@app.post("/auth/logout")
+async def auth_logout(payload: AuthLogoutRequest):
+    """Delete stored OAuth credentials for an account."""
+    try:
+        return await run_in_threadpool(_auth_logout, payload.account)
+    except AccountResolutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# === Server-side auth CLI (`h8-service auth ...`) ===
+#
+# Runs the OAuth flows inline via direct oauth calls -- works without the HTTP
+# service running.
+
+
+def _cli_auth_login(account_ref: Optional[str]) -> int:
+    from h8 import oauth
+    from h8.oauth import LoginRequired
+    from h8.providers import registry
+
+    try:
+        acct = resolve_account(account_ref)
+    except AccountResolutionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        if acct.provider in ("ews", "graph"):
+            device = oauth.start_device_login(acct)
+            print(
+                f"Visit {device.verification_url} and enter code "
+                f"{device.user_code}"
+            )
+            print("Waiting for you to complete sign-in...")
+            while True:
+                status = oauth.poll_device_login(device.session_id)
+                if status == "done":
+                    break
+                if status.startswith("error"):
+                    print(status, file=sys.stderr)
+                    return 1
+                time.sleep(3)
+        elif acct.provider == "google":
+            session = oauth.google.start_login(acct, headless=True)
+            print("Open this URL in a browser and authorize access:")
+            print(f"  {session.auth_url}")
+            redirect_url = input(
+                "Paste the full redirect URL you were sent to: "
+            ).strip()
+            oauth.finish_url_login(session.session_id, redirect_url)
+        else:
+            print(
+                f"error: unsupported provider '{acct.provider}'",
+                file=sys.stderr,
+            )
+            return 1
+    except LoginRequired as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    registry.clear_cache()
+    print(f"Logged in as {acct.email} ({acct.ref}).")
+    return 0
+
+
+def _cli_auth_status(account_ref: Optional[str]) -> int:
+    from h8 import oauth
+    from datetime import datetime, timezone as _tz
+
+    if account_ref:
+        try:
+            accounts = [resolve_account(account_ref)]
+        except AccountResolutionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    else:
+        accounts = _list_account_configs()
+
+    if not accounts:
+        print("No accounts configured.")
+        return 0
+
+    rows = []
+    for acct in accounts:
+        status = oauth.login_status(acct)
+        expires_at = status.get("expires_at")
+        if expires_at:
+            expires = datetime.fromtimestamp(expires_at, _tz.utc).strftime(
+                "%Y-%m-%d %H:%M UTC"
+            )
+        else:
+            expires = "-"
+        rows.append(
+            (
+                acct.ref,
+                acct.provider,
+                "yes" if status.get("logged_in") else "no",
+                expires,
+            )
+        )
+
+    headers = ("ACCOUNT", "PROVIDER", "LOGGED IN", "EXPIRES")
+    widths = [
+        max(len(headers[i]), *(len(r[i]) for r in rows)) for i in range(len(headers))
+    ]
+    line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+    print(line)
+    for row in rows:
+        print("  ".join(row[i].ljust(widths[i]) for i in range(len(row))))
+    return 0
+
+
+def _cli_auth_logout(account_ref: Optional[str]) -> int:
+    from h8 import oauth
+    from h8.providers import registry
+
+    try:
+        acct = resolve_account(account_ref)
+    except AccountResolutionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    oauth.logout(acct)
+    registry.clear_cache()
+    print(f"Logged out {acct.ref}.")
+    return 0
+
+
+def _auth_cli(argv: List[str]) -> int:
+    """Handle ``h8-service auth <login|status|logout> [account]``."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="h8-service auth",
+        description="Manage OAuth credentials for h8 accounts",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    for action in ("login", "status", "logout"):
+        p = sub.add_parser(action, help=f"{action} an account")
+        p.add_argument(
+            "account",
+            nargs="?",
+            default=None,
+            help="Account alias or email (default: configured default account)",
+        )
+    args = parser.parse_args(argv)
+
+    if args.action == "login":
+        return _cli_auth_login(args.account)
+    if args.action == "status":
+        return _cli_auth_status(args.account)
+    if args.action == "logout":
+        return _cli_auth_logout(args.account)
+    return 2
+
+
 def main() -> None:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "auth":
+        raise SystemExit(_auth_cli(argv[1:]))
     uvicorn.run(
         "h8.service:app",
         host=DEFAULT_HOST,

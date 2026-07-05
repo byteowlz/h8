@@ -5,8 +5,15 @@ This backend delegates every operation to the module functions in ``h8/mail.py``
 NOT moved or rewritten in this milestone. The exchangelib ``Account`` construction
 (previously in ``h8/auth.py``) now lives here.
 
-Token acquisition still goes through ``h8.auth.get_token`` (oama) for now; the
-OAuth swap is a later phase. ``refresh()`` forces a fresh token + ``Account``.
+Token acquisition goes through the integrated OAuth subsystem
+(``h8.oauth.microsoft.get_ms_token(account, "ews")``), which uses MSAL silent
+refresh backed by the persisted token cache. The token's real ``expires_at`` is
+tracked so the cached ``Account`` is rebuilt shortly before the token expires
+(``REFRESH_MARGIN_SECONDS``). When no cached credentials exist (or silent
+refresh fails), :class:`h8.oauth.LoginRequired` is translated into
+:class:`h8.auth.AuthLoginRequired` -- a ``BackendAuthError`` subclass whose
+message tells the user to run ``h8 auth login <account>``. ``refresh()`` forces a
+fresh token + ``Account``.
 
 exchangelib is imported at module scope on purpose: this module is only imported
 by the registry when an EWS backend is actually constructed, so non-EWS callers
@@ -39,7 +46,9 @@ from h8 import (
     rules_oof as _rules_oof,
     unsubscribe as _unsubscribe,
 )
-from h8.auth import get_token
+from h8.auth import AuthLoginRequired
+from h8.oauth import LoginRequired
+from h8.oauth.microsoft import get_ms_token
 from h8.providers.base import (
     ALL_CAPABILITIES,
     PROVIDER_EWS,
@@ -54,6 +63,10 @@ log = logging.getLogger(__name__)
 
 EWS_SERVER = "outlook.office365.com"
 
+#: Rebuild the cached ``Account`` this many seconds before the token expires so a
+#: request never races a mid-flight expiry. MSAL refreshes silently underneath.
+REFRESH_MARGIN_SECONDS = 300
+
 
 class EwsBackend(Backend):
     """Exchange Web Services backend for a single M365/Exchange mailbox."""
@@ -64,17 +77,31 @@ class EwsBackend(Backend):
         self.capabilities = ALL_CAPABILITIES
         self._ews_account: Optional[Account] = None
         self._created_at: float = 0.0
+        self._expires_at: float = 0.0
         self._lock = threading.Lock()
 
     # -- account lifecycle --------------------------------------------------
 
     def _build_account(self) -> Account:
-        """Construct an authenticated exchangelib ``Account`` for this mailbox."""
+        """Construct an authenticated exchangelib ``Account`` for this mailbox.
+
+        Acquires an EWS access token via MSAL (silent refresh) and records its
+        real expiry. Raises :class:`~h8.auth.AuthLoginRequired` when the OAuth
+        layer needs an interactive login.
+        """
         email = self.account.email
         log.info("Building EWS account for %s", email)
-        token = get_token(email)
+        try:
+            access = get_ms_token(self.account, "ews")
+        except LoginRequired as exc:
+            ref = self.account.ref
+            raise AuthLoginRequired(
+                f"Microsoft login required for account '{ref}'. "
+                f"Run `h8 auth login {ref}` to sign in. ({exc})"
+            ) from exc
+        self._expires_at = access.expires_at
         credentials = OAuth2AuthorizationCodeCredentials(
-            access_token={"access_token": token, "token_type": "Bearer"}
+            access_token={"access_token": access.token, "token_type": "Bearer"}
         )
         config = Configuration(server=EWS_SERVER, credentials=credentials)
         return Account(
@@ -84,11 +111,19 @@ class EwsBackend(Backend):
             access_type=DELEGATE,
         )
 
+    def _is_expired(self) -> bool:
+        """Whether the cached token is within the refresh margin of expiry."""
+        return time.time() >= (self._expires_at - REFRESH_MARGIN_SECONDS)
+
     @property
     def ews_account(self) -> Account:
-        """The underlying exchangelib ``Account`` (built lazily, cached)."""
+        """The underlying exchangelib ``Account`` (built lazily, cached).
+
+        Rebuilt when the tracked token expiry is within
+        ``REFRESH_MARGIN_SECONDS`` so a stale token never reaches EWS.
+        """
         with self._lock:
-            if self._ews_account is None:
+            if self._ews_account is None or self._is_expired():
                 self._ews_account = self._build_account()
                 self._created_at = time.time()
             return self._ews_account
@@ -99,6 +134,11 @@ class EwsBackend(Backend):
             log.info("Refreshing EWS account for %s", self.account.email)
             self._ews_account = self._build_account()
             self._created_at = time.time()
+
+    @property
+    def expires_at(self) -> float:
+        """Absolute expiry (epoch seconds) of the current token (0.0 if none)."""
+        return self._expires_at
 
     @property
     def created_at(self) -> float:
