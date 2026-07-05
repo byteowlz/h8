@@ -1,0 +1,67 @@
+{"id":"evt_xk7xk29g","issue_id":"trx-wvvr","action":"created","timestamp":"2026-07-05T11:40:12.646472606Z"}
+{"id":"evt_f4weaw8y","issue_id":"trx-r8p1","action":"created","timestamp":"2026-07-05T11:40:12.659767493Z"}
+{"id":"evt_m6max3eh","issue_id":"trx-scv9","action":"created","timestamp":"2026-07-05T11:40:12.672205488Z"}
+{"id":"evt_mq14ct2j","issue_id":"trx-x706","action":"created","timestamp":"2026-07-05T11:40:12.685721318Z"}
+{"id":"evt_w6smjs12","issue_id":"trx-9se6","action":"created","timestamp":"2026-07-05T11:40:12.696741216Z"}
+{"id":"evt_cg8qkmj9","issue_id":"trx-wvvr.1","action":"created","timestamp":"2026-07-05T11:41:26.983056678Z"}
+{"id":"evt_19dndhth","issue_id":"trx-wvvr.2","action":"created","timestamp":"2026-07-05T11:41:26.993745208Z"}
+{"id":"evt_755s3b56","issue_id":"trx-wvvr.3","action":"created","timestamp":"2026-07-05T11:41:27.002551651Z"}
+{"id":"evt_bve67t4z","issue_id":"trx-wvvr.4","action":"created","timestamp":"2026-07-05T11:41:27.012982527Z"}
+{"id":"evt_947gd0bv","issue_id":"trx-wvvr.5","action":"created","timestamp":"2026-07-05T11:41:27.023710761Z"}
+{"id":"evt_kqpgcp31","issue_id":"trx-wvvr.6","action":"created","timestamp":"2026-07-05T11:41:27.032025227Z"}
+{"id":"evt_xz6t010w","issue_id":"trx-r8p1.1","action":"created","timestamp":"2026-07-05T11:41:27.042656487Z"}
+{"id":"evt_as796387","issue_id":"trx-r8p1.2","action":"created","timestamp":"2026-07-05T11:41:27.051285869Z"}
+{"id":"evt_es5gx570","issue_id":"trx-r8p1.3","action":"created","timestamp":"2026-07-05T11:41:27.061657459Z"}
+{"id":"evt_mgm35knn","issue_id":"trx-r8p1.4","action":"created","timestamp":"2026-07-05T11:41:27.070786460Z"}
+{"id":"evt_d30zwcwz","issue_id":"trx-r8p1.5","action":"created","timestamp":"2026-07-05T11:41:27.081845443Z"}
+{"id":"evt_fks77bp0","issue_id":"trx-scv9.1","action":"created","timestamp":"2026-07-05T11:41:27.090809865Z"}
+{"id":"evt_m7jsycv8","issue_id":"trx-scv9.2","action":"created","timestamp":"2026-07-05T11:41:27.099247714Z"}
+{"id":"evt_k0ahw6mt","issue_id":"trx-scv9.3","action":"created","timestamp":"2026-07-05T11:41:27.107670797Z"}
+{"id":"evt_ppc9zedd","issue_id":"trx-scv9.4","action":"created","timestamp":"2026-07-05T11:41:27.115975789Z"}
+{"id":"evt_y3kp16y4","issue_id":"trx-x706.1","action":"created","timestamp":"2026-07-05T11:41:27.124646953Z"}
+{"id":"evt_wcaaa99p","issue_id":"trx-x706.2","action":"created","timestamp":"2026-07-05T11:41:27.132880589Z"}
+{"id":"evt_z4zs57ja","issue_id":"trx-x706.3","action":"created","timestamp":"2026-07-05T11:41:27.141711443Z"}
+{"id":"evt_00j274tk","issue_id":"trx-x706.4","action":"created","timestamp":"2026-07-05T11:41:27.150013911Z"}
+{"id":"evt_fmxaahsm","issue_id":"trx-x706.5","action":"created","timestamp":"2026-07-05T11:41:27.158771307Z"}
+{"id":"evt_ev0kr4qk","issue_id":"trx-x706.6","action":"created","timestamp":"2026-07-05T11:41:27.167615952Z"}
+{"id":"evt_ttjr2f8q","issue_id":"trx-9se6.1","action":"created","timestamp":"2026-07-05T11:41:27.175817466Z"}
+{"id":"evt_r2qnx3tx","issue_id":"trx-9se6.2","action":"created","timestamp":"2026-07-05T11:41:27.184296680Z"}
+{"id":"evt_xq8pw66a","issue_id":"trx-9se6.3","action":"created","timestamp":"2026-07-05T11:41:27.192992754Z"}
+{"id":"evt_bqyjpw3f","issue_id":"trx-x706.2","action":"dep_added","timestamp":"2026-07-05T11:41:43.856483012Z","note":"trx-wvvr.4"}
+{"id":"evt_6tf9b35p","issue_id":"trx-scv9","action":"dep_added","timestamp":"2026-07-05T11:41:49.312118568Z","note":"trx-wvvr"}
+{"id":"evt_agapmzm0","issue_id":"trx-scv9","action":"dep_added","timestamp":"2026-07-05T11:41:49.323230222Z","note":"trx-r8p1"}
+{"id":"evt_p12px9h1","issue_id":"trx-9se6","action":"dep_added","timestamp":"2026-07-05T11:41:49.333555609Z","note":"trx-wvvr"}
+{"id":"evt_eq9pnbn6","issue_id":"trx-9se6","action":"dep_added","timestamp":"2026-07-05T11:41:49.346960659Z","note":"trx-r8p1"}
+{"id":"evt_5d8rexfp","issue_id":"trx-r8p1.5","action":"dep_added","timestamp":"2026-07-05T11:41:49.373328480Z","note":"trx-wvvr.3"}
+{"id":"evt_275rcgzy","issue_id":"trx-r8p1.5","action":"dep_added","timestamp":"2026-07-05T11:41:49.390294610Z","note":"trx-r8p1.2"}
+{"id":"evt_4q0xse1e","issue_id":"trx-r8p1.1","action":"closed","timestamp":"2026-07-05T11:50:10.766467699Z","note":"TokenStore implemented in h8/oauth/store.py: keyring backend with 0600 JSON file fallback ($XDG_STATE_HOME/h8/tokens.json). File backend unit-tested in tests/test_oauth_store.py (roundtrip, delete, permission bits, XDG path)."}
+{"id":"evt_6e7aa7yv","issue_id":"trx-r8p1.2","action":"closed","timestamp":"2026-07-05T11:50:10.779406394Z","note":"MSAL Microsoft auth in h8/oauth/microsoft.py: get_ms_token (ews/graph scopes, silent refresh, LoginRequired), device-code flow (start/poll) via daemon thread, SerializableTokenCache persisted under ms:{email}. Pure-logic tests in tests/test_oauth_scopes.py."}
+{"id":"evt_2vq8k7xc","issue_id":"trx-r8p1.3","action":"closed","timestamp":"2026-07-05T11:50:10.793836712Z","note":"Google auth in h8/oauth/google.py: get_google_credentials (auto-refresh+re-persist, LoginRequired), loopback InstalledAppFlow + headless URL-paste flow (start_login/finish_url_login/poll_login), credentials under google:{email}. Testing->Production 7-day trap documented in module docstring."}
+{"id":"evt_9x1p1f4v","issue_id":"trx-wvvr.1","action":"closed","timestamp":"2026-07-05T12:02:00.056237329Z","note":"providers/base.py: capabilities, exceptions, AccountConfig, domain ABCs + frozen Backend contract"}
+{"id":"evt_xz79zd2m","issue_id":"trx-wvvr.2","action":"closed","timestamp":"2026-07-05T12:02:00.072392951Z","note":"accounts.py resolve_account + config.py [accounts.*] support; removed hardcoded default email"}
+{"id":"evt_g0tme1ev","issue_id":"trx-wvvr.3","action":"closed","timestamp":"2026-07-05T12:02:00.085336061Z","note":"providers/ews EwsBackend delegating to existing modules; account construction moved from auth.py; error translation"}
+{"id":"evt_nasez6zb","issue_id":"trx-wvvr.4","action":"closed","timestamp":"2026-07-05T12:02:00.096583224Z","note":"registry.get_backend with per-alias caching; routes rewired; capability 501s; /capabilities; lifespan migration"}
+{"id":"evt_j7ew36k3","issue_id":"trx-wvvr.5","action":"closed","timestamp":"2026-07-05T12:02:00.110800118Z","note":"get_backend + token acquisition run in threadpool; refresh loops use run_in_threadpool"}
+{"id":"evt_r3kwvjnf","issue_id":"trx-wvvr.6","action":"closed","timestamp":"2026-07-05T12:02:00.123595266Z","note":"tests/test_providers_contract.py with FakeBackend + TestClient; auth-retry and busy-backoff covered"}
+{"id":"evt_5rhk4tzm","issue_id":"trx-r8p1.5","action":"closed","timestamp":"2026-07-05T12:14:01.169459564Z","note":"EWS backend now acquires tokens via h8.oauth.microsoft.get_ms_token(account, 'ews') with real expires_at and a 5-min refresh margin; LoginRequired maps to AuthLoginRequired (BackendAuthError subclass) -> HTTP 401 with 'run h8 auth login <account>' guidance (narrow path in service, no useless retry). Deleted all oama/GPG machinery from auth.py (ensure_gpg_headless, _ensure_config_line, is_oama_installed, get_oama_platform_suffix, get_latest_oama_version, install_oama, ensure_oama, renew_token, get_token, renew_and_refresh_account). Registry shims kept. Tests updated."}
+{"id":"evt_31847sfs","issue_id":"trx-r8p1.4","action":"closed","timestamp":"2026-07-05T12:14:01.186009544Z","note":"Added /auth/accounts, /auth/login, /auth/login/{sid}, /auth/login/{sid}/finish, /auth/logout endpoints (oauth calls via run_in_threadpool; cache cleared on login completion; admin-scope marker comment). Added server-side 'h8-service auth login|status|logout [account]' CLI running device-code / google URL-paste flows inline via direct oauth calls (works without HTTP service). Added tests/test_auth_endpoints.py with the oauth layer mocked."}
+{"id":"evt_yard62ar","issue_id":"trx-scv9.2","action":"closed","timestamp":"2026-07-05T12:14:37.669297590Z","note":"Implemented GoogleCalendarMixin (events + freebusy) in providers/google/calendar.py with EWS shape parity; 35 tests in tests/test_google_calendar.py, full suite 195 passed."}
+{"id":"evt_ahrhc1ta","issue_id":"trx-scv9.3","action":"closed","timestamp":"2026-07-05T12:16:32.052550233Z","note":"Implemented GoogleContactsMixin (contacts.py) and GoogleSettingsMixin (settings.py) for the Google backend; mirror EWS response shapes; 31 new tests in tests/test_google_contacts.py, full suite 269/269 green."}
+{"id":"evt_j9sc6pmp","issue_id":"trx-scv9.1","action":"closed","timestamp":"2026-07-05T12:16:35.526610329Z","note":"Implemented GoogleMailMixin in providers/google/mail.py: list/search/get/batch-get, send (RFC2822 via EmailMessage + reply threading), draft CRUD, attachments, delete/move/empty, batch mark/move, mark-as-spam, fetch export, and scan/execute unsubscribe (reusing unsubscribe.py helpers). Query translation + label mapping helpers module-level. 43 tests in tests/test_google_mail.py, full suite 269 green."}
+{"id":"evt_xrr9z2ca","issue_id":"trx-x706.1","action":"closed","timestamp":"2026-07-05T12:30:13.555957614Z","note":"API key model implemented in h8-service/h8/security.py: keys.json (0600) with id/name/sha256 hash/scopes/accounts/timestamps/disabled; h8k_ token format; hmac.compare_digest verify; scope grammar with wildcards; KeyStore with throttled last_used_at. Unit tests in tests/test_security.py."}
+{"id":"evt_0fw9r691","issue_id":"trx-x706.2","action":"closed","timestamp":"2026-07-05T12:30:13.571197073Z","note":"require_scope dependency + ROUTE_SCOPES mapping applied to all 66 routes via _apply_route_scopes; 401 missing/invalid, 403 with required_scope on insufficient scope, 403 on account restriction. Root-key bootstrap on lifespan writes client.key (0600). H8_SERVICE_NO_AUTH escape hatch. Real 401/403 paths tested in tests/test_service_auth.py."}
+{"id":"evt_trkpze23","issue_id":"trx-x706.3","action":"closed","timestamp":"2026-07-05T12:30:13.583902202Z","note":"HTTP GET/POST/DELETE /keys endpoints (keys:read/keys:write, 422 on bad scope, token shown once) and h8-service keys create|list|revoke CLI operating directly on KeyStore."}
+{"id":"evt_0yn4dbxd","issue_id":"trx-x706.4","action":"closed","timestamp":"2026-07-05T12:30:13.596554940Z","note":"Audit middleware writes JSONL to $XDG_STATE_HOME/h8/audit.jsonl per authenticated request (ts/key_id/key_name/method/path/account/status/duration_ms); skips /health; H8_SERVICE_AUDIT=0 disables."}
+{"id":"evt_g8x97wyg","issue_id":"trx-x706.5","action":"closed","timestamp":"2026-07-05T12:30:13.610198306Z","note":"Host-header allowlist middleware (localhost/127.0.0.1/[::1]/H8_SERVICE_HOST) -> 400 otherwise. SSRF guard in unsubscribe.py: IP classifier blocks loopback/RFC-1918/link-local/metadata/unspecified, follow_redirects disabled + manual max-3-hop re-check. Tested in tests/test_service_auth.py."}
+{"id":"evt_v3rn1drm","issue_id":"trx-scv9.4","action":"closed","timestamp":"2026-07-05T12:36:29.822093407Z","note":"Added docs/google-setup.md (GCP project/API enablement, OAuth consent screen Production requirement + 7-day Testing refresh-token trap, Desktop-app OAuth client, config.toml snippet, h8 auth login personal incl. headless URL-paste flow) and a manual smoke checklist covering mail/cal/contacts/oof plus expected 501s (addr search, resource free, rules list). Linked from README's Google Workspace setup section."}
+{"id":"evt_rz917vy1","issue_id":"trx-scv9.5","action":"created","timestamp":"2026-07-05T12:45:59.580178121Z"}
+{"id":"evt_c1v86e9k","issue_id":"trx-scv9.6","action":"created","timestamp":"2026-07-05T12:45:59.592790938Z"}
+{"id":"evt_w9g1dmws","issue_id":"trx-x706.7","action":"created","timestamp":"2026-07-05T12:45:59.603877947Z"}
+{"id":"evt_qzxrfy4n","issue_id":"trx-x706.8","action":"created","timestamp":"2026-07-05T12:45:59.617071893Z"}
+{"id":"evt_4fkhc3sj","issue_id":"trx-wvvr.7","action":"created","timestamp":"2026-07-05T12:45:59.628061039Z"}
+{"id":"evt_1ve7m6ph","issue_id":"trx-r8p1.6","action":"created","timestamp":"2026-07-05T12:45:59.637085695Z"}
+{"id":"evt_z3dy45ae","issue_id":"trx-wvvr.8","action":"created","timestamp":"2026-07-05T12:45:59.645865986Z"}
+{"id":"evt_6w4dm65v","issue_id":"trx-wvvr.9","action":"created","timestamp":"2026-07-05T12:45:59.654436239Z"}
+{"id":"evt_fksdjhg4","issue_id":"trx-x706.9","action":"created","timestamp":"2026-07-05T12:45:59.669213963Z"}
+{"id":"evt_9jfzprd3","issue_id":"trx-scv9.7","action":"created","timestamp":"2026-07-05T12:45:59.693895297Z"}
+{"id":"evt_45w0dwax","issue_id":"trx-x706.6","action":"closed","timestamp":"2026-07-05T12:58:21.963321135Z","note":"Implemented: bearer token discovery, h8 auth + h8 keys commands, oama check removed; committed in 7941747/6e8282a"}
