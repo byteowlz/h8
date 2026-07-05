@@ -26,10 +26,17 @@ def _no_cache_clear():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _no_auth(monkeypatch):
+    """Use the auth escape hatch (the /auth/* routes are admin-scoped)."""
+    monkeypatch.setenv("H8_SERVICE_NO_AUTH", "1")
+
+
 def _client() -> TestClient:
     # Constructed without the context manager so the lifespan (startup token
-    # refresh) never runs.
-    return TestClient(service.app)
+    # refresh) never runs. ``base_url`` uses ``localhost`` so the Host-header
+    # allowlist passes.
+    return TestClient(service.app, base_url="http://localhost")
 
 
 def _ews_account() -> AccountConfig:

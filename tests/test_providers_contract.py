@@ -96,13 +96,20 @@ def _clear_cache():
     service.cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_auth(monkeypatch):
+    """Use the auth escape hatch so contract tests focus on the provider seam."""
+    monkeypatch.setenv("H8_SERVICE_NO_AUTH", "1")
+
+
 def _client_with(backend: FakeBackend) -> TestClient:
     """A TestClient whose registry lookups return ``backend``.
 
     Instantiated WITHOUT the context-manager form so the lifespan (and its
-    startup token refresh) never runs.
+    startup token refresh) never runs. ``base_url`` uses ``localhost`` so the
+    Host-header allowlist passes.
     """
-    return TestClient(service.app)
+    return TestClient(service.app, base_url="http://localhost")
 
 
 def test_mail_list_route():

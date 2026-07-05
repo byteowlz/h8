@@ -7,12 +7,14 @@ then visits them to unsubscribe. Supports:
 - Rate limiting and safety features
 """
 
+import ipaddress
 import logging
 import re
+import socket
 import time
 from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from exchangelib import HTMLBody, ItemId
@@ -454,6 +456,97 @@ def execute_unsubscribe(
     return results
 
 
+# Maximum number of redirect hops to follow manually (each re-checked for SSRF).
+MAX_REDIRECT_HOPS = 3
+
+# HTTP status codes that indicate a redirect.
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+
+class BlockedURLError(Exception):
+    """Raised when an unsubscribe URL resolves to a disallowed address (SSRF)."""
+
+
+def _is_blocked_ip(ip_str: str) -> bool:
+    """Return whether ``ip_str`` is a loopback/private/link-local/unspecified address.
+
+    Blocks (SSRF guard): loopback (127/8, ::1), RFC-1918 (10/8, 172.16/12,
+    192.168/16), link-local incl. the cloud metadata range (169.254/16, fe80::/10),
+    unique-local IPv6 (fc00::/7), and the unspecified address (0.0.0.0, ::).
+    Unparseable input is treated as blocked (fail closed).
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True
+    return bool(
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_unspecified
+        or ip.is_reserved
+        or ip.is_multicast
+    )
+
+
+def _resolve_and_check_host(hostname: str) -> tuple[bool, str]:
+    """Resolve ``hostname`` and report whether any resolved IP is disallowed.
+
+    Args:
+        hostname: The host portion of a URL.
+
+    Returns:
+        ``(blocked, reason)`` -- ``blocked`` is ``True`` if resolution fails or
+        any resolved address is private/loopback/link-local.
+    """
+    if not hostname:
+        return True, "missing host"
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as exc:
+        return True, f"DNS resolution failed for '{hostname}': {exc}"
+    for info in infos:
+        ip_str = info[4][0]
+        if _is_blocked_ip(ip_str):
+            return True, f"host '{hostname}' resolves to blocked address {ip_str}"
+    return False, ""
+
+
+def _fetch_with_ssrf_guard(
+    client: httpx.Client, url: str, max_hops: int = MAX_REDIRECT_HOPS
+) -> httpx.Response:
+    """GET ``url`` with automatic redirects disabled, re-checking every hop.
+
+    Each URL (the initial target and every ``Location`` redirect) has its host
+    resolved and screened before the request is issued. At most ``max_hops``
+    redirects are followed.
+
+    Raises:
+        BlockedURLError: If any hop resolves to a disallowed address or the
+            redirect chain exceeds ``max_hops``.
+    """
+    current = url
+    hops = 0
+    while True:
+        host = urlparse(current).hostname or ""
+        blocked, reason = _resolve_and_check_host(host)
+        if blocked:
+            raise BlockedURLError(reason)
+        response = client.get(current)
+        if response.status_code in _REDIRECT_STATUSES:
+            location = response.headers.get("location")
+            if not location:
+                return response
+            if hops >= max_hops:
+                raise BlockedURLError(
+                    f"exceeded {max_hops} redirect hops visiting {url}"
+                )
+            hops += 1
+            current = urljoin(current, location)
+            continue
+        return response
+
+
 def _visit_unsubscribe_link(
     message_id: str,
     sender: str,
@@ -502,10 +595,10 @@ def _visit_unsubscribe_link(
         try:
             with httpx.Client(
                 headers=DEFAULT_HEADERS,
-                follow_redirects=True,
+                follow_redirects=False,
                 timeout=15.0,
             ) as client:
-                response = client.get(link.url)
+                response = _fetch_with_ssrf_guard(client, link.url)
                 result.http_status = response.status_code
 
                 if response.status_code == 200:
@@ -553,6 +646,14 @@ def _visit_unsubscribe_link(
                         f"HTTP {response.status_code} from {link.url}"
                     )
 
+        except BlockedURLError as e:
+            # SSRF guard tripped: do not treat as a normal failure -- report the
+            # link as skipped and stop (an unsubscribe link pointing at a private
+            # address is not something we follow).
+            result.status = "skipped"
+            result.error = f"blocked unsafe unsubscribe URL: {e}"
+            log.warning("Blocked unsafe unsubscribe URL %s: %s", link.url, e)
+            return result
         except httpx.TimeoutException:
             result.error = f"timeout visiting {link.url}"
             log.warning("Timeout visiting %s", link.url)

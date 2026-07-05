@@ -18,20 +18,33 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import sys
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from functools import partial
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.dependencies.utils import get_parameterless_sub_dependant
 from fastapi.responses import JSONResponse, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, field_validator
 
+from h8 import security
+from h8.security import (
+    KeyStore,
+    account_allowed,
+    client_key_path,
+    public_key_view,
+    scope_matches,
+)
 from h8.auth import AuthLoginRequired
 from h8.accounts import AccountResolutionError, resolve_account
 from h8.config import resolve_person_alias
@@ -65,6 +78,20 @@ LOG_LEVEL = os.environ.get("H8_SERVICE_LOGLEVEL", "INFO").upper()
 # Token refresh interval in seconds (default: 45 minutes)
 # OAuth tokens typically expire after 60 minutes, so refresh at 45 to be safe
 TOKEN_REFRESH_INTERVAL = int(os.environ.get("H8_SERVICE_TOKEN_REFRESH_SECONDS", "2700"))
+
+
+def _no_auth() -> bool:
+    """Return whether the auth escape hatch (``H8_SERVICE_NO_AUTH``) is enabled."""
+    return os.environ.get("H8_SERVICE_NO_AUTH", "") not in ("", "0", "false", "False")
+
+
+def _audit_enabled() -> bool:
+    """Return whether request auditing is enabled (``H8_SERVICE_AUDIT != 0``)."""
+    return os.environ.get("H8_SERVICE_AUDIT", "") not in ("0", "false", "False")
+
+
+#: Process-wide key store (lazy; no disk access at import time).
+key_store = KeyStore()
 
 
 class CacheEntry(BaseModel):
@@ -389,6 +416,9 @@ async def lifespan(app: FastAPI):
     """Startup/shutdown: configure logging, warm tokens, run background loops."""
     level = getattr(logging, LOG_LEVEL, logging.INFO)
     logging.basicConfig(level=level)
+    # Bootstrap API-key auth before serving any request (mints a root key +
+    # client.key on first run, or after a keys.json wipe).
+    await run_in_threadpool(_bootstrap_auth)
     # Refresh tokens immediately on startup to ensure we have valid tokens.
     # (No credentials yet -> logged as a warning; run `h8 auth login <account>`.)
     await refresh_tokens()
@@ -410,6 +440,325 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="h8-service", version="0.5.14", lifespan=lifespan)
 cache: Dict[str, CacheEntry] = {}
 cache_lock = asyncio.Lock()
+
+
+# === Service authentication (Epic D / trx-x706) ===
+
+
+class InsufficientScopeError(Exception):
+    """Raised when an authenticated key lacks the scope a route requires.
+
+    Mapped to HTTP 403 with a body carrying both ``detail`` and the exact
+    ``required_scope`` string (the Rust client parses ``required_scope``).
+    """
+
+    def __init__(self, required_scope: str, detail: str) -> None:
+        super().__init__(detail)
+        self.required_scope = required_scope
+        self.detail = detail
+
+
+@app.exception_handler(InsufficientScopeError)
+async def _insufficient_scope_handler(
+    request: Request, exc: InsufficientScopeError
+) -> JSONResponse:
+    """Return the 403 body the Rust client expects (with ``required_scope``)."""
+    return JSONResponse(
+        status_code=403,
+        content={"detail": exc.detail, "required_scope": exc.required_scope},
+    )
+
+
+def _enforce_scope(request: Request, required_scope: str) -> None:
+    """Authenticate the request and check scope + account restriction.
+
+    Raises:
+        HTTPException: 401 for a missing/invalid token, 403 for an account the
+            key may not target.
+        InsufficientScopeError: 403 when the key lacks ``required_scope``.
+    """
+    if _no_auth():
+        return
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or malformed Authorization header; expected "
+            "'Bearer <token>'",
+        )
+    token = header[7:].strip()
+    key = key_store.verify_token(token)
+    if key is None:
+        raise HTTPException(status_code=401, detail="Invalid or revoked API token")
+    if not scope_matches(key.get("scopes", []), required_scope):
+        raise InsufficientScopeError(
+            required_scope,
+            f"API key '{key.get('name')}' lacks the required scope "
+            f"'{required_scope}'",
+        )
+    account = request.query_params.get("account")
+    if not account_allowed(key, account):
+        raise HTTPException(
+            status_code=403,
+            detail=f"API key '{key.get('name')}' is restricted to accounts "
+            f"{key.get('accounts')} and may not target account '{account}'",
+        )
+    # Stash minimal identity for the audit middleware.
+    request.state.auth_key = {"id": key.get("id"), "name": key.get("name")}
+
+
+def require_scope(scope: str):
+    """Return a FastAPI dependency enforcing ``scope`` on a route."""
+
+    async def _dependency(request: Request) -> None:
+        _enforce_scope(request, scope)
+
+    return _dependency
+
+
+#: Route -> required scope. GET -> ``<resource>:read``; mutations ->
+#: ``<resource>:write`` except mail send paths (``mail:send``). ``/health`` and
+#: ``/capabilities`` are intentionally absent (unauthenticated).
+ROUTE_SCOPES: Dict[tuple, str] = {
+    # Calendar
+    ("GET", "/calendar"): "calendar:read",
+    ("GET", "/calendar/{item_id}"): "calendar:read",
+    ("POST", "/calendar"): "calendar:write",
+    ("POST", "/calendar/parse"): "calendar:read",
+    ("DELETE", "/calendar/{item_id}"): "calendar:write",
+    ("POST", "/calendar/{item_id}/cancel"): "calendar:write",
+    ("GET", "/calendar/search"): "calendar:read",
+    ("POST", "/calendar/invite"): "calendar:write",
+    ("GET", "/calendar/invites"): "calendar:read",
+    ("POST", "/calendar/{item_id}/rsvp"): "calendar:write",
+    # Mail
+    ("GET", "/mail"): "mail:read",
+    ("GET", "/mail/search"): "mail:read",
+    ("GET", "/mail/{item_id}"): "mail:read",
+    ("POST", "/mail/batch"): "mail:read",
+    ("POST", "/mail/send"): "mail:send",
+    ("POST", "/mail/send-files"): "mail:send",
+    ("POST", "/mail/fetch"): "mail:read",
+    ("POST", "/mail/draft"): "mail:write",
+    ("PUT", "/mail/draft/{item_id}"): "mail:write",
+    ("DELETE", "/mail/draft/{item_id}"): "mail:write",
+    ("GET", "/mail/{item_id}/attachments"): "mail:read",
+    ("POST", "/mail/{item_id}/attachments/download"): "mail:read",
+    ("DELETE", "/mail/{item_id}"): "mail:write",
+    ("POST", "/mail/{item_id}/move"): "mail:write",
+    ("DELETE", "/mail/folder/{folder_name}"): "mail:write",
+    ("POST", "/mail/move-old"): "mail:write",
+    ("POST", "/mail/mark"): "mail:write",
+    ("POST", "/mail/{item_id}/spam"): "mail:write",
+    ("POST", "/mail/unsubscribe/scan"): "unsubscribe:read",
+    ("POST", "/mail/unsubscribe/execute"): "unsubscribe:write",
+    # Contacts
+    ("GET", "/contacts"): "contacts:read",
+    ("GET", "/contacts/{item_id}"): "contacts:read",
+    ("POST", "/contacts"): "contacts:write",
+    ("DELETE", "/contacts/{item_id}"): "contacts:write",
+    ("PUT", "/contacts/{item_id}"): "contacts:write",
+    # Free / people (map to calendar:read)
+    ("GET", "/free"): "calendar:read",
+    ("GET", "/ppl/agenda"): "calendar:read",
+    ("GET", "/ppl/free"): "calendar:read",
+    ("POST", "/ppl/common"): "calendar:read",
+    # Resources (reads; booking would be resources:write when added)
+    ("POST", "/resource/free"): "resources:read",
+    ("POST", "/resource/free-window"): "resources:read",
+    ("POST", "/resource/agenda"): "resources:read",
+    # Address / GAL
+    ("GET", "/addr/resolve"): "addr:read",
+    ("GET", "/addr/validate"): "addr:read",
+    # Trip / routing
+    ("POST", "/trip/geocode"): "trip:read",
+    ("POST", "/trip/route"): "trip:read",
+    # Rules
+    ("GET", "/rules"): "rules:read",
+    ("GET", "/rules/{rule_id}"): "rules:read",
+    ("POST", "/rules"): "rules:write",
+    ("PUT", "/rules/{rule_id}"): "rules:write",
+    ("POST", "/rules/{rule_id}/enable"): "rules:write",
+    ("POST", "/rules/{rule_id}/disable"): "rules:write",
+    ("DELETE", "/rules/{rule_id}"): "rules:write",
+    # Out-of-office
+    ("GET", "/oof"): "oof:read",
+    ("PUT", "/oof"): "oof:write",
+    ("POST", "/oof/enable"): "oof:write",
+    ("POST", "/oof/schedule"): "oof:write",
+    ("POST", "/oof/disable"): "oof:write",
+    # Auth administration
+    ("GET", "/auth/accounts"): "admin:write",
+    ("POST", "/auth/login"): "admin:write",
+    ("GET", "/auth/login/{session_id}"): "admin:write",
+    ("POST", "/auth/login/{session_id}/finish"): "admin:write",
+    ("POST", "/auth/logout"): "admin:write",
+    # Key management
+    ("GET", "/keys"): "keys:read",
+    ("POST", "/keys"): "keys:write",
+    ("DELETE", "/keys/{key_id}"): "keys:write",
+}
+
+
+def _apply_route_scopes() -> None:
+    """Attach the ``require_scope`` dependency to every route in ROUTE_SCOPES.
+
+    Uses FastAPI's own parameterless sub-dependant mechanism (the same one
+    router-level ``dependencies=`` uses) so the check runs after the route is
+    matched and the ``account`` query param is available. Called once after all
+    routes are registered.
+    """
+    covered: set = set()
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for method in route.methods or ():
+            scope = ROUTE_SCOPES.get((method, route.path))
+            if scope is None:
+                continue
+            route.dependant.dependencies.append(
+                get_parameterless_sub_dependant(
+                    depends=Depends(require_scope(scope)), path=route.path
+                )
+            )
+            covered.add((method, route.path))
+    missing = set(ROUTE_SCOPES) - covered
+    if missing:
+        log.warning("ROUTE_SCOPES entries matched no route: %s", sorted(missing))
+
+
+# === Host-header and audit middleware (hardening) ===
+
+
+def _allowed_hosts() -> set:
+    """Return the set of hostnames the Host header may carry."""
+    hosts = {"localhost", "127.0.0.1", "::1", "[::1]"}
+    configured = os.environ.get("H8_SERVICE_HOST")
+    if configured:
+        hosts.add(configured)
+        hosts.add(f"[{configured}]")
+    return hosts
+
+
+def _host_hostname(host_header: str) -> str:
+    """Extract the hostname (dropping any port) from a Host header value."""
+    value = host_header.strip()
+    if not value:
+        return ""
+    if value.startswith("["):
+        # IPv6 literal, e.g. "[::1]" or "[::1]:8787".
+        end = value.find("]")
+        return value[: end + 1] if end != -1 else value
+    if value.count(":") == 1:
+        return value.rsplit(":", 1)[0]
+    return value
+
+
+@app.middleware("http")
+async def audit_middleware(request: Request, call_next):
+    """Append one JSONL audit line per authenticated request (except /health)."""
+    start = time.monotonic()
+    response = await call_next(request)
+    try:
+        if not _audit_enabled() or request.url.path == "/health":
+            return response
+        key = getattr(request.state, "auth_key", None)
+        if key is None:
+            return response
+        duration_ms = round((time.monotonic() - start) * 1000, 2)
+        _write_audit_line(
+            {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "key_id": key.get("id"),
+                "key_name": key.get("name"),
+                "method": request.method,
+                "path": request.url.path,
+                "account": request.query_params.get("account"),
+                "status": response.status_code,
+                "duration_ms": duration_ms,
+            }
+        )
+    except Exception:  # noqa: BLE001 -- auditing must never break a request
+        log.exception("audit logging failed")
+    return response
+
+
+@app.middleware("http")
+async def host_header_middleware(request: Request, call_next):
+    """Reject requests whose Host header is not in the allowlist (DNS-rebinding).
+
+    Runs before authentication (all middleware precedes route dependencies).
+    """
+    hostname = _host_hostname(request.headers.get("host", ""))
+    if hostname and hostname not in _allowed_hosts():
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Host header '{hostname}' is not allowed"},
+        )
+    return await call_next(request)
+
+
+def _audit_file_path() -> Path:
+    """Return ``$XDG_STATE_HOME/h8/audit.jsonl``."""
+    base = os.environ.get("XDG_STATE_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "state"
+    return root / "h8" / "audit.jsonl"
+
+
+def _write_audit_line(entry: dict) -> None:
+    """Append one JSON object as a line to the audit log (open-append per write)."""
+    path = _audit_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def _bootstrap_auth() -> None:
+    """Ensure a usable root key + ``client.key`` exist (runs at startup).
+
+    - No enabled key at all: mint a ``root`` key (``*:*``) and write its raw
+      token to ``client.key`` (0600).
+    - An enabled key exists but ``client.key`` matches none of them: mint a new
+      root key so client and server stay in sync after a keys.json wipe.
+    """
+    if _no_auth():
+        log.warning(
+            "H8_SERVICE_NO_AUTH is set -- ALL API authentication is DISABLED. "
+            "Do not use this outside local debugging."
+        )
+        return
+    if not key_store.has_enabled_key():
+        _mint_root_key("no enabled API keys present")
+        return
+    ckp = client_key_path()
+    if ckp.exists():
+        try:
+            token = ckp.read_text().strip()
+        except OSError:
+            token = ""
+        if key_store.verify_token(token) is None:
+            _mint_root_key("client.key matched no enabled key")
+
+
+def _mint_root_key(reason: str) -> None:
+    """Create a root ``*:*`` key and persist its token to ``client.key`` (0600)."""
+    _record, token = key_store.create_key("root", ["*:*"], None)
+    path = client_key_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(token)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    log.warning(
+        "Bootstrapped root API key (%s); wrote client token to %s", reason, path
+    )
 
 
 def cache_key(prefix: str, **params: Any) -> str:
@@ -1696,9 +2045,8 @@ async def mail_unsubscribe_execute(
 
 # === Auth endpoints (OAuth login/status/logout) ===
 #
-# ADMIN-SCOPE MARKER: these /auth/* endpoints will require admin-scoped API keys
-# once service authentication (Epic D / trx-x706) lands. They are intentionally
-# left open for now.
+# These /auth/* endpoints require the ``admin:write`` scope (wired via
+# ROUTE_SCOPES / _apply_route_scopes below).
 
 
 class AuthLoginRequest(BaseModel):
@@ -1858,7 +2206,7 @@ def _auth_logout(account_ref: str) -> dict:
 
 @app.get("/auth/accounts")
 async def auth_accounts():
-    """List every configured account with its login state (admin-scoped later)."""
+    """List every configured account with its login state (scope: admin:write)."""
     return await run_in_threadpool(_auth_accounts)
 
 
@@ -1892,6 +2240,67 @@ async def auth_logout(payload: AuthLogoutRequest):
         return await run_in_threadpool(_auth_logout, payload.account)
     except AccountResolutionError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# === Key management endpoints (scope: keys:read / keys:write) ===
+
+
+class KeyCreate(BaseModel):
+    """Request model for creating an API key."""
+
+    name: str
+    scopes: List[str]
+    accounts: Optional[List[str]] = None
+
+    @field_validator("scopes", mode="before")
+    @classmethod
+    def _coerce_scopes(cls, v):
+        if isinstance(v, str):
+            return [v]
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        raise ValueError("scopes must be a string or list of strings")
+
+
+@app.get("/keys")
+async def keys_list():
+    """List all API keys (never exposes the token hash)."""
+    return await run_in_threadpool(
+        lambda: [public_key_view(k) for k in key_store.list_keys()]
+    )
+
+
+@app.post("/keys")
+async def keys_create(payload: KeyCreate):
+    """Create an API key. The raw ``token`` is returned exactly once."""
+    try:
+        security.validate_scopes(payload.scopes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    def _create() -> dict:
+        record, token = key_store.create_key(
+            payload.name, payload.scopes, payload.accounts
+        )
+        view = public_key_view(record)
+        view["token"] = token
+        return view
+
+    return await run_in_threadpool(_create)
+
+
+@app.delete("/keys/{key_id}")
+async def keys_delete(key_id: str):
+    """Revoke (disable) an API key. Revoking the last enabled key is allowed."""
+
+    def _revoke() -> dict:
+        if not key_store.revoke(key_id):
+            raise HTTPException(
+                status_code=404, detail=f"No enabled key with id '{key_id}'"
+            )
+        return {"status": "revoked", "id": key_id}
+
+    return await run_in_threadpool(_revoke)
 
 
 # === Server-side auth CLI (`h8-service auth ...`) ===
@@ -2012,6 +2421,105 @@ def _cli_auth_logout(account_ref: Optional[str]) -> int:
     return 0
 
 
+def _cli_keys_create(name: str, scopes: List[str], accounts: Optional[List[str]]) -> int:
+    """Create a key directly on the KeyStore and print the raw token once."""
+    try:
+        security.validate_scopes(scopes)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    record, token = key_store.create_key(name, scopes, accounts)
+    print(f"Created key {record['id']} ({record['name']})")
+    print(f"  scopes:   {', '.join(record['scopes'])}")
+    print(f"  accounts: {record['accounts'] if record['accounts'] else 'any'}")
+    print()
+    print("Token (shown once -- store it now):")
+    print(f"  {token}")
+    return 0
+
+
+def _cli_keys_list() -> int:
+    """Print all keys (id, name, scopes, accounts, state) from the KeyStore."""
+    keys = key_store.list_keys()
+    if not keys:
+        print("No keys defined.")
+        return 0
+    rows = []
+    for key in keys:
+        view = public_key_view(key)
+        rows.append(
+            (
+                view["id"] or "",
+                view["name"] or "",
+                ",".join(view["scopes"]),
+                ",".join(view["accounts"]) if view["accounts"] else "any",
+                "disabled" if view["disabled"] else "enabled",
+            )
+        )
+    headers = ("ID", "NAME", "SCOPES", "ACCOUNTS", "STATE")
+    widths = [
+        max(len(headers[i]), *(len(r[i]) for r in rows)) for i in range(len(headers))
+    ]
+    print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    for row in rows:
+        print("  ".join(row[i].ljust(widths[i]) for i in range(len(row))))
+    return 0
+
+
+def _cli_keys_revoke(key_id: str) -> int:
+    """Disable a key by id directly on the KeyStore."""
+    if key_store.revoke(key_id):
+        print(f"Revoked key {key_id}.")
+        return 0
+    print(f"error: no enabled key with id '{key_id}'", file=sys.stderr)
+    return 1
+
+
+def _keys_cli(argv: List[str]) -> int:
+    """Handle ``h8-service keys <create|list|revoke>`` against the KeyStore."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="h8-service keys",
+        description="Manage h8 service API keys (operates directly on the key store)",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+
+    p_create = sub.add_parser("create", help="Create a new API key")
+    p_create.add_argument("--name", required=True, help="Human-readable key name")
+    p_create.add_argument(
+        "--scopes",
+        required=True,
+        help="Comma-separated scopes, e.g. 'mail:read,calendar:read'",
+    )
+    p_create.add_argument(
+        "--accounts",
+        default=None,
+        help="Comma-separated account restriction (default: any account)",
+    )
+
+    sub.add_parser("list", help="List API keys")
+
+    p_revoke = sub.add_parser("revoke", help="Revoke (disable) a key by id")
+    p_revoke.add_argument("id", help="Key id to revoke")
+
+    args = parser.parse_args(argv)
+
+    if args.action == "create":
+        scopes = [s.strip() for s in args.scopes.split(",") if s.strip()]
+        accounts = (
+            [a.strip() for a in args.accounts.split(",") if a.strip()]
+            if args.accounts
+            else None
+        )
+        return _cli_keys_create(args.name, scopes, accounts)
+    if args.action == "list":
+        return _cli_keys_list()
+    if args.action == "revoke":
+        return _cli_keys_revoke(args.id)
+    return 2
+
+
 def _auth_cli(argv: List[str]) -> int:
     """Handle ``h8-service auth <login|status|logout> [account]``."""
     import argparse
@@ -2040,10 +2548,17 @@ def _auth_cli(argv: List[str]) -> int:
     return 2
 
 
+# Attach scope enforcement to every route in ROUTE_SCOPES. Must run after all
+# @app decorators above have registered their routes.
+_apply_route_scopes()
+
+
 def main() -> None:
     argv = sys.argv[1:]
     if argv and argv[0] == "auth":
         raise SystemExit(_auth_cli(argv[1:]))
+    if argv and argv[0] == "keys":
+        raise SystemExit(_keys_cli(argv[1:]))
     uvicorn.run(
         "h8.service:app",
         host=DEFAULT_HOST,
