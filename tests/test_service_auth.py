@@ -119,6 +119,38 @@ def test_account_restriction_allows_permitted_account(client, keystore):
     assert resp.status_code == 200
 
 
+def test_account_restriction_accepts_email_for_alias(client, keystore, monkeypatch):
+    """A key restricted to alias 'work' also accepts that account's email.
+
+    Regression for the alias<->email-blind restriction: ``account_allowed`` now
+    resolves both sides to canonical identity before comparing.
+    """
+    _rec, token = keystore.create_key("work-only", ["mail:read"], accounts=["work"])
+    cfg = {"accounts": {"work": {"email": "w@example.com", "provider": "ews"}}}
+    monkeypatch.setattr("h8.accounts.get_config", lambda: cfg)
+    with patch("h8.service.get_backend", return_value=_FakeBackend()):
+        resp = client.get(
+            "/mail", params={"account": "w@example.com"}, headers=_auth(token)
+        )
+    assert resp.status_code == 200
+
+
+def test_restricted_key_blocked_on_auth_logout_foreign_account(client, keystore):
+    """A restricted key cannot target a foreign account via the POST body.
+
+    ``/auth/logout`` carries ``account`` in the JSON body (not the query string),
+    so the restriction must be enforced on the body value.
+    """
+    _rec, token = keystore.create_key(
+        "work-only", ["admin:write"], accounts=["work"]
+    )
+    resp = client.post(
+        "/auth/logout", headers=_auth(token), json={"account": "personal"}
+    )
+    assert resp.status_code == 403
+    assert "restricted" in resp.json()["detail"]
+
+
 def test_health_and_capabilities_are_unauthenticated(client):
     with patch("h8.service.get_cache_info", return_value={}):
         assert client.get("/health").status_code == 200

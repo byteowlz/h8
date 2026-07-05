@@ -325,6 +325,28 @@ def _invoke_backend(
     return method(*args, **kwargs)
 
 
+def _backend_supports(account_ref: Optional[str], capability: str) -> bool:
+    """Return whether the backend for ``account_ref`` advertises ``capability``.
+
+    Constructs/looks up the backend (which may resolve the account), so callers
+    MUST invoke it off the event loop via ``run_in_threadpool``.
+    """
+    return capability in get_backend(account_ref).capabilities
+
+
+async def _supports_capability(account_ref: Optional[str], capability: str) -> bool:
+    """Async gate around :func:`_backend_supports` (runs it in the threadpool).
+
+    On an account resolution or unregistered-provider error the capability is
+    reported unsupported so the caller falls through to the real backend call,
+    which surfaces the authoritative error and HTTP status.
+    """
+    try:
+        return await run_in_threadpool(_backend_supports, account_ref, capability)
+    except (AccountResolutionError, BackendNotSupported):
+        return False
+
+
 async def safe_call_with_retry(
     account_ref: Optional[str],
     capability: Optional[str],
@@ -507,6 +529,40 @@ def _enforce_scope(request: Request, required_scope: str) -> None:
     request.state.auth_key = {"id": key.get("id"), "name": key.get("name")}
 
 
+def _enforce_body_account(request: Request, account: Optional[str]) -> None:
+    """Enforce a key's account restriction against a body-supplied ``account``.
+
+    The route-level scope dependency (:func:`_enforce_scope`) only inspects the
+    ``account`` *query* param. POST ``/auth/login`` and ``/auth/logout`` carry the
+    target account in the JSON body, so without this a restricted key could target
+    any account on those routes. Re-verifies the same bearer token and applies
+    :func:`account_allowed` to the body account. ``H8_SERVICE_NO_AUTH`` bypasses.
+
+    Args:
+        request: The incoming request (for the ``Authorization`` header).
+        account: The account reference parsed from the request body, or ``None``.
+
+    Raises:
+        HTTPException: 403 when the key may not target ``account``.
+    """
+    if _no_auth():
+        return
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        # A missing/malformed token was already rejected by the scope dependency.
+        return
+    token = header[7:].strip()
+    key = key_store.verify_token(token)
+    if key is None:
+        return
+    if not account_allowed(key, account):
+        raise HTTPException(
+            status_code=403,
+            detail=f"API key '{key.get('name')}' is restricted to accounts "
+            f"{key.get('accounts')} and may not target account '{account}'",
+        )
+
+
 def require_scope(scope: str):
     """Return a FastAPI dependency enforcing ``scope`` on a route."""
 
@@ -600,6 +656,15 @@ ROUTE_SCOPES: Dict[tuple, str] = {
 }
 
 
+#: (method, path) pairs intentionally served WITHOUT authentication. Any other
+#: route missing from ROUTE_SCOPES is a bug (deny-by-default; see
+#: :func:`_apply_route_scopes`).
+UNAUTHENTICATED_ROUTES: set = {
+    ("GET", "/health"),
+    ("GET", "/capabilities"),
+}
+
+
 def _apply_route_scopes() -> None:
     """Attach the ``require_scope`` dependency to every route in ROUTE_SCOPES.
 
@@ -607,21 +672,39 @@ def _apply_route_scopes() -> None:
     router-level ``dependencies=`` uses) so the check runs after the route is
     matched and the ``account`` query param is available. Called once after all
     routes are registered.
+
+    Deny-by-default: after wiring, every registered ``APIRoute`` that is neither
+    in ROUTE_SCOPES nor in :data:`UNAUTHENTICATED_ROUTES` raises ``RuntimeError``
+    at startup, so a new endpoint cannot silently ship unauthenticated. Auto-added
+    ``HEAD``/``OPTIONS`` methods are ignored.
     """
     covered: set = set()
+    unmapped: list = []
     for route in app.routes:
         if not isinstance(route, APIRoute):
             continue
         for method in route.methods or ():
-            scope = ROUTE_SCOPES.get((method, route.path))
+            if method in ("HEAD", "OPTIONS"):
+                continue
+            key = (method, route.path)
+            scope = ROUTE_SCOPES.get(key)
             if scope is None:
+                if key not in UNAUTHENTICATED_ROUTES:
+                    unmapped.append(key)
                 continue
             route.dependant.dependencies.append(
                 get_parameterless_sub_dependant(
                     depends=Depends(require_scope(scope)), path=route.path
                 )
             )
-            covered.add((method, route.path))
+            covered.add(key)
+    if unmapped:
+        raise RuntimeError(
+            "deny-by-default: route(s) have no scope mapping and are not in the "
+            f"unauthenticated allowlist: {sorted(unmapped)}. Add each to "
+            "ROUTE_SCOPES (per the design doc's scope rules) or, if intentionally "
+            "public, to UNAUTHENTICATED_ROUTES."
+        )
     missing = set(ROUTE_SCOPES) - covered
     if missing:
         log.warning("ROUTE_SCOPES entries matched no route: %s", sorted(missing))
@@ -718,6 +801,9 @@ def _bootstrap_auth() -> None:
 
     - No enabled key at all: mint a ``root`` key (``*:*``) and write its raw
       token to ``client.key`` (0600).
+    - An enabled key exists but ``client.key`` is absent (e.g. the operator
+      deleted only ``client.key``): mint a new root key so the local client has
+      a working token again.
     - An enabled key exists but ``client.key`` matches none of them: mint a new
       root key so client and server stay in sync after a keys.json wipe.
     """
@@ -731,13 +817,15 @@ def _bootstrap_auth() -> None:
         _mint_root_key("no enabled API keys present")
         return
     ckp = client_key_path()
-    if ckp.exists():
-        try:
-            token = ckp.read_text().strip()
-        except OSError:
-            token = ""
-        if key_store.verify_token(token) is None:
-            _mint_root_key("client.key matched no enabled key")
+    if not ckp.exists():
+        _mint_root_key("client.key missing")
+        return
+    try:
+        token = ckp.read_text().strip()
+    except OSError:
+        token = ""
+    if key_store.verify_token(token) is None:
+        _mint_root_key("client.key matched no enabled key")
 
 
 def _mint_root_key(reason: str) -> None:
@@ -1484,18 +1572,21 @@ async def ppl_agenda(
         target_email = resolve_person_alias(person)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # Validate the target email resolves to a real mailbox (trx-bf2h)
-    is_valid = await safe_call_with_retry(
-        account, CAP_GAL, "validate_email", target_email
-    )
-    if isinstance(is_valid, Response):
-        return is_valid
-    if not is_valid:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Email '{target_email}' does not resolve to a valid mailbox. "
-            f"Use 'h8 addr resolve <query>' to search the directory.",
+    # Validate the target email resolves to a real mailbox (trx-bf2h). Only
+    # backends that advertise CAP_GAL can validate; skip for others (e.g. Google)
+    # and proceed straight to the free/busy call.
+    if await _supports_capability(account, CAP_GAL):
+        is_valid = await safe_call_with_retry(
+            account, CAP_GAL, "validate_email", target_email
         )
+        if isinstance(is_valid, Response):
+            return is_valid
+        if not is_valid:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Email '{target_email}' does not resolve to a valid mailbox. "
+                f"Use 'h8 addr resolve <query>' to search the directory.",
+            )
     return await safe_call_with_retry(
         account,
         CAP_FREEBUSY_OTHERS,
@@ -1520,18 +1611,21 @@ async def ppl_free(
         target_email = resolve_person_alias(person)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # Validate the target email resolves to a real mailbox (trx-bf2h)
-    is_valid = await safe_call_with_retry(
-        account, CAP_GAL, "validate_email", target_email
-    )
-    if isinstance(is_valid, Response):
-        return is_valid
-    if not is_valid:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Email '{target_email}' does not resolve to a valid mailbox. "
-            f"Use 'h8 addr resolve <query>' to search the directory.",
+    # Validate the target email resolves to a real mailbox (trx-bf2h). Only
+    # backends that advertise CAP_GAL can validate; skip for others (e.g. Google)
+    # and proceed straight to the free/busy call.
+    if await _supports_capability(account, CAP_GAL):
+        is_valid = await safe_call_with_retry(
+            account, CAP_GAL, "validate_email", target_email
         )
+        if isinstance(is_valid, Response):
+            return is_valid
+        if not is_valid:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Email '{target_email}' does not resolve to a valid mailbox. "
+                f"Use 'h8 addr resolve <query>' to search the directory.",
+            )
     return await safe_call_with_retry(
         account,
         CAP_FREEBUSY_OTHERS,
@@ -1563,23 +1657,26 @@ async def ppl_common(payload: CommonFreeRequest, account: Optional[str] = None):
         raise HTTPException(
             status_code=400, detail="At least 2 people are required for common slots"
         )
-    # Validate all target emails resolve to real mailboxes (trx-bf2h)
-    invalid_emails = []
-    for target_email in target_emails:
-        is_valid = await safe_call_with_retry(
-            account, CAP_GAL, "validate_email", target_email
-        )
-        if isinstance(is_valid, Response):
-            return is_valid
-        if not is_valid:
-            invalid_emails.append(target_email)
-    if invalid_emails:
-        raise HTTPException(
-            status_code=404,
-            detail=f"The following email(s) do not resolve to valid mailboxes: "
-            f"{', '.join(invalid_emails)}. "
-            f"Use 'h8 addr resolve <query>' to search the directory.",
-        )
+    # Validate all target emails resolve to real mailboxes (trx-bf2h). Only
+    # backends that advertise CAP_GAL can validate; skip for others (e.g. Google)
+    # and proceed straight to the free/busy call.
+    if await _supports_capability(account, CAP_GAL):
+        invalid_emails = []
+        for target_email in target_emails:
+            is_valid = await safe_call_with_retry(
+                account, CAP_GAL, "validate_email", target_email
+            )
+            if isinstance(is_valid, Response):
+                return is_valid
+            if not is_valid:
+                invalid_emails.append(target_email)
+        if invalid_emails:
+            raise HTTPException(
+                status_code=404,
+                detail=f"The following email(s) do not resolve to valid mailboxes: "
+                f"{', '.join(invalid_emails)}. "
+                f"Use 'h8 addr resolve <query>' to search the directory.",
+            )
     return await safe_call_with_retry(
         account,
         CAP_FREEBUSY_OTHERS,
@@ -2216,8 +2313,9 @@ async def auth_accounts():
 
 
 @app.post("/auth/login")
-async def auth_login(payload: AuthLoginRequest):
+async def auth_login(payload: AuthLoginRequest, request: Request):
     """Start a login flow for an account (device-code or google auth URL)."""
+    _enforce_body_account(request, payload.account)
     try:
         return await run_in_threadpool(_auth_start_login, payload.account)
     except AccountResolutionError as exc:
@@ -2239,8 +2337,9 @@ async def auth_login_finish(session_id: str, payload: AuthFinishRequest):
 
 
 @app.post("/auth/logout")
-async def auth_logout(payload: AuthLogoutRequest):
+async def auth_logout(payload: AuthLogoutRequest, request: Request):
     """Delete stored OAuth credentials for an account."""
+    _enforce_body_account(request, payload.account)
     try:
         return await run_in_threadpool(_auth_logout, payload.account)
     except AccountResolutionError as exc:

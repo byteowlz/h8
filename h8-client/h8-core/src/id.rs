@@ -104,7 +104,8 @@ impl<'a> IdGenerator<'a> {
         remote_id: &str,
         display_name: Option<&str>,
     ) -> Result<String> {
-        self.db.get_or_create_rule_id(remote_id, display_name, &WordLists::embedded())
+        self.db
+            .get_or_create_rule_id(remote_id, display_name, &WordLists::embedded())
     }
 
     /// Resolve a rule short ID to its remote ID.

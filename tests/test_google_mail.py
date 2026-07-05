@@ -334,8 +334,16 @@ def test_translate_query_cases(query, expected):
 
 
 def test_translate_query_with_dates():
+    # Gmail's ``before:`` is exclusive but the h8 ``to_date`` bound is inclusive,
+    # so the end date is emitted as to_date+1 day (after: stays inclusive).
     q = _translate_query("from:alice", from_date="2026-01-01", to_date="2026-02-01")
-    assert q == "from:alice after:2026/01/01 before:2026/02/01"
+    assert q == "from:alice after:2026/01/01 before:2026/02/02"
+
+
+def test_translate_query_to_date_is_inclusive():
+    # The final day must be included: to_date 2026-02-28 -> before:2026/03/01.
+    q = _translate_query("hi", to_date="2026-02-28")
+    assert q == "hi before:2026/03/01"
 
 
 def test_translate_query_or_group_with_date():
@@ -346,6 +354,8 @@ def test_translate_query_or_group_with_date():
 def test_date_to_gmail_accepts_iso_datetime():
     assert _date_to_gmail("2026-07-05T12:00:00") == "2026/07/05"
     assert _date_to_gmail("2026-07-05") == "2026/07/05"
+    # inclusive_end adds one day (used for Gmail's exclusive ``before:``).
+    assert _date_to_gmail("2026-07-05", inclusive_end=True) == "2026/07/06"
 
 
 # ---------------------------------------------------------------------------

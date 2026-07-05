@@ -11,6 +11,7 @@ import logging
 import threading
 from typing import Any, Optional
 
+from h8.auth import AuthLoginRequired
 from h8.oauth import LoginRequired  # noqa: F401  (re-exported for mixins)
 from h8.oauth.google import get_google_credentials
 from h8.providers.base import AccountConfig
@@ -33,8 +34,24 @@ class GoogleClient:
         self._credentials: Optional[Any] = None
 
     def _get_credentials(self) -> Any:
+        """Return cached Google credentials, acquiring them on first use.
+
+        Translates the OAuth layer's :class:`~h8.oauth.LoginRequired` into
+        :class:`~h8.auth.AuthLoginRequired` (a ``BackendAuthError`` subclass the
+        service maps straight to HTTP 401 with an actionable ``h8 auth login``
+        message and no futile refresh+retry), mirroring the EWS backend. This is
+        the single chokepoint every service builder (``gmail``/``calendar``/
+        ``people``) passes through, so all Google mixins get the same behavior.
+        """
         if self._credentials is None:
-            self._credentials = get_google_credentials(self.account)
+            ref = self.account.ref
+            try:
+                self._credentials = get_google_credentials(self.account)
+            except LoginRequired as exc:
+                raise AuthLoginRequired(
+                    f"Google login required for account '{ref}'. "
+                    f"Run `h8 auth login {ref}` to sign in. ({exc})"
+                ) from exc
         return self._credentials
 
     def _service(self, name: str, version: str) -> Any:

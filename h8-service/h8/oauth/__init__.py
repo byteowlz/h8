@@ -10,6 +10,7 @@ exception (imported by both provider modules), the :func:`login_status` /
 :func:`logout` helpers, and re-exports the provider entry points.
 """
 
+from datetime import timezone
 from typing import Optional
 
 
@@ -80,7 +81,13 @@ def login_status(account: AccountLike) -> dict:
         try:
             creds = google.get_google_credentials(account)
             result["logged_in"] = True
-            result["expires_at"] = creds.expiry.timestamp() if creds.expiry else None
+            # google-auth stores ``expiry`` as a tz-naive UTC datetime; treat it
+            # as UTC so ``.timestamp()`` does not misread it as local time.
+            result["expires_at"] = (
+                creds.expiry.replace(tzinfo=timezone.utc).timestamp()
+                if creds.expiry
+                else None
+            )
         except LoginRequired:
             pass
         except Exception:  # noqa: BLE001 - status must never raise

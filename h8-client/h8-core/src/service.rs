@@ -399,9 +399,11 @@ impl ServiceClient {
         id: &str,
         permanent: bool,
     ) -> Result<Value> {
+        let encoded_id = urlencoding::encode(id);
+        let encoded_folder = urlencoding::encode(folder);
         self.delete(&format!(
             "/mail/{}?account={}&folder={}&permanent={}",
-            id, account, folder, permanent
+            encoded_id, account, encoded_folder, permanent
         ))
     }
 

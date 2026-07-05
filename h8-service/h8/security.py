@@ -186,10 +186,16 @@ def account_allowed(key: Dict[str, Any], account_ref: Optional[str]) -> bool:
     """Return whether ``key`` may target ``account_ref``.
 
     A ``None`` restriction (``accounts`` is ``null``) allows any account. When a
-    restriction list is present, ``account_ref`` must appear in it. A ``None``
-    ``account_ref`` (the caller did not specify one, so the default account is
-    used) is always permitted -- restriction only blocks explicit foreign
-    targets.
+    restriction list is present, ``account_ref`` must match one of its entries by
+    canonical identity: the requested reference and each restriction entry are
+    resolved via :func:`h8.accounts.resolve_account`, and access is granted when
+    the resolved emails are equal (case-insensitive) or the aliases match. A raw
+    string match is honoured first, so restriction works even without config.
+
+    A ``None`` ``account_ref`` (the caller did not specify one, so the default
+    account is used) is always permitted -- restriction only blocks explicit
+    foreign targets. If the requested reference cannot be resolved, access is
+    denied (an explicit foreign/unresolvable target must not slip through).
 
     Args:
         key: A key record.
@@ -203,7 +209,31 @@ def account_allowed(key: Dict[str, Any], account_ref: Optional[str]) -> bool:
         return True
     if account_ref is None:
         return True
-    return account_ref in restriction
+    # Fast path: exact string match (alias or email as written).
+    if account_ref in restriction:
+        return True
+
+    # Canonical identity: resolve alias<->email so a key restricted to ["work"]
+    # accepts the account's email (and vice versa).
+    from h8.accounts import AccountResolutionError, resolve_account
+
+    try:
+        requested = resolve_account(account_ref)
+    except AccountResolutionError:
+        # Explicit foreign / unresolvable target -> deny.
+        return False
+
+    requested_email = (requested.email or "").lower()
+    for entry in restriction:
+        try:
+            allowed = resolve_account(entry)
+        except AccountResolutionError:
+            continue
+        if requested_email and (allowed.email or "").lower() == requested_email:
+            return True
+        if requested.alias and allowed.alias == requested.alias:
+            return True
+    return False
 
 
 def _state_dir() -> Path:

@@ -39,11 +39,12 @@ import mimetypes
 import os
 import re
 from collections import namedtuple
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import getaddresses, parseaddr
 from typing import Any, List, Optional, Tuple
 
+from h8.auth import AuthLoginRequired
 from h8.oauth import LoginRequired
 from h8.providers.base import (
     CAP_MAIL_SCHEDULED_SEND,
@@ -281,8 +282,13 @@ def _load_attachment(spec: dict) -> Tuple[str, bytes]:
 # ---------------------------------------------------------------------------
 
 
-def _date_to_gmail(value: str) -> Optional[str]:
-    """Convert an ISO date (or full ISO datetime) to Gmail ``yyyy/mm/dd``."""
+def _date_to_gmail(value: str, inclusive_end: bool = False) -> Optional[str]:
+    """Convert an ISO date (or full ISO datetime) to Gmail ``yyyy/mm/dd``.
+
+    Gmail's ``before:`` operator is exclusive while the h8 ``to_date`` bound is
+    inclusive. Pass ``inclusive_end=True`` when formatting a ``before:`` bound so
+    one day is added and the end date is included.
+    """
     try:
         dt = datetime.fromisoformat(value)
     except ValueError:
@@ -290,6 +296,8 @@ def _date_to_gmail(value: str) -> Optional[str]:
             dt = datetime.strptime(value, "%Y-%m-%d")
         except ValueError:
             return None
+    if inclusive_end:
+        dt = dt + timedelta(days=1)
     return dt.strftime("%Y/%m/%d")
 
 
@@ -336,7 +344,7 @@ def _translate_query(
         if gm:
             parts.append(f"after:{gm}")
     if to_date:
-        gm = _date_to_gmail(to_date)
+        gm = _date_to_gmail(to_date, inclusive_end=True)
         if gm:
             parts.append(f"before:{gm}")
     return " ".join(parts)
@@ -430,7 +438,7 @@ def _execute(request: Any) -> Any:
     try:
         return request.execute()
     except LoginRequired as exc:
-        raise BackendAuthError(str(exc)) from exc
+        raise AuthLoginRequired(str(exc)) from exc
     except BackendError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -461,7 +469,7 @@ class GoogleMailMixin:
         try:
             return self._client.gmail()
         except LoginRequired as exc:
-            raise BackendAuthError(str(exc)) from exc
+            raise AuthLoginRequired(str(exc)) from exc
 
     # -- label / folder resolution -----------------------------------------
 

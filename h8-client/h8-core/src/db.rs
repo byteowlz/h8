@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use rusqlite::{OptionalExtension, params, Connection};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Error, Result};
 use crate::types::{AddressEntry, CalendarEventSync, FolderSync, MessageSync};

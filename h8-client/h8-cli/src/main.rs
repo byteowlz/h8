@@ -11652,10 +11652,14 @@ fn print_auth_accounts(result: &Value) {
             .get("logged_in")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // /auth/accounts emits expires_at as an epoch-seconds NUMBER (or null),
+        // not a string; render it as a readable UTC datetime.
         let expires_at = acct
             .get("expires_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("-");
+            .and_then(|v| v.as_f64())
+            .and_then(|secs| DateTime::<Utc>::from_timestamp(secs as i64, 0))
+            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| "-".to_string());
         let status = if logged_in { "yes" } else { "no" };
         println!(
             "{:<16} {:<32} {:<10} {:<8} {}",
