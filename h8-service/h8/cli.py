@@ -18,7 +18,9 @@ from .dateparser import parse_datetime, parse_attendees, parse_date_range
 from .schemas import extracted_event_to_h8, extracted_contact_to_h8
 
 
-DEFAULT_ACCOUNT = "user@example.com"
+# No hardcoded default account; None means "use the configured default account"
+# (resolved from config.toml). A clear error is raised if none is configured.
+DEFAULT_ACCOUNT = None
 
 
 def output(data: Any, as_json: bool = True):

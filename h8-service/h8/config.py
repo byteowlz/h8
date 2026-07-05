@@ -8,7 +8,10 @@ from typing import Any
 APP_NAME = "h8"
 
 DEFAULT_CONFIG = {
-    "account": "user@example.com",
+    # No hardcoded default account: the user must configure one via a top-level
+    # ``account = "<alias-or-email>"`` or an ``[accounts.*]`` table. ``None`` means
+    # "no default configured" (callers raise a clear error).
+    "account": None,
     "timezone": "Europe/Berlin",
     "free_slots": {
         "start_hour": 9,
@@ -16,6 +19,7 @@ DEFAULT_CONFIG = {
         "exclude_weekends": True,
     },
     "people": {},  # Alias -> email mapping, e.g., {'Roman': 'roman.kowalski@example.com'}
+    "accounts": {},  # Alias -> {email, provider, ...} tables (see h8/accounts.py)
 }
 
 
@@ -42,11 +46,25 @@ def create_default_config() -> None:
 
     default_toml = """# h8 configuration
 
-# Default email account
-account = "user@example.com"
+# Default account: an alias defined under [accounts.*] below, or a bare email
+# address (which is treated as an EWS/M365 mailbox). Set this before using h8.
+# account = "work"
 
 # Timezone for calendar operations
 timezone = "Europe/Berlin"
+
+# Account registry. Each [accounts.<alias>] table defines a mailbox and its
+# provider. Example:
+#
+# [accounts.work]
+# email = "you@example.com"
+# provider = "ews"      # "ews" | "google" | "graph"
+#
+# [accounts.personal]
+# email = "you@gmail.com"
+# provider = "google"
+# client_id = "....apps.googleusercontent.com"
+# client_secret = "..."
 
 # Free slots configuration
 [free_slots]
