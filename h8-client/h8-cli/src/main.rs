@@ -61,6 +61,8 @@ fn try_main() -> Result<()> {
         Command::Rules { command } => handle_rules(&ctx, command),
         Command::Oof { command } => handle_oof(&ctx, command),
         Command::Sync(args) => handle_sync(&ctx, args),
+        Command::Auth { command } => handle_auth(&ctx, command),
+        Command::Keys { command } => handle_keys(&ctx, command),
     }
 }
 
@@ -241,6 +243,28 @@ enum Command {
     ///   h8 sync --calendar --mail      # Only sync calendar and mail
     ///   h8 sync -w 8 -p 2              # Sync 8 weeks future, 2 weeks past
     Sync(SyncArgs),
+    /// Manage OAuth logins for mail/calendar accounts
+    ///
+    /// Examples:
+    ///   h8 auth status
+    ///   h8 auth login
+    ///   h8 auth login personal
+    ///   h8 auth logout personal
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    /// Manage scoped API keys for programmatic access to h8-service
+    ///
+    /// Examples:
+    ///   h8 keys list
+    ///   h8 keys create --name claude-mail-reader --scopes mail:read,calendar:read
+    ///   h8 keys create --name agent --scopes "mail:*" --accounts work,personal
+    ///   h8 keys revoke k_x7ab
+    Keys {
+        #[command(subcommand)]
+        command: KeysCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1641,6 +1665,53 @@ enum ServiceCommand {
     Status,
 }
 
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Show login status for all configured accounts
+    Status,
+    /// Interactively log in an account (device-code or browser URL flow)
+    Login(AuthAccountArgs),
+    /// Log out an account, discarding its stored credentials
+    Logout(AuthAccountArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct AuthAccountArgs {
+    /// Account alias or email (defaults to the configured default account)
+    account: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum KeysCommand {
+    /// List API keys
+    #[command(alias = "ls")]
+    List,
+    /// Create a new scoped API key (the token is shown once)
+    Create(KeysCreateArgs),
+    /// Revoke (delete) an API key
+    #[command(alias = "delete")]
+    Revoke(KeysRevokeArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct KeysCreateArgs {
+    /// Human-readable name for the key (e.g. "claude-mail-reader")
+    #[arg(long)]
+    name: String,
+    /// Comma-separated scopes (e.g. "mail:read,calendar:read", "mail:*", "*:*")
+    #[arg(long)]
+    scopes: String,
+    /// Comma-separated account aliases/emails this key may access (default: all accounts)
+    #[arg(long)]
+    accounts: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct KeysRevokeArgs {
+    /// Key ID (e.g. "k_x7ab")
+    id: String,
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeContext {
     common: CommonOpts,
@@ -1716,7 +1787,12 @@ impl RuntimeContext {
 
     fn service_client(&self) -> Result<ServiceClient> {
         let timeout = self.common.timeout.map(Duration::from_secs);
-        ServiceClient::new(&self.config.service_url, timeout).map_err(|e| anyhow!("{e}"))
+        ServiceClient::with_token(
+            &self.config.service_url,
+            timeout,
+            self.config.service_token.as_deref(),
+        )
+        .map_err(|e| anyhow!("{e}"))
     }
 }
 
@@ -1776,7 +1852,8 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 .map_err(|e| anyhow!("{e}"))?;
 
             // Sync newly created event
-            let events_with_ids = sync_calendar_events(ctx, &account, &serde_json::json!([event]), None)?;
+            let events_with_ids =
+                sync_calendar_events(ctx, &account, &serde_json::json!([event]), None)?;
             if let Some(e) = events_with_ids.as_array().and_then(|a| a.first()) {
                 emit_output(&ctx.common, e)?;
             } else {
@@ -1785,7 +1862,9 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
         }
         CalendarCommand::Cancel(args) => {
             // Get events to cancel - either by ID or by query
-            let events_to_cancel: Vec<(String, String, String)> = if let Some(ref query) = args.query {
+            let events_to_cancel: Vec<(String, String, String)> = if let Some(ref query) =
+                args.query
+            {
                 // Search for events matching query
                 let (from_date, to_date, _) = parse_date_range_expr(query);
                 let results = client
@@ -1798,7 +1877,10 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                         arr.iter()
                             .filter_map(|e| {
                                 let id = e.get("id").and_then(|v| v.as_str())?;
-                                let subject = e.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
+                                let subject = e
+                                    .get("subject")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("(no subject)");
                                 let start = e.get("start").and_then(|v| v.as_str()).unwrap_or("");
                                 Some((id.to_string(), subject.to_string(), start.to_string()))
                             })
@@ -1854,7 +1936,10 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                                 let _ = id_gen.free(remote_id);
                             }
                         } else {
-                            let err = result.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                            let err = result
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown error");
                             errors.push(format!("{}: {}", subject, err));
                         }
                     }
@@ -1868,7 +1953,11 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 }
             }
 
-            println!("\nCancelled {} of {} event(s)", cancelled, events_to_cancel.len());
+            println!(
+                "\nCancelled {} of {} event(s)",
+                cancelled,
+                events_to_cancel.len()
+            );
         }
         CalendarCommand::Delete(args) => {
             // Resolve word ID to remote ID if needed
@@ -1952,22 +2041,29 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             emit_output(&ctx.common, &events_with_ids)?;
         }
         CalendarCommand::Show(args) => {
-            let (from_date, to_date, description) = if args.from_date.is_some() || args.to_date.is_some() {
-                // Explicit --from/--to flags take precedence, normalize flexible formats
-                let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
-                let from = args.from_date.map(|d| normalize_date_arg(&d)).unwrap_or_else(|| today.clone());
-                // Default --to: today if only --from given (shows range from past to now)
-                let to = args.to_date.map(|d| normalize_date_arg(&d)).unwrap_or_else(|| today.clone());
-                let desc = format!("{} to {}", from, to);
-                (from, to, desc)
-            } else {
-                let when_text = if args.when.is_empty() {
-                    "today".to_string()
+            let (from_date, to_date, description) =
+                if args.from_date.is_some() || args.to_date.is_some() {
+                    // Explicit --from/--to flags take precedence, normalize flexible formats
+                    let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
+                    let from = args
+                        .from_date
+                        .map(|d| normalize_date_arg(&d))
+                        .unwrap_or_else(|| today.clone());
+                    // Default --to: today if only --from given (shows range from past to now)
+                    let to = args
+                        .to_date
+                        .map(|d| normalize_date_arg(&d))
+                        .unwrap_or_else(|| today.clone());
+                    let desc = format!("{} to {}", from, to);
+                    (from, to, desc)
                 } else {
-                    args.when.join(" ")
+                    let when_text = if args.when.is_empty() {
+                        "today".to_string()
+                    } else {
+                        args.when.join(" ")
+                    };
+                    parse_date_range_expr(&when_text)
                 };
-                parse_date_range_expr(&when_text)
-            };
 
             // Try local cache first for single-day queries
             let db_path = ctx.paths.sync_db_path(&account);
@@ -2079,7 +2175,10 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             // Check for errors
             if let Some(success) = event.get("success").and_then(|v| v.as_bool()) {
                 if !success {
-                    let err = event.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                    let err = event
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown error");
                     return Err(anyhow!("{}", err));
                 }
             }
@@ -2093,10 +2192,14 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 // Explicit --start/--end: normalize flexible date formats, input is the subject
                 let date_only_re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$").unwrap();
 
-                let start_raw = args.start.map(|s| normalize_date_arg(&s)).unwrap_or_else(|| {
-                    Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
-                });
-                let end_raw = args.end.map(|s| normalize_date_arg(&s)).unwrap_or_else(|| start_raw.clone());
+                let start_raw = args
+                    .start
+                    .map(|s| normalize_date_arg(&s))
+                    .unwrap_or_else(|| Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
+                let end_raw = args
+                    .end
+                    .map(|s| normalize_date_arg(&s))
+                    .unwrap_or_else(|| start_raw.clone());
 
                 let start_is_date_only = date_only_re.is_match(&start_raw);
                 let end_is_date_only = date_only_re.is_match(&end_raw);
@@ -2125,16 +2228,25 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 });
 
                 if is_all_day {
-                    p.as_object_mut().unwrap().insert("is_all_day".to_string(), serde_json::json!(true));
+                    p.as_object_mut()
+                        .unwrap()
+                        .insert("is_all_day".to_string(), serde_json::json!(true));
                 }
                 if let Some(loc) = &args.location {
-                    p.as_object_mut().unwrap().insert("location".to_string(), serde_json::json!(loc));
+                    p.as_object_mut()
+                        .unwrap()
+                        .insert("location".to_string(), serde_json::json!(loc));
                 }
                 p
             } else {
                 // Natural language parsing via service
                 client
-                    .calendar_parse_natural(&account, &input_text, args.duration, args.location.as_deref())
+                    .calendar_parse_natural(
+                        &account,
+                        &input_text,
+                        args.duration,
+                        args.location.as_deref(),
+                    )
                     .map_err(|e| anyhow!("{e}"))?
             };
 
@@ -2144,10 +2256,14 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 .map_err(|e| anyhow!("{e}"))?;
 
             // Sync newly created event
-            let events_with_ids = sync_calendar_events(ctx, &account, &serde_json::json!([event]), None)?;
+            let events_with_ids =
+                sync_calendar_events(ctx, &account, &serde_json::json!([event]), None)?;
 
             if !ctx.common.json && !ctx.common.yaml {
-                let subject = payload.get("subject").and_then(|v| v.as_str()).unwrap_or("Event");
+                let subject = payload
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Event");
                 let start = payload.get("start").and_then(|v| v.as_str()).unwrap_or("");
                 let end = payload.get("end").and_then(|v| v.as_str()).unwrap_or("");
                 println!("Created: {}", subject);
@@ -2158,10 +2274,8 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 // Display attendees if present
                 if let Some(attendees) = payload.get("attendees").and_then(|v| v.as_array()) {
                     if !attendees.is_empty() {
-                        let emails: Vec<&str> = attendees
-                            .iter()
-                            .filter_map(|v| v.as_str())
-                            .collect();
+                        let emails: Vec<&str> =
+                            attendees.iter().filter_map(|v| v.as_str()).collect();
                         if !emails.is_empty() {
                             println!("  With: {}", emails.join(", "));
                         }
@@ -2170,10 +2284,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 // Also check required_attendees and optional_attendees
                 if let Some(req) = payload.get("required_attendees").and_then(|v| v.as_array()) {
                     if !req.is_empty() {
-                        let emails: Vec<&str> = req
-                            .iter()
-                            .filter_map(|v| v.as_str())
-                            .collect();
+                        let emails: Vec<&str> = req.iter().filter_map(|v| v.as_str()).collect();
                         if !emails.is_empty() {
                             println!("  Required: {}", emails.join(", "));
                         }
@@ -2181,10 +2292,7 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
                 }
                 if let Some(opt) = payload.get("optional_attendees").and_then(|v| v.as_array()) {
                     if !opt.is_empty() {
-                        let emails: Vec<&str> = opt
-                            .iter()
-                            .filter_map(|v| v.as_str())
-                            .collect();
+                        let emails: Vec<&str> = opt.iter().filter_map(|v| v.as_str()).collect();
                         if !emails.is_empty() {
                             println!("  Optional: {}", emails.join(", "));
                         }
@@ -2231,7 +2339,10 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
             });
 
             if is_all_day {
-                payload.as_object_mut().unwrap().insert("is_all_day".to_string(), serde_json::json!(true));
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("is_all_day".to_string(), serde_json::json!(true));
             }
 
             let result = client
@@ -2269,11 +2380,19 @@ fn handle_calendar(ctx: &RuntimeContext, cmd: CalendarCommand) -> Result<()> {
         CalendarCommand::Rsvp(args) => {
             let remote_id = resolve_calendar_id(ctx, &account, &args.id)?;
             let result = client
-                .calendar_rsvp(&account, &remote_id, args.response.as_str(), args.message.as_deref())
+                .calendar_rsvp(
+                    &account,
+                    &remote_id,
+                    args.response.as_str(),
+                    args.message.as_deref(),
+                )
                 .map_err(|e| anyhow!("{e}"))?;
 
             if !ctx.common.json && !ctx.common.yaml {
-                let subject = result.get("subject").and_then(|v| v.as_str()).unwrap_or("Meeting");
+                let subject = result
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Meeting");
                 println!("Responded '{}' to: {}", args.response.as_str(), subject);
             }
             emit_output(&ctx.common, &result)?;
@@ -2655,7 +2774,8 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
     ];
 
     // 3a. Weekday + "next week" pattern (e.g., "friday next week", "next week friday")
-    let next_week_re = Regex::new(r"(?i)\b(next\s+week|nächste\s+woche|naechste\s+woche)\b").unwrap();
+    let next_week_re =
+        Regex::new(r"(?i)\b(next\s+week|nächste\s+woche|naechste\s+woche)\b").unwrap();
     if next_week_re.is_match(&text_lower) {
         for (name, weekday) in weekdays {
             let pattern = format!(r"(?i)\b{}\b", regex::escape(name));
@@ -2663,7 +2783,11 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
                 // Calculate next week's occurrence of this weekday
                 // First find next Monday
                 let days_until_monday = (7 - now.weekday().num_days_from_monday()) % 7;
-                let days_until_monday = if days_until_monday == 0 { 7 } else { days_until_monday };
+                let days_until_monday = if days_until_monday == 0 {
+                    7
+                } else {
+                    days_until_monday
+                };
                 let next_monday = today + ChronoDuration::days(days_until_monday as i64);
                 // Then find the weekday within next week (0 = Monday, 6 = Sunday)
                 let target_offset = weekday.num_days_from_monday() as i64;
@@ -2676,7 +2800,8 @@ fn parse_single_date(text: &str) -> Option<(NaiveDate, String)> {
     // 3b. "<weekday> after next" / "next <weekday> after next" / "übernächsten <weekday>"
     let after_next_re = Regex::new(r"(?i)(?:(?:next\s+)?(\w+)\s+after\s+next|übernächsten?\s+(\w+)|uebernächsten?\s+(\w+)|uebernachsten?\s+(\w+))").unwrap();
     if let Some(caps) = after_next_re.captures(&text_lower) {
-        let day_name = caps.get(1)
+        let day_name = caps
+            .get(1)
             .or_else(|| caps.get(2))
             .or_else(|| caps.get(3))
             .or_else(|| caps.get(4))
@@ -2901,9 +3026,8 @@ fn normalize_date_arg(text: &str) -> String {
     let text_lower = text.to_lowercase().trim().to_string();
 
     // "past N days" / "last N days" / "letzte N tage"
-    let past_days_re = Regex::new(
-        r"(?i)^(?:past|last|letzte[rn]?)\s+(\d+)\s+(?:days?|tage?)$"
-    ).unwrap();
+    let past_days_re =
+        Regex::new(r"(?i)^(?:past|last|letzte[rn]?)\s+(\d+)\s+(?:days?|tage?)$").unwrap();
     if let Some(caps) = past_days_re.captures(&text_lower) {
         if let Ok(n) = caps.get(1).unwrap().as_str().parse::<i64>() {
             let target = today - ChronoDuration::days(n);
@@ -2912,9 +3036,7 @@ fn normalize_date_arg(text: &str) -> String {
     }
 
     // "past week" / "last week" / "letzte woche" -> Monday of last week
-    let last_week_re = Regex::new(
-        r"(?i)^(?:past|last|letzte[rn]?)\s+(?:week|woche)$"
-    ).unwrap();
+    let last_week_re = Regex::new(r"(?i)^(?:past|last|letzte[rn]?)\s+(?:week|woche)$").unwrap();
     if last_week_re.is_match(&text_lower) {
         let days_since_monday = now.weekday().num_days_from_monday() as i64;
         let last_monday = today - ChronoDuration::days(days_since_monday + 7);
@@ -2922,38 +3044,36 @@ fn normalize_date_arg(text: &str) -> String {
     }
 
     // "past month" / "last month" / "letzter monat" -> 30 days ago
-    let last_month_re = Regex::new(
-        r"(?i)^(?:past|last|letzte[rn]?)\s+(?:month|monat)$"
-    ).unwrap();
+    let last_month_re = Regex::new(r"(?i)^(?:past|last|letzte[rn]?)\s+(?:month|monat)$").unwrap();
     if last_month_re.is_match(&text_lower) {
         let target = today - ChronoDuration::days(30);
         return target.format("%Y-%m-%d").to_string();
     }
 
     // "past year" / "last year" / "letztes jahr" -> 365 days ago
-    let last_year_re = Regex::new(
-        r"(?i)^(?:past|last|letzte[rs]?)\s+(?:year|jahr)$"
-    ).unwrap();
+    let last_year_re = Regex::new(r"(?i)^(?:past|last|letzte[rs]?)\s+(?:year|jahr)$").unwrap();
     if last_year_re.is_match(&text_lower) {
         let target = today - ChronoDuration::days(365);
         return target.format("%Y-%m-%d").to_string();
     }
 
     // "next week" / "nächste woche" -> Monday of next week
-    let next_week_re = Regex::new(
-        r"(?i)^(?:next|nächste[rn]?|naechste[rn]?)\s+(?:week|woche)$"
-    ).unwrap();
+    let next_week_re =
+        Regex::new(r"(?i)^(?:next|nächste[rn]?|naechste[rn]?)\s+(?:week|woche)$").unwrap();
     if next_week_re.is_match(&text_lower) {
         let days_until_monday = (7 - now.weekday().num_days_from_monday()) % 7;
-        let days_until_monday = if days_until_monday == 0 { 7 } else { days_until_monday };
+        let days_until_monday = if days_until_monday == 0 {
+            7
+        } else {
+            days_until_monday
+        };
         let next_monday = today + ChronoDuration::days(days_until_monday as i64);
         return next_monday.format("%Y-%m-%d").to_string();
     }
 
     // "next month" / "nächster monat" -> 1st of next month
-    let next_month_re = Regex::new(
-        r"(?i)^(?:next|nächste[rn]?|naechste[rn]?)\s+(?:month|monat)$"
-    ).unwrap();
+    let next_month_re =
+        Regex::new(r"(?i)^(?:next|nächste[rn]?|naechste[rn]?)\s+(?:month|monat)$").unwrap();
     if next_month_re.is_match(&text_lower) {
         let (year, month) = if now.month() == 12 {
             (now.year() + 1, 1)
@@ -2966,9 +3086,8 @@ fn normalize_date_arg(text: &str) -> String {
     }
 
     // "next N days" / "nächste N tage"
-    let next_days_re = Regex::new(
-        r"(?i)^(?:next|nächste[rn]?|naechste[rn]?)\s+(\d+)\s+(?:days?|tage?)$"
-    ).unwrap();
+    let next_days_re =
+        Regex::new(r"(?i)^(?:next|nächste[rn]?|naechste[rn]?)\s+(\d+)\s+(?:days?|tage?)$").unwrap();
     if let Some(caps) = next_days_re.captures(&text_lower) {
         if let Ok(n) = caps.get(1).unwrap().as_str().parse::<i64>() {
             let target = today + ChronoDuration::days(n);
@@ -3144,8 +3263,7 @@ fn compute_week_range(args: &CalendarWeeksArgs) -> Result<(NaiveDate, NaiveDate)
         if let Some((date, _)) = parse_single_date(from) {
             date
         } else {
-            NaiveDate::parse_from_str(&normalize_date_arg(from), "%Y-%m-%d")
-                .unwrap_or(today)
+            NaiveDate::parse_from_str(&normalize_date_arg(from), "%Y-%m-%d").unwrap_or(today)
         }
     } else if args.past {
         today - ChronoDuration::weeks(args.count)
@@ -3174,18 +3292,41 @@ fn compute_month_range(args: &CalendarMonthsArgs) -> Result<(NaiveDate, NaiveDat
     let start_month = if let Some(ref from) = args.from {
         // Try month name first
         let months: &[(&str, u32)] = &[
-            ("january", 1), ("jan", 1), ("januar", 1),
-            ("february", 2), ("feb", 2), ("februar", 2),
-            ("march", 3), ("mar", 3), ("maerz", 3), ("märz", 3),
-            ("april", 4), ("apr", 4),
-            ("may", 5), ("mai", 5),
-            ("june", 6), ("jun", 6), ("juni", 6),
-            ("july", 7), ("jul", 7), ("juli", 7),
-            ("august", 8), ("aug", 8),
-            ("september", 9), ("sep", 9), ("sept", 9),
-            ("october", 10), ("oct", 10), ("oktober", 10), ("okt", 10),
-            ("november", 11), ("nov", 11),
-            ("december", 12), ("dec", 12), ("dezember", 12), ("dez", 12),
+            ("january", 1),
+            ("jan", 1),
+            ("januar", 1),
+            ("february", 2),
+            ("feb", 2),
+            ("februar", 2),
+            ("march", 3),
+            ("mar", 3),
+            ("maerz", 3),
+            ("märz", 3),
+            ("april", 4),
+            ("apr", 4),
+            ("may", 5),
+            ("mai", 5),
+            ("june", 6),
+            ("jun", 6),
+            ("juni", 6),
+            ("july", 7),
+            ("jul", 7),
+            ("juli", 7),
+            ("august", 8),
+            ("aug", 8),
+            ("september", 9),
+            ("sep", 9),
+            ("sept", 9),
+            ("october", 10),
+            ("oct", 10),
+            ("oktober", 10),
+            ("okt", 10),
+            ("november", 11),
+            ("nov", 11),
+            ("december", 12),
+            ("dec", 12),
+            ("dezember", 12),
+            ("dez", 12),
         ];
         let from_lower = from.to_lowercase();
         let mut found_month: Option<u32> = None;
@@ -3201,8 +3342,7 @@ fn compute_month_range(args: &CalendarMonthsArgs) -> Result<(NaiveDate, NaiveDat
         } else if let Ok(d) = NaiveDate::parse_from_str(from, "%Y-%m") {
             d
         } else {
-            NaiveDate::parse_from_str(&normalize_date_arg(from), "%Y-%m-%d")
-                .unwrap_or(today)
+            NaiveDate::parse_from_str(&normalize_date_arg(from), "%Y-%m-%d").unwrap_or(today)
         }
     } else if args.past {
         let mut year = today.year();
@@ -3315,7 +3455,10 @@ fn parse_schedule_datetime(text: &str) -> Result<String> {
         remaining = time_24h_re.replace(&remaining, "").to_string();
     } else if let Some(caps) = time_ampm_re.captures(&text_lower) {
         hour = caps.get(1).unwrap().as_str().parse().unwrap_or(9);
-        minute = caps.get(2).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
+        minute = caps
+            .get(2)
+            .map(|m| m.as_str().parse().unwrap_or(0))
+            .unwrap_or(0);
         let ampm = caps.get(3).unwrap().as_str();
         if ampm == "pm" && hour != 12 {
             hour += 12;
@@ -3345,12 +3488,8 @@ fn parse_schedule_datetime(text: &str) -> Result<String> {
     }
 
     // Relative days
-    let relative_days: &[(&str, i64)] = &[
-        ("today", 0),
-        ("heute", 0),
-        ("tomorrow", 1),
-        ("morgen", 1),
-    ];
+    let relative_days: &[(&str, i64)] =
+        &[("today", 0), ("heute", 0), ("tomorrow", 1), ("morgen", 1)];
     for (keyword, offset) in relative_days {
         if remaining.contains(keyword) {
             date = now.date_naive() + ChronoDuration::days(*offset);
@@ -3360,13 +3499,27 @@ fn parse_schedule_datetime(text: &str) -> Result<String> {
 
     // Weekday names (next occurrence)
     let weekdays: &[(&str, Weekday)] = &[
-        ("monday", Weekday::Mon), ("mon", Weekday::Mon), ("montag", Weekday::Mon),
-        ("tuesday", Weekday::Tue), ("tue", Weekday::Tue), ("dienstag", Weekday::Tue),
-        ("wednesday", Weekday::Wed), ("wed", Weekday::Wed), ("mittwoch", Weekday::Wed),
-        ("thursday", Weekday::Thu), ("thu", Weekday::Thu), ("donnerstag", Weekday::Thu),
-        ("friday", Weekday::Fri), ("fri", Weekday::Fri), ("freitag", Weekday::Fri),
-        ("saturday", Weekday::Sat), ("sat", Weekday::Sat), ("samstag", Weekday::Sat),
-        ("sunday", Weekday::Sun), ("sun", Weekday::Sun), ("sonntag", Weekday::Sun),
+        ("monday", Weekday::Mon),
+        ("mon", Weekday::Mon),
+        ("montag", Weekday::Mon),
+        ("tuesday", Weekday::Tue),
+        ("tue", Weekday::Tue),
+        ("dienstag", Weekday::Tue),
+        ("wednesday", Weekday::Wed),
+        ("wed", Weekday::Wed),
+        ("mittwoch", Weekday::Wed),
+        ("thursday", Weekday::Thu),
+        ("thu", Weekday::Thu),
+        ("donnerstag", Weekday::Thu),
+        ("friday", Weekday::Fri),
+        ("fri", Weekday::Fri),
+        ("freitag", Weekday::Fri),
+        ("saturday", Weekday::Sat),
+        ("sat", Weekday::Sat),
+        ("samstag", Weekday::Sat),
+        ("sunday", Weekday::Sun),
+        ("sun", Weekday::Sun),
+        ("sonntag", Weekday::Sun),
     ];
     for (name, weekday) in weekdays {
         if remaining.contains(name) {
@@ -3394,21 +3547,41 @@ fn parse_schedule_datetime(text: &str) -> Result<String> {
 
     // Month names: "jan 20", "20 jan", "jan 20 2026"
     let months: &[(&str, u32)] = &[
-        ("january", 1), ("jan", 1), ("februar", 2), ("feb", 2),
-        ("march", 3), ("mar", 3), ("april", 4), ("apr", 4),
-        ("may", 5), ("mai", 5), ("june", 6), ("jun", 6),
-        ("july", 7), ("jul", 7), ("august", 8), ("aug", 8),
-        ("september", 9), ("sep", 9), ("october", 10), ("oct", 10),
-        ("november", 11), ("nov", 11), ("december", 12), ("dec", 12),
+        ("january", 1),
+        ("jan", 1),
+        ("februar", 2),
+        ("feb", 2),
+        ("march", 3),
+        ("mar", 3),
+        ("april", 4),
+        ("apr", 4),
+        ("may", 5),
+        ("mai", 5),
+        ("june", 6),
+        ("jun", 6),
+        ("july", 7),
+        ("jul", 7),
+        ("august", 8),
+        ("aug", 8),
+        ("september", 9),
+        ("sep", 9),
+        ("october", 10),
+        ("oct", 10),
+        ("november", 11),
+        ("nov", 11),
+        ("december", 12),
+        ("dec", 12),
     ];
     for (month_name, month_num) in months {
         if remaining.contains(month_name) {
             let day_re = Regex::new(r"(\d{1,2})").unwrap();
             let year_re = Regex::new(r"(\d{4})").unwrap();
-            let day: u32 = day_re.captures(remaining)
+            let day: u32 = day_re
+                .captures(remaining)
                 .and_then(|c| c.get(1).map(|m| m.as_str().parse().unwrap_or(1)))
                 .unwrap_or(1);
-            let year: i32 = year_re.captures(remaining)
+            let year: i32 = year_re
+                .captures(remaining)
                 .and_then(|c| c.get(1).map(|m| m.as_str().parse().unwrap_or(now.year())))
                 .unwrap_or_else(|| {
                     // Use current or next year
@@ -3426,11 +3599,13 @@ fn parse_schedule_datetime(text: &str) -> Result<String> {
     }
 
     // Build the final datetime
-    let scheduled = date.and_hms_opt(hour, minute, 0)
+    let scheduled = date
+        .and_hms_opt(hour, minute, 0)
         .ok_or_else(|| anyhow!("invalid time: {}:{}", hour, minute))?;
 
     // Convert to timezone-aware
-    let scheduled_tz = Berlin.from_local_datetime(&scheduled)
+    let scheduled_tz = Berlin
+        .from_local_datetime(&scheduled)
         .single()
         .ok_or_else(|| anyhow!("ambiguous or invalid datetime"))?;
 
@@ -3528,7 +3703,9 @@ fn handle_mail_list(
                         if msg_date != filter_date {
                             continue;
                         }
-                    } else if let Ok(msg_dt) = NaiveDateTime::parse_from_str(received_at, "%Y-%m-%dT%H:%M:%S") {
+                    } else if let Ok(msg_dt) =
+                        NaiveDateTime::parse_from_str(received_at, "%Y-%m-%dT%H:%M:%S")
+                    {
                         if msg_dt.date() != filter_date {
                             continue;
                         }
@@ -3569,7 +3746,9 @@ fn handle_mail_list(
     } else {
         // Fall back to server (date filtering not supported for server-side)
         if date_filter.is_some() {
-            return Err(anyhow!("Date filtering requires synced messages. Run 'h8 mail sync' first."));
+            return Err(anyhow!(
+                "Date filtering requires synced messages. Run 'h8 mail sync' first."
+            ));
         }
         let messages = client
             .mail_list(account, &args.folder, args.limit, args.unread)
@@ -3591,7 +3770,10 @@ fn handle_mail_search(
         let from = (Local::now() - ChronoDuration::days(days))
             .format("%Y-%m-%d")
             .to_string();
-        (Some(from), args.to_date.as_ref().map(|d| normalize_date_arg(d)))
+        (
+            Some(from),
+            args.to_date.as_ref().map(|d| normalize_date_arg(d)),
+        )
     } else {
         (
             args.from_date.as_ref().map(|d| normalize_date_arg(d)),
@@ -3625,28 +3807,33 @@ fn handle_mail_search(
         let id_gen = IdGenerator::new(&db);
 
         if let Some(msgs) = messages.as_array() {
-            let resolved: Vec<Value> = msgs.iter().map(|msg| {
-                let mut m = msg.clone();
-                if let Some(remote_id) = msg.get("id").and_then(|v| v.as_str()) {
-                    // Try existing short ID from id_pool, or from messages table,
-                    // or allocate a new one
-                    let short_id = db
-                        .get_id_by_remote(remote_id)
-                        .ok()
-                        .flatten()
-                        .or_else(|| {
-                            db.get_message_by_remote_id(remote_id)
-                                .ok()
-                                .flatten()
-                                .map(|m| m.local_id)
-                        })
-                        .or_else(|| id_gen.allocate(remote_id).ok());
-                    if let Some(sid) = short_id {
-                        m.as_object_mut().unwrap().insert("id".to_string(), json!(sid));
+            let resolved: Vec<Value> = msgs
+                .iter()
+                .map(|msg| {
+                    let mut m = msg.clone();
+                    if let Some(remote_id) = msg.get("id").and_then(|v| v.as_str()) {
+                        // Try existing short ID from id_pool, or from messages table,
+                        // or allocate a new one
+                        let short_id = db
+                            .get_id_by_remote(remote_id)
+                            .ok()
+                            .flatten()
+                            .or_else(|| {
+                                db.get_message_by_remote_id(remote_id)
+                                    .ok()
+                                    .flatten()
+                                    .map(|m| m.local_id)
+                            })
+                            .or_else(|| id_gen.allocate(remote_id).ok());
+                        if let Some(sid) = short_id {
+                            m.as_object_mut()
+                                .unwrap()
+                                .insert("id".to_string(), json!(sid));
+                        }
                     }
-                }
-                m
-            }).collect();
+                    m
+                })
+                .collect();
             emit_output(&ctx.common, &json!(resolved))?;
             return Ok(());
         }
@@ -3696,11 +3883,7 @@ fn handle_mail_read(
             (local, Some(remote_id))
         } else {
             // Also try the messages table directly (local_id lookup)
-            let remote = db
-                .get_message(&args.id)
-                .ok()
-                .flatten()
-                .map(|m| m.remote_id);
+            let remote = db.get_message(&args.id).ok().flatten().map(|m| m.remote_id);
             (args.id.clone(), remote)
         }
     } else {
@@ -3708,7 +3891,10 @@ fn handle_mail_read(
     };
 
     // Get the message from Maildir, or auto-fetch from server if not found
-    let msg = match mail_dir.get(&args.folder, &message_id).map_err(|e| anyhow!("{e}"))? {
+    let msg = match mail_dir
+        .get(&args.folder, &message_id)
+        .map_err(|e| anyhow!("{e}"))?
+    {
         Some(m) => m,
         None => {
             // Message not in Maildir - try fetching from server
@@ -3716,7 +3902,11 @@ fn handle_mail_read(
                 .or_else(|| {
                     // Last resort: try resolve_mail_id
                     let resolved = resolve_mail_id(ctx, account, &args.id);
-                    if resolved != args.id { Some(resolved) } else { None }
+                    if resolved != args.id {
+                        Some(resolved)
+                    } else {
+                        None
+                    }
                 })
                 .ok_or_else(|| anyhow!("message not found: {}", args.id))?;
 
@@ -3731,13 +3921,22 @@ fn handle_mail_read(
             if server_msg.get("error").is_some() {
                 return Err(anyhow!(
                     "message not found: {}",
-                    server_msg.get("error").and_then(|v| v.as_str()).unwrap_or(&args.id)
+                    server_msg
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&args.id)
                 ));
             }
 
             // Build RFC822-ish content from server response
-            let subject = server_msg.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
-            let from = server_msg.get("from").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let subject = server_msg
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no subject)");
+            let from = server_msg
+                .get("from")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let to_list: Vec<&str> = server_msg
                 .get("to")
                 .and_then(|v| v.as_array())
@@ -3748,9 +3947,18 @@ fn handle_mail_read(
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
-            let date = server_msg.get("datetime_received").and_then(|v| v.as_str()).unwrap_or("");
-            let body = server_msg.get("body").and_then(|v| v.as_str()).unwrap_or("");
-            let body_type = server_msg.get("body_type").and_then(|v| v.as_str()).unwrap_or("text");
+            let date = server_msg
+                .get("datetime_received")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let body = server_msg
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let body_type = server_msg
+                .get("body_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("text");
 
             let mut content = format!("Subject: {}\nFrom: {}\nDate: {}\n", subject, from, date);
             if !to_list.is_empty() {
@@ -3768,7 +3976,10 @@ fn handle_mail_read(
             content.push_str(body);
 
             // Store in Maildir for future reads
-            let is_read = server_msg.get("is_read").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_read = server_msg
+                .get("is_read")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let mut flags = h8_core::maildir::MessageFlags::default();
             if is_read {
                 flags.mark_read();
@@ -3916,7 +4127,14 @@ fn handle_mail_send(
         let drafts = mail_dir.list(FOLDER_DRAFTS).map_err(|e| anyhow!("{e}"))?;
 
         for draft in drafts {
-            send_draft(ctx, client, account, &mail_dir, &draft.id, schedule_at.as_deref())?;
+            send_draft(
+                ctx,
+                client,
+                account,
+                &mail_dir,
+                &draft.id,
+                schedule_at.as_deref(),
+            )?;
         }
         return Ok(());
     }
@@ -3966,9 +4184,8 @@ fn handle_mail_send(
             // Read attachment files (if any)
             let mut attachments: Vec<(String, Vec<u8>)> = Vec::new();
             for path in &args.attach {
-                let content = std::fs::read(path).map_err(|e| {
-                    anyhow!("Failed to read attachment '{}': {e}", path.display())
-                })?;
+                let content = std::fs::read(path)
+                    .map_err(|e| anyhow!("Failed to read attachment '{}': {e}", path.display()))?;
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -4017,8 +4234,7 @@ fn handle_mail_send(
                 }
                 println!("  To: {}", args.to.join(", "));
                 if !attachments.is_empty() {
-                    let names: Vec<&str> =
-                        attachments.iter().map(|(n, _)| n.as_str()).collect();
+                    let names: Vec<&str> = attachments.iter().map(|(n, _)| n.as_str()).collect();
                     println!("  Attachments: {}", names.join(", "));
                 }
             }
@@ -4335,16 +4551,27 @@ fn handle_mail_move(ctx: &RuntimeContext, account: &str, args: MailMoveArgs) -> 
         }
 
         // Get target from --to flag (required when using --query)
-        let target = args.target.clone().ok_or_else(|| {
-            anyhow!("--to <folder> is required when using --query")
-        })?;
+        let target = args
+            .target
+            .clone()
+            .ok_or_else(|| anyhow!("--to <folder> is required when using --query"))?;
 
         // Show what will be moved
-        println!("Found {} message(s) matching \"{}\":", search_ids.len(), query);
+        println!(
+            "Found {} message(s) matching \"{}\":",
+            search_ids.len(),
+            query
+        );
         for (i, id) in search_ids.iter().take(10).enumerate() {
             if let Some(msg) = results.as_array().and_then(|a| a.get(i)) {
-                let subject = msg.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
-                let from = msg.get("from").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let subject = msg
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no subject)");
+                let from = msg
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 println!("  {} - {} ({})", id, subject, from);
             }
         }
@@ -4432,7 +4659,12 @@ fn handle_mail_move(ctx: &RuntimeContext, account: &str, args: MailMoveArgs) -> 
 
     // Summary for multiple moves
     if ids.len() > 1 && !ctx.common.quiet {
-        println!("\n{} of {} messages moved to {}", moved_count, ids.len(), target);
+        println!(
+            "\n{} of {} messages moved to {}",
+            moved_count,
+            ids.len(),
+            target
+        );
     }
 
     // Report errors
@@ -4455,9 +4687,7 @@ fn handle_mail_move_old(
     args: MailMoveOldArgs,
 ) -> Result<()> {
     if !ctx.common.quiet && !ctx.common.json && !ctx.common.yaml {
-        eprintln!(
-            "Processing bulk move on server (this can take a while for large inboxes)..."
-        );
+        eprintln!("Processing bulk move on server (this can take a while for large inboxes)...");
     }
 
     let result = client
@@ -4611,7 +4841,11 @@ fn handle_mail_delete(ctx: &RuntimeContext, account: &str, args: MailDeleteArgs)
 
     // Summary for multiple deletions
     if ids.len() > 1 && !ctx.common.quiet {
-        let action = if args.force { "deleted" } else { "moved to trash" };
+        let action = if args.force {
+            "deleted"
+        } else {
+            "moved to trash"
+        };
         println!("\n{} of {} messages {}", deleted_count, ids.len(), action);
     }
 
@@ -4638,9 +4872,7 @@ fn handle_mail_mark(ctx: &RuntimeContext, account: &str, args: MailMarkArgs) -> 
     let service = ctx.service_client()?;
 
     if !ctx.common.quiet && !ctx.common.json && !ctx.common.yaml {
-        eprintln!(
-            "Processing bulk mark on server (this can take a while for many messages)..."
-        );
+        eprintln!("Processing bulk mark on server (this can take a while for many messages)...");
     }
 
     let result = service
@@ -5014,10 +5246,7 @@ fn handle_mail_spam(
 
     if success_count > 0 {
         let action = if is_spam { "spam" } else { "not spam" };
-        println!(
-            "Marked {} message(s) as {}",
-            success_count, action
-        );
+        println!("Marked {} message(s) as {}", success_count, action);
     }
 
     Ok(())
@@ -5072,23 +5301,17 @@ fn handle_mail_unsubscribe(
     // Collect messages that have unsubscribe links
     let with_links: Vec<&Value> = results_array
         .iter()
-        .filter(|r| {
-            r.get("status").and_then(|s| s.as_str()) == Some("found")
-        })
+        .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("found"))
         .collect();
 
     let no_links: Vec<&Value> = results_array
         .iter()
-        .filter(|r| {
-            r.get("status").and_then(|s| s.as_str()) == Some("no_link")
-        })
+        .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("no_link"))
         .collect();
 
     let skipped: Vec<&Value> = results_array
         .iter()
-        .filter(|r| {
-            r.get("status").and_then(|s| s.as_str()) == Some("skipped")
-        })
+        .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("skipped"))
         .collect();
 
     if !ctx.common.json && !ctx.common.yaml {
@@ -5103,7 +5326,10 @@ fn handle_mail_unsubscribe(
         // Show scan results
         for result in results_array {
             let sender = result.get("sender").and_then(|v| v.as_str()).unwrap_or("?");
-            let subject = result.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
+            let subject = result
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no subject)");
             let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("?");
             let link_count = result
                 .get("links")
@@ -5128,12 +5354,17 @@ fn handle_mail_unsubscribe(
         let item_ids: Vec<String> = with_links
             .iter()
             .filter_map(|r| {
-                r.get("message_id").and_then(|v| v.as_str()).map(String::from)
+                r.get("message_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
             })
             .collect();
 
         if !ctx.common.quiet {
-            println!("Executing unsubscribe for {} message(s)...\n", item_ids.len());
+            println!(
+                "Executing unsubscribe for {} message(s)...\n",
+                item_ids.len()
+            );
         }
 
         let exec_results = client
@@ -5351,7 +5582,9 @@ fn handle_contacts(ctx: &RuntimeContext, cmd: ContactsCommand) -> Result<()> {
             }
 
             if updates.is_empty() {
-                return Err(anyhow!("no fields to update - specify at least one of: --name, --email, --phone, --company, --job-title, --given-name, --surname"));
+                return Err(anyhow!(
+                    "no fields to update - specify at least one of: --name, --email, --phone, --company, --job-title, --given-name, --surname"
+                ));
             }
 
             let result = client
@@ -5364,7 +5597,10 @@ fn handle_contacts(ctx: &RuntimeContext, cmd: ContactsCommand) -> Result<()> {
                         return Err(anyhow!("{}", err));
                     }
                 } else {
-                    let name = result.get("display_name").and_then(|v| v.as_str()).unwrap_or("Contact");
+                    let name = result
+                        .get("display_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Contact");
                     println!("Updated: {}", name);
                 }
             }
@@ -5398,7 +5634,8 @@ fn handle_addr_search(ctx: &RuntimeContext, args: AddrSearchArgs) -> Result<()> 
     let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
 
     let addresses = if args.frequent || args.query.is_none() {
-        db.frequent_addresses(args.limit).map_err(|e| anyhow!("{e}"))?
+        db.frequent_addresses(args.limit)
+            .map_err(|e| anyhow!("{e}"))?
     } else {
         db.search_addresses(args.query.as_deref().unwrap(), args.limit)
             .map_err(|e| anyhow!("{e}"))?
@@ -5527,13 +5764,14 @@ fn parse_time_of_day(text: &str) -> Option<(String, u32, u32)> {
     for (en, de1, de2, start, end) in patterns {
         for keyword in [en, de1, de2] {
             if text_lower.contains(keyword) {
-                let remaining = regex::RegexBuilder::new(&format!(r"\b{}\b", regex::escape(keyword)))
-                    .case_insensitive(true)
-                    .build()
-                    .unwrap()
-                    .replace(&text, "")
-                    .trim()
-                    .to_string();
+                let remaining =
+                    regex::RegexBuilder::new(&format!(r"\b{}\b", regex::escape(keyword)))
+                        .case_insensitive(true)
+                        .build()
+                        .unwrap()
+                        .replace(&text, "")
+                        .trim()
+                        .to_string();
                 return Some((remaining, start, end));
             }
         }
@@ -5969,10 +6207,7 @@ fn parse_natural_resource_query(
                     .filter(|(i, _)| *i != idx)
                     .map(|(_, w)| w.to_string())
                     .collect();
-                return Some((
-                    NaturalResourceTarget::Group(group_name.clone()),
-                    time_words,
-                ));
+                return Some((NaturalResourceTarget::Group(group_name.clone()), time_words));
             }
         }
     }
@@ -6022,8 +6257,8 @@ fn handle_natural_resource(ctx: &RuntimeContext, args: NaturalResourceArgs) -> R
         ));
     }
 
-    let (target, time_words) = parse_natural_resource_query(&query_text, &ctx.config)
-        .ok_or_else(|| {
+    let (target, time_words) =
+        parse_natural_resource_query(&query_text, &ctx.config).ok_or_else(|| {
             anyhow!(
                 "Could not identify a resource group or alias in: \"{}\"\nAvailable groups: {}",
                 query_text,
@@ -6041,7 +6276,10 @@ fn handle_natural_resource(ctx: &RuntimeContext, args: NaturalResourceArgs) -> R
         NaturalResourceTarget::Group(group_name) => {
             // Delegate to resource free with the parsed group and time
             let group_arg = Some(group_name);
-            let when_parts: Vec<String> = when_text.split_whitespace().map(|s| s.to_string()).collect();
+            let when_parts: Vec<String> = when_text
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
             handle_resource_free(
                 ctx,
                 ResourceFreeArgs {
@@ -6100,14 +6338,14 @@ fn handle_natural_resource(ctx: &RuntimeContext, args: NaturalResourceArgs) -> R
             let is_window = hour_range.is_some() || time_of_day.is_some();
 
             if is_window {
-                let (start_h, start_m, end_h, end_m) =
-                    if let Some((_, sh, sm, eh, em)) = hour_range {
-                        (sh, sm, eh, em)
-                    } else if let Some((_, sh, eh)) = time_of_day {
-                        (sh, 0, eh, 0)
-                    } else {
-                        unreachable!()
-                    };
+                let (start_h, start_m, end_h, end_m) = if let Some((_, sh, sm, eh, em)) = hour_range
+                {
+                    (sh, sm, eh, em)
+                } else if let Some((_, sh, eh)) = time_of_day {
+                    (sh, 0, eh, 0)
+                } else {
+                    unreachable!()
+                };
 
                 let target_date = if let Some((date, _)) = parse_single_date(&date_text) {
                     date
@@ -6156,8 +6394,7 @@ fn handle_natural_resource(ctx: &RuntimeContext, args: NaturalResourceArgs) -> R
                     }
                 }
             } else {
-                let (from_date_str, to_date_str, description) =
-                    parse_date_range_expr(&date_text);
+                let (from_date_str, to_date_str, description) = parse_date_range_expr(&date_text);
 
                 let result = client
                     .resource_free(
@@ -6186,10 +6423,7 @@ fn handle_natural_resource(ctx: &RuntimeContext, args: NaturalResourceArgs) -> R
                             if slots.is_empty() {
                                 println!("{} has no availability {}", label, description);
                             } else {
-                                println!(
-                                    "{} is free {} ({}):",
-                                    label, description, from_date_str
-                                );
+                                println!("{} is free {} ({}):", label, description, from_date_str);
                                 let slot_strs: Vec<String> = slots
                                     .iter()
                                     .filter_map(|s| {
@@ -6226,7 +6460,12 @@ fn handle_resource_setup(ctx: &RuntimeContext, args: ResourceSetupArgs) -> Resul
     let group_name = if let Some(name) = args.group {
         name
     } else {
-        let existing: Vec<String> = ctx.config.resource_group_names().iter().map(|s| s.to_string()).collect();
+        let existing: Vec<String> = ctx
+            .config
+            .resource_group_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         if !existing.is_empty() {
             println!("Existing groups: {}", existing.join(", "));
         }
@@ -6279,7 +6518,10 @@ fn handle_resource_setup(ctx: &RuntimeContext, args: ResourceSetupArgs) -> Resul
 
         let entries = result.as_array().cloned().unwrap_or_default();
         if entries.is_empty() {
-            println!("No results found for \"{}\". Try a different query.", query.trim());
+            println!(
+                "No results found for \"{}\". Try a different query.",
+                query.trim()
+            );
             continue;
         }
 
@@ -6476,10 +6718,8 @@ fn handle_resource_remove(ctx: &RuntimeContext, args: ResourceRemoveArgs) -> Res
         .and_then(|r| r.as_table_mut())
         .ok_or_else(|| anyhow!("no [resources] section in config"))?;
 
-    let available_groups: Vec<String> = resources_table
-        .iter()
-        .map(|(k, _)| k.to_string())
-        .collect();
+    let available_groups: Vec<String> =
+        resources_table.iter().map(|(k, _)| k.to_string()).collect();
 
     let group_table = resources_table
         .get_mut(&args.group)
@@ -6539,11 +6779,13 @@ fn journey_body(journey: &serde_json::Value) -> Option<String> {
         let is_walking = leg["walking"].as_bool().unwrap_or(false);
         let dep_station = leg["departure_station"].as_str().unwrap_or("?");
         let arr_station = leg["arrival_station"].as_str().unwrap_or("?");
-        let dep_time = leg["departure_time"].as_str()
+        let dep_time = leg["departure_time"]
+            .as_str()
             .and_then(|s| trip_parse_iso_time(s))
             .map(|dt| trip_fmt_time(dt))
             .unwrap_or_else(|| "??:??".to_string());
-        let arr_time = leg["arrival_time"].as_str()
+        let arr_time = leg["arrival_time"]
+            .as_str()
             .and_then(|s| trip_parse_iso_time(s))
             .map(|dt| trip_fmt_time(dt))
             .unwrap_or_else(|| "??:??".to_string());
@@ -6551,10 +6793,15 @@ fn journey_body(journey: &serde_json::Value) -> Option<String> {
         if is_walking {
             let distance = leg["distance_meters"].as_i64();
             let dur = leg["duration_minutes"].as_i64().unwrap_or(0);
-            let dist_str = distance.map(|d| {
-                if d >= 1000 { format!(" ({:.1} km)", d as f64 / 1000.0) }
-                else { format!(" ({} m)", d) }
-            }).unwrap_or_default();
+            let dist_str = distance
+                .map(|d| {
+                    if d >= 1000 {
+                        format!(" ({:.1} km)", d as f64 / 1000.0)
+                    } else {
+                        format!(" ({} m)", d)
+                    }
+                })
+                .unwrap_or_default();
             lines.push(format!(
                 "{} Walk {}min {} -> {}{}",
                 dep_time, dur, dep_station, arr_station, dist_str
@@ -6563,20 +6810,29 @@ fn journey_body(journey: &serde_json::Value) -> Option<String> {
             let line_name = leg["line"].as_str().unwrap_or("?");
             let platform = leg["platform"].as_str();
             let arr_platform = leg["arrival_platform"].as_str();
-            let dep_plat = platform.map(|p| format!(" (Gl. {})", p)).unwrap_or_default();
-            let arr_plat = arr_platform.map(|p| format!(" (Gl. {})", p)).unwrap_or_default();
+            let dep_plat = platform
+                .map(|p| format!(" (Gl. {})", p))
+                .unwrap_or_default();
+            let arr_plat = arr_platform
+                .map(|p| format!(" (Gl. {})", p))
+                .unwrap_or_default();
             lines.push(format!(
                 "{} {} {}{} -> {} {}{}",
                 dep_time, line_name, dep_station, dep_plat, arr_time, arr_station, arr_plat
             ));
         }
     }
-    if lines.is_empty() { None } else { Some(lines.join("\n")) }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 /// Extract non-walking line names from journey legs for the subject.
 fn journey_line_names(journey: &serde_json::Value) -> Vec<String> {
-    journey["legs"].as_array()
+    journey["legs"]
+        .as_array()
         .map(|legs| {
             legs.iter()
                 .filter(|l| !l["walking"].as_bool().unwrap_or(false))
@@ -6608,7 +6864,9 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     } else if flags.car {
         "car"
     } else {
-        return Err(anyhow!("Specify transport mode: --car or --public (--transit/--train)"));
+        return Err(anyhow!(
+            "Specify transport mode: --car or --public (--transit/--train)"
+        ));
     };
 
     // Parse when: need date + time range
@@ -6631,7 +6889,8 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     if hour_range.is_none() && time_of_day.is_none() {
         return Err(anyhow!(
             "Time range required. Examples:\n  h8 trip {} friday 9-12 --car\n  h8 trip {} tomorrow afternoon --transit",
-            args.destination, args.destination
+            args.destination,
+            args.destination
         ));
     }
 
@@ -6701,16 +6960,15 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
                 .trip_geocode(&args.destination, ctx.config.trip.country.as_deref())
                 .map_err(|e| anyhow!("Geocoding failed: {e}"))?;
             if !ctx.common.quiet {
-                eprintln!(
-                    "{}",
-                    geo_result["display_name"]
-                        .as_str()
-                        .unwrap_or("found")
-                );
+                eprintln!("{}", geo_result["display_name"].as_str().unwrap_or("found"));
             }
             (
-                geo_result["lat"].as_f64().ok_or_else(|| anyhow!("missing lat"))?,
-                geo_result["lon"].as_f64().ok_or_else(|| anyhow!("missing lon"))?,
+                geo_result["lat"]
+                    .as_f64()
+                    .ok_or_else(|| anyhow!("missing lat"))?,
+                geo_result["lon"]
+                    .as_f64()
+                    .ok_or_else(|| anyhow!("missing lon"))?,
                 geo_result["display_name"]
                     .as_str()
                     .unwrap_or(&args.destination)
@@ -6756,7 +7014,7 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
             origin_station,
             dest_station_name.as_deref(),
             Some(&ctx.config.trip.transit_provider),
-            None, // departure
+            None,                     // departure
             arrival_param.as_deref(), // arrival
         )
         .map_err(|e| {
@@ -6786,7 +7044,8 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     };
 
     // Extract transit journey details if available
-    let transit_journeys = route_result.get("transit_journeys")
+    let transit_journeys = route_result
+        .get("transit_journeys")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
@@ -6797,9 +7056,8 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
 
     // Format helpers (thin wrappers around standalone functions for closure ergonomics)
     let fmt_time = |ndt: chrono::NaiveDateTime| -> String { trip_fmt_time(ndt) };
-    let fmt_datetime = |ndt: chrono::NaiveDateTime| -> String {
-        ndt.format("%Y-%m-%dT%H:%M:%S").to_string()
-    };
+    let fmt_datetime =
+        |ndt: chrono::NaiveDateTime| -> String { ndt.format("%Y-%m-%dT%H:%M:%S").to_string() };
     let parse_iso_time = |s: &str| -> Option<chrono::NaiveDateTime> { trip_parse_iso_time(s) };
 
     // Calculate full trip timeline
@@ -6813,14 +7071,20 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
 
     // For transit: use the best journey whose arrival is before meeting start
     // For car: use rounded travel time + buffer
-    let (depart_at, arrive_back, outbound_journey, return_journey) = if mode == "transit" && !transit_journeys.is_empty() {
+    let (depart_at, arrive_back, outbound_journey, return_journey) = if mode == "transit"
+        && !transit_journeys.is_empty()
+    {
         // Outbound: first journey (arrives before meeting start thanks to arrival param)
         let outbound = transit_journeys.first().cloned();
-        let ob_depart = outbound.as_ref()
+        let ob_depart = outbound
+            .as_ref()
             .and_then(|j| j["departure_time"].as_str())
             .and_then(|s| parse_iso_time(s))
-            .unwrap_or_else(|| meeting_start - chrono::Duration::minutes((travel_minutes + buffer) as i64));
-        let _ob_arrive = outbound.as_ref()
+            .unwrap_or_else(|| {
+                meeting_start - chrono::Duration::minutes((travel_minutes + buffer) as i64)
+            });
+        let _ob_arrive = outbound
+            .as_ref()
             .and_then(|j| j["arrival_time"].as_str())
             .and_then(|s| parse_iso_time(s))
             .unwrap_or(meeting_start);
@@ -6828,19 +7092,18 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
         // Return journey: query departure from destination after meeting end
         eprint!("Calculating return route... ");
         let return_departure = meeting_end.format("%Y-%m-%dT%H:%M:%S").to_string();
-        let return_result = client
-            .trip_route(
-                dest_lat,     // origin = destination (going back)
-                dest_lon,
-                origin.lat,   // dest = origin (going home)
-                origin.lon,
-                mode,
-                dest_station_name.as_deref(),
-                origin_station,
-                Some(&ctx.config.trip.transit_provider),
-                Some(&return_departure), // departure
-                None,                     // no arrival constraint
-            );
+        let return_result = client.trip_route(
+            dest_lat, // origin = destination (going back)
+            dest_lon,
+            origin.lat, // dest = origin (going home)
+            origin.lon,
+            mode,
+            dest_station_name.as_deref(),
+            origin_station,
+            Some(&ctx.config.trip.transit_provider),
+            Some(&return_departure), // departure
+            None,                    // no arrival constraint
+        );
         let (ret_journey, ret_arrive) = match return_result {
             Ok(ref r) => {
                 eprintln!("done");
@@ -6849,17 +7112,21 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
                     .cloned()
                     .unwrap_or_default();
                 let first_ret = ret_journeys.into_iter().next();
-                let arrive = first_ret.as_ref()
+                let arrive = first_ret
+                    .as_ref()
                     .and_then(|j| j["arrival_time"].as_str())
                     .and_then(|s| parse_iso_time(s))
-                    .unwrap_or_else(|| meeting_end + chrono::Duration::minutes((travel_minutes + buffer) as i64));
+                    .unwrap_or_else(|| {
+                        meeting_end + chrono::Duration::minutes((travel_minutes + buffer) as i64)
+                    });
                 (first_ret, arrive)
-            },
+            }
             Err(e) => {
                 eprintln!("failed ({}), estimating return time", e);
-                let arrive = meeting_end + chrono::Duration::minutes((travel_minutes + buffer) as i64);
+                let arrive =
+                    meeting_end + chrono::Duration::minutes((travel_minutes + buffer) as i64);
                 (None, arrive)
-            },
+            }
         };
 
         (ob_depart, ret_arrive, outbound, ret_journey)
@@ -6915,14 +7182,29 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     let date_display = target_date.format("%A, %Y-%m-%d").to_string();
     let travel_display = if mode == "car" {
         let rounded_note = if travel_minutes != raw_travel_minutes {
-            format!(" (rounded from {}h{:02}m)", raw_travel_minutes / 60, raw_travel_minutes % 60)
+            format!(
+                " (rounded from {}h{:02}m)",
+                raw_travel_minutes / 60,
+                raw_travel_minutes % 60
+            )
         } else {
             String::new()
         };
         if let Some(km) = distance_km {
-            format!("{}h{:02}m ({:.0} km){}", travel_minutes / 60, travel_minutes % 60, km, rounded_note)
+            format!(
+                "{}h{:02}m ({:.0} km){}",
+                travel_minutes / 60,
+                travel_minutes % 60,
+                km,
+                rounded_note
+            )
         } else {
-            format!("{}h{:02}m{}", travel_minutes / 60, travel_minutes % 60, rounded_note)
+            format!(
+                "{}h{:02}m{}",
+                travel_minutes / 60,
+                travel_minutes % 60,
+                rounded_note
+            )
         }
     } else {
         format!("{}h{:02}m", travel_minutes / 60, travel_minutes % 60)
@@ -6952,44 +7234,57 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
                 let is_walking = leg["walking"].as_bool().unwrap_or(false);
                 let dep_station = leg["departure_station"].as_str().unwrap_or("?");
                 let arr_station = leg["arrival_station"].as_str().unwrap_or("?");
-                let dep_dt = leg["departure_time"].as_str().and_then(|s| parse_iso_time(s));
+                let dep_dt = leg["departure_time"]
+                    .as_str()
+                    .and_then(|s| parse_iso_time(s));
                 let arr_dt = leg["arrival_time"].as_str().and_then(|s| parse_iso_time(s));
-                let dep_time = dep_dt.map(|dt| fmt_time(dt)).unwrap_or_else(|| "??:??".to_string());
-                let arr_time = arr_dt.map(|dt| fmt_time(dt)).unwrap_or_else(|| "??:??".to_string());
+                let dep_time = dep_dt
+                    .map(|dt| fmt_time(dt))
+                    .unwrap_or_else(|| "??:??".to_string());
+                let arr_time = arr_dt
+                    .map(|dt| fmt_time(dt))
+                    .unwrap_or_else(|| "??:??".to_string());
 
                 // Show layover between legs
                 if let (Some(prev), Some(dep)) = (prev_arr_time, dep_dt) {
                     let layover_min = (dep - prev).num_minutes();
                     if layover_min > 0 {
-                        println!(
-                            "      {} {} min layover",
-                            "   ".dimmed(),
-                            layover_min,
-                        );
+                        println!("      {} {} min layover", "   ".dimmed(), layover_min,);
                     }
                 }
 
                 if is_walking {
                     let distance = leg["distance_meters"].as_i64();
                     let dur = leg["duration_minutes"].as_i64().unwrap_or(0);
-                    let dist_str = distance.map(|d| {
-                        if d >= 1000 { format!("{:.1} km", d as f64 / 1000.0) }
-                        else { format!("{} m", d) }
-                    }).unwrap_or_default();
+                    let dist_str = distance
+                        .map(|d| {
+                            if d >= 1000 {
+                                format!("{:.1} km", d as f64 / 1000.0)
+                            } else {
+                                format!("{} m", d)
+                            }
+                        })
+                        .unwrap_or_default();
                     println!(
                         "      {} {} walk {} -> {}{}",
                         dep_time.dimmed(),
                         format!("{}min", dur).dimmed(),
                         dep_station,
                         arr_station,
-                        if !dist_str.is_empty() { format!(" ({})", dist_str).dimmed().to_string() } else { String::new() },
+                        if !dist_str.is_empty() {
+                            format!(" ({})", dist_str).dimmed().to_string()
+                        } else {
+                            String::new()
+                        },
                     );
                 } else {
                     let line = leg["line"].as_str().unwrap_or("?");
                     let platform = leg["platform"].as_str();
                     let arr_platform = leg["arrival_platform"].as_str();
                     let dep_plat = platform.map(|p| format!(" Gl. {}", p)).unwrap_or_default();
-                    let arr_plat = arr_platform.map(|p| format!(" Gl. {}", p)).unwrap_or_default();
+                    let arr_plat = arr_platform
+                        .map(|p| format!(" Gl. {}", p))
+                        .unwrap_or_default();
                     println!(
                         "      {} {} {}{} -> {} {}{}",
                         dep_time.cyan(),
@@ -7005,7 +7300,11 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
             }
             let changes = journey["changes"].as_i64().unwrap_or(0);
             if changes > 0 {
-                println!("      ({} change{})", changes, if changes > 1 { "s" } else { "" });
+                println!(
+                    "      ({} change{})",
+                    changes,
+                    if changes > 1 { "s" } else { "" }
+                );
             }
         }
     }
@@ -7013,13 +7312,15 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     println!(
         "    {} Arrive at {}",
         if let Some(ref j) = outbound_journey {
-            j["arrival_time"].as_str()
+            j["arrival_time"]
+                .as_str()
                 .and_then(|s| parse_iso_time(s))
                 .map(|dt| fmt_time(dt))
                 .unwrap_or_else(|| fmt_time(meeting_start))
         } else {
             fmt_time(meeting_start)
-        }.dimmed(),
+        }
+        .dimmed(),
         args.destination
     );
     println!(
@@ -7032,13 +7333,15 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
     println!(
         "    {} Depart from {}",
         if let Some(ref j) = return_journey {
-            j["departure_time"].as_str()
+            j["departure_time"]
+                .as_str()
                 .and_then(|s| parse_iso_time(s))
                 .map(|dt| fmt_time(dt))
                 .unwrap_or_else(|| fmt_time(meeting_end))
         } else {
             fmt_time(meeting_end)
-        }.dimmed(),
+        }
+        .dimmed(),
         args.destination
     );
 
@@ -7050,44 +7353,57 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
                 let is_walking = leg["walking"].as_bool().unwrap_or(false);
                 let dep_station = leg["departure_station"].as_str().unwrap_or("?");
                 let arr_station = leg["arrival_station"].as_str().unwrap_or("?");
-                let dep_dt = leg["departure_time"].as_str().and_then(|s| parse_iso_time(s));
+                let dep_dt = leg["departure_time"]
+                    .as_str()
+                    .and_then(|s| parse_iso_time(s));
                 let arr_dt = leg["arrival_time"].as_str().and_then(|s| parse_iso_time(s));
-                let dep_time = dep_dt.map(|dt| fmt_time(dt)).unwrap_or_else(|| "??:??".to_string());
-                let arr_time = arr_dt.map(|dt| fmt_time(dt)).unwrap_or_else(|| "??:??".to_string());
+                let dep_time = dep_dt
+                    .map(|dt| fmt_time(dt))
+                    .unwrap_or_else(|| "??:??".to_string());
+                let arr_time = arr_dt
+                    .map(|dt| fmt_time(dt))
+                    .unwrap_or_else(|| "??:??".to_string());
 
                 // Show layover between legs
                 if let (Some(prev), Some(dep)) = (prev_arr_time, dep_dt) {
                     let layover_min = (dep - prev).num_minutes();
                     if layover_min > 0 {
-                        println!(
-                            "      {} {} min layover",
-                            "   ".dimmed(),
-                            layover_min,
-                        );
+                        println!("      {} {} min layover", "   ".dimmed(), layover_min,);
                     }
                 }
 
                 if is_walking {
                     let distance = leg["distance_meters"].as_i64();
                     let dur = leg["duration_minutes"].as_i64().unwrap_or(0);
-                    let dist_str = distance.map(|d| {
-                        if d >= 1000 { format!("{:.1} km", d as f64 / 1000.0) }
-                        else { format!("{} m", d) }
-                    }).unwrap_or_default();
+                    let dist_str = distance
+                        .map(|d| {
+                            if d >= 1000 {
+                                format!("{:.1} km", d as f64 / 1000.0)
+                            } else {
+                                format!("{} m", d)
+                            }
+                        })
+                        .unwrap_or_default();
                     println!(
                         "      {} {} walk {} -> {}{}",
                         dep_time.dimmed(),
                         format!("{}min", dur).dimmed(),
                         dep_station,
                         arr_station,
-                        if !dist_str.is_empty() { format!(" ({})", dist_str).dimmed().to_string() } else { String::new() },
+                        if !dist_str.is_empty() {
+                            format!(" ({})", dist_str).dimmed().to_string()
+                        } else {
+                            String::new()
+                        },
                     );
                 } else {
                     let line = leg["line"].as_str().unwrap_or("?");
                     let platform = leg["platform"].as_str();
                     let arr_platform = leg["arrival_platform"].as_str();
                     let dep_plat = platform.map(|p| format!(" Gl. {}", p)).unwrap_or_default();
-                    let arr_plat = arr_platform.map(|p| format!(" Gl. {}", p)).unwrap_or_default();
+                    let arr_plat = arr_platform
+                        .map(|p| format!(" Gl. {}", p))
+                        .unwrap_or_default();
                     println!(
                         "      {} {} {}{} -> {} {}{}",
                         dep_time.cyan(),
@@ -7103,7 +7419,11 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
             }
             let changes = journey["changes"].as_i64().unwrap_or(0);
             if changes > 0 {
-                println!("      ({} change{})", changes, if changes > 1 { "s" } else { "" });
+                println!(
+                    "      ({} change{})",
+                    changes,
+                    if changes > 1 { "s" } else { "" }
+                );
             }
         }
     }
@@ -7149,10 +7469,7 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
                 println!("{}", "No cars available for the full trip window".red());
             } else if let Some(ref selected) = flags.select {
                 // Direct car selection
-                let subject = flags
-                    .subject
-                    .as_deref()
-                    .unwrap_or("Business Trip");
+                let subject = flags.subject.as_deref().unwrap_or("Business Trip");
                 book_resource(
                     ctx,
                     &client,
@@ -7194,11 +7511,7 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
                 if !selectable.is_empty() && io::stdout().is_terminal() {
                     print!(
                         "\n{} ",
-                        format!(
-                            "Book a car? (1-{}, or 'n' to skip):",
-                            selectable.len()
-                        )
-                        .cyan()
+                        format!("Book a car? (1-{}, or 'n' to skip):", selectable.len()).cyan()
                     );
                     io::stdout().flush()?;
 
@@ -7213,8 +7526,7 @@ fn handle_trip(ctx: &RuntimeContext, args: TripArgs) -> Result<()> {
                         if let Ok(n) = input.parse::<usize>() {
                             if n > 0 && n <= selectable.len() {
                                 let (_, entry) = selectable[n - 1];
-                                let alias =
-                                    entry["alias"].as_str().unwrap_or("?");
+                                let alias = entry["alias"].as_str().unwrap_or("?");
                                 let subject = if let Some(ref s) = flags.subject {
                                     s.clone()
                                 } else {
@@ -7379,28 +7691,37 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
 
     // Resolve "room" -> "rooms", "car" -> "cars" etc. (singular/plural)
     let resource_input = args.resource.to_lowercase();
-    let (group_name, resources) = if let Some((_name, group)) = ctx.config.resource_group(&resource_input) {
-        (resource_input.clone(), resource_group_to_json(group))
-    } else {
-        // Try singular -> plural
-        let plural = format!("{}s", resource_input);
-        if let Some((_name, group)) = ctx.config.resource_group(&plural) {
-            (plural, resource_group_to_json(group))
-        } else if let Some((grp, alias, email, desc)) = ctx.config.find_resource_by_alias(&resource_input) {
-            // Single resource alias
-            (grp, vec![serde_json::json!({ "alias": alias, "email": email, "desc": desc })])
+    let (group_name, resources) =
+        if let Some((_name, group)) = ctx.config.resource_group(&resource_input) {
+            (resource_input.clone(), resource_group_to_json(group))
         } else {
-            return Err(anyhow!(
-                "Unknown resource group or alias '{}'. Available groups: {}",
-                resource_input,
-                ctx.config.resource_group_names().join(", ")
-            ));
-        }
-    };
+            // Try singular -> plural
+            let plural = format!("{}s", resource_input);
+            if let Some((_name, group)) = ctx.config.resource_group(&plural) {
+                (plural, resource_group_to_json(group))
+            } else if let Some((grp, alias, email, desc)) =
+                ctx.config.find_resource_by_alias(&resource_input)
+            {
+                // Single resource alias
+                (
+                    grp,
+                    vec![serde_json::json!({ "alias": alias, "email": email, "desc": desc })],
+                )
+            } else {
+                return Err(anyhow!(
+                    "Unknown resource group or alias '{}'. Available groups: {}",
+                    resource_input,
+                    ctx.config.resource_group_names().join(", ")
+                ));
+            }
+        };
 
     // Parse when text - must contain a time range
     let when_text = if when_cleaned.is_empty() {
-        return Err(anyhow!("Time range required. Example: h8 book {} today 12-14", resource_input));
+        return Err(anyhow!(
+            "Time range required. Example: h8 book {} today 12-14",
+            resource_input
+        ));
     } else {
         when_cleaned.join(" ")
     };
@@ -7415,7 +7736,9 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
     if hour_range.is_none() && time_of_day.is_none() {
         return Err(anyhow!(
             "Time range required. Examples:\n  h8 book {} today 12-14\n  h8 book {} friday afternoon\n  h8 book {} tomorrow 9:00-11:30",
-            resource_input, resource_input, resource_input
+            resource_input,
+            resource_input,
+            resource_input
         ));
     }
 
@@ -7429,31 +7752,58 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
 
     // Parse date
     let date_text = if let Some((ref remaining, ..)) = hour_range {
-        if remaining.trim().is_empty() { "today".to_string() } else { remaining.clone() }
+        if remaining.trim().is_empty() {
+            "today".to_string()
+        } else {
+            remaining.clone()
+        }
     } else if let Some((ref remaining, ..)) = time_of_day {
-        if remaining.trim().is_empty() { "today".to_string() } else { remaining.clone() }
+        if remaining.trim().is_empty() {
+            "today".to_string()
+        } else {
+            remaining.clone()
+        }
     } else {
         "today".to_string()
     };
 
-    let tz = ctx.config.timezone.parse::<chrono_tz::Tz>().unwrap_or(chrono_tz::UTC);
+    let tz = ctx
+        .config
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .unwrap_or(chrono_tz::UTC);
     let target_date = if let Some((date, _)) = parse_single_date(&date_text) {
         date
     } else {
         Local::now().with_timezone(&tz).date_naive()
     };
 
-    let window_start = format!("{}T{:02}:{:02}:00", target_date.format("%Y-%m-%d"), start_h, start_m);
-    let window_end = format!("{}T{:02}:{:02}:00", target_date.format("%Y-%m-%d"), end_h, end_m);
+    let window_start = format!(
+        "{}T{:02}:{:02}:00",
+        target_date.format("%Y-%m-%d"),
+        start_h,
+        start_m
+    );
+    let window_end = format!(
+        "{}T{:02}:{:02}:00",
+        target_date.format("%Y-%m-%d"),
+        end_h,
+        end_m
+    );
 
     // Query availability
     let result = client
         .resource_free_window(&account, &resources, &window_start, &window_end)
         .map_err(|e| anyhow!("{e}"))?;
 
-    let entries = result.as_array().ok_or_else(|| anyhow!("unexpected response"))?;
+    let entries = result
+        .as_array()
+        .ok_or_else(|| anyhow!("unexpected response"))?;
 
-    let available: Vec<&Value> = entries.iter().filter(|e| e["available"].as_bool() == Some(true)).collect();
+    let available: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e["available"].as_bool() == Some(true))
+        .collect();
     let date_display = target_date.format("%A %Y-%m-%d").to_string();
 
     // JSON mode: output availability and exit
@@ -7470,24 +7820,41 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
 
         // If --select was given in JSON mode, also book and output the result
         if let Some(ref selected_alias) = args.select {
-            let subject = args.subject.as_deref().ok_or_else(|| {
-                anyhow!("--subject is required when using --select in JSON mode")
-            })?;
-            return book_resource(ctx, &client, &account, entries, selected_alias, subject, &window_start, &window_end, args.duration);
+            let subject = args
+                .subject
+                .as_deref()
+                .ok_or_else(|| anyhow!("--subject is required when using --select in JSON mode"))?;
+            return book_resource(
+                ctx,
+                &client,
+                &account,
+                entries,
+                selected_alias,
+                subject,
+                &window_start,
+                &window_end,
+                args.duration,
+            );
         }
         return Ok(());
     }
 
     // Non-JSON: interactive or direct booking
     if available.is_empty() {
-        println!("\nNo {} available {} {:02}:{:02}-{:02}:{:02}",
-            group_name, date_display, start_h, start_m, end_h, end_m);
+        println!(
+            "\nNo {} available {} {:02}:{:02}-{:02}:{:02}",
+            group_name, date_display, start_h, start_m, end_h, end_m
+        );
 
         // Show which are booked
         for entry in entries {
             let alias = entry["alias"].as_str().unwrap_or("?");
             let desc = entry["desc"].as_str();
-            let label = if let Some(d) = desc { format!("{} ({})", alias, d) } else { alias.to_string() };
+            let label = if let Some(d) = desc {
+                format!("{} ({})", alias, d)
+            } else {
+                alias.to_string()
+            };
             println!("  {:<35} -- booked", label);
         }
         return Ok(());
@@ -7495,10 +7862,21 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
 
     // Direct selection via --select
     if let Some(ref selected_alias) = args.select {
-        let subject = args.subject.as_deref().ok_or_else(|| {
-            anyhow!("--subject is required when using --select")
-        })?;
-        return book_resource(ctx, &client, &account, entries, selected_alias, subject, &window_start, &window_end, args.duration);
+        let subject = args
+            .subject
+            .as_deref()
+            .ok_or_else(|| anyhow!("--subject is required when using --select"))?;
+        return book_resource(
+            ctx,
+            &client,
+            &account,
+            entries,
+            selected_alias,
+            subject,
+            &window_start,
+            &window_end,
+            args.duration,
+        );
     }
 
     // Interactive selection
@@ -7512,7 +7890,10 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
         "\n{} available {} {:02}:{:02}-{:02}:{:02}:\n",
         capitalize(&group_name),
         date_display,
-        start_h, start_m, end_h, end_m,
+        start_h,
+        start_m,
+        end_h,
+        end_m,
     );
 
     // Show all resources with availability status
@@ -7521,7 +7902,11 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
         let alias = entry["alias"].as_str().unwrap_or("?");
         let desc = entry["desc"].as_str();
         let is_available = entry["available"].as_bool() == Some(true);
-        let label = if let Some(d) = desc { format!("{} ({})", alias, d) } else { alias.to_string() };
+        let label = if let Some(d) = desc {
+            format!("{} ({})", alias, d)
+        } else {
+            alias.to_string()
+        };
 
         if is_available {
             selectable.push((i, entry));
@@ -7532,11 +7917,7 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
                 "available".green()
             );
         } else {
-            println!(
-                "      {:<35} {}",
-                label,
-                "booked".red().dimmed()
-            );
+            println!("      {:<35} {}", label, "booked".red().dimmed());
         }
     }
 
@@ -7547,7 +7928,11 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
     // Prompt for selection
     print!(
         "\n{} ",
-        format!("Select resource (1-{}), or 'c' to cancel:", selectable.len()).cyan()
+        format!(
+            "Select resource (1-{}), or 'c' to cancel:",
+            selectable.len()
+        )
+        .cyan()
     );
     io::stdout().flush()?;
 
@@ -7603,7 +7988,11 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
     };
 
     // Confirm
-    let label = if let Some(d) = desc { format!("{} ({})", alias, d) } else { alias.to_string() };
+    let label = if let Some(d) = desc {
+        format!("{} ({})", alias, d)
+    } else {
+        alias.to_string()
+    };
     let start_time = format!("{:02}:{:02}", start_h, start_m);
     let end_time = if let Some(dur) = args.duration {
         let total_min = start_h * 60 + start_m + dur;
@@ -7640,8 +8029,15 @@ fn handle_book(ctx: &RuntimeContext, args: BookArgs) -> Result<()> {
         .calendar_invite(&account, payload)
         .map_err(|e| anyhow!("{e}"))?;
 
-    println!("{} Booked {} for \"{}\" on {} {}-{}",
-        "+".green().bold(), label, subject, target_date, start_time, end_time);
+    println!(
+        "{} Booked {} for \"{}\" on {} {}-{}",
+        "+".green().bold(),
+        label,
+        subject,
+        target_date,
+        start_time,
+        end_time
+    );
 
     debug!("Calendar invite result: {:?}", result);
 
@@ -7670,10 +8066,7 @@ fn book_resource(
                 .unwrap_or(false)
         })
         .ok_or_else(|| {
-            let available: Vec<&str> = entries
-                .iter()
-                .filter_map(|e| e["alias"].as_str())
-                .collect();
+            let available: Vec<&str> = entries.iter().filter_map(|e| e["alias"].as_str()).collect();
             anyhow!(
                 "Unknown resource '{}'. Available: {}",
                 alias,
@@ -7683,13 +8076,21 @@ fn book_resource(
 
     if entry["available"].as_bool() != Some(true) {
         let desc = entry["desc"].as_str();
-        let label = if let Some(d) = desc { format!("{} ({})", alias, d) } else { alias.to_string() };
+        let label = if let Some(d) = desc {
+            format!("{} ({})", alias, d)
+        } else {
+            alias.to_string()
+        };
         return Err(anyhow!("{} is not available in this time window", label));
     }
 
     let email = entry["email"].as_str().unwrap_or("?");
     let desc = entry["desc"].as_str();
-    let label = if let Some(d) = desc { format!("{} ({})", alias, d) } else { alias.to_string() };
+    let label = if let Some(d) = desc {
+        format!("{} ({})", alias, d)
+    } else {
+        alias.to_string()
+    };
 
     // Calculate end time if duration specified
     let book_end = if let Some(dur) = duration {
@@ -7975,7 +8376,14 @@ fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
                     println!("No common free slots found for {}", label);
                     return Ok(());
                 }
-                interactive_schedule_meeting(ctx, &account, &client, &label, &slots, &resolved_emails)?;
+                interactive_schedule_meeting(
+                    ctx,
+                    &account,
+                    &client,
+                    &label,
+                    &slots,
+                    &resolved_emails,
+                )?;
             } else {
                 let label = display_names.join(", ");
                 render_free_slots_for_person(&label, &result, ctx, view)?;
@@ -8009,13 +8417,19 @@ fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
 
             if slots.is_empty() {
                 if ctx.common.json || ctx.common.yaml {
-                    emit_output(&ctx.common, &serde_json::json!({
-                        "slots": [],
-                        "people": display_names,
-                        "emails": resolved_emails,
-                    }))?;
+                    emit_output(
+                        &ctx.common,
+                        &serde_json::json!({
+                            "slots": [],
+                            "people": display_names,
+                            "emails": resolved_emails,
+                        }),
+                    )?;
                 } else {
-                    println!("No common free slots found for {}", display_names.join(", "));
+                    println!(
+                        "No common free slots found for {}",
+                        display_names.join(", ")
+                    );
                 }
                 return Ok(());
             }
@@ -8026,7 +8440,11 @@ fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
                 let start = slot.start.as_deref().unwrap_or("");
                 let end = slot.end.as_deref().unwrap_or("");
                 let date = slot.date.clone().unwrap_or_else(|| {
-                    if start.len() >= 10 { start[..10].to_string() } else { String::new() }
+                    if start.len() >= 10 {
+                        start[..10].to_string()
+                    } else {
+                        String::new()
+                    }
                 });
                 let start_time = extract_time(start).unwrap_or_default();
                 let end_time = extract_time(end).unwrap_or_default();
@@ -8046,11 +8464,14 @@ fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
             // If --slot is not provided, just list the available slots
             if args.slot.is_none() {
                 if ctx.common.json || ctx.common.yaml {
-                    emit_output(&ctx.common, &serde_json::json!({
-                        "slots": numbered_slots,
-                        "people": display_names,
-                        "emails": resolved_emails,
-                    }))?;
+                    emit_output(
+                        &ctx.common,
+                        &serde_json::json!({
+                            "slots": numbered_slots,
+                            "people": display_names,
+                            "emails": resolved_emails,
+                        }),
+                    )?;
                 } else {
                     let label = display_names.join(", ");
                     println!("Common free slots for: {}\n", label);
@@ -8064,7 +8485,10 @@ fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
                     }
                     println!("\nTo book a slot:");
                     let people_str = args.people.join(" ");
-                    println!("  h8 ppl schedule {} -w {} --slot N -s \"Subject\" -m MINUTES", people_str, args.weeks);
+                    println!(
+                        "  h8 ppl schedule {} -w {} --slot N -s \"Subject\" -m MINUTES",
+                        people_str, args.weeks
+                    );
                 }
                 return Ok(());
             }
@@ -8072,22 +8496,31 @@ fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
             // --slot provided: create the meeting
             let slot_idx = args.slot.unwrap();
             if slot_idx == 0 || slot_idx > slots.len() {
-                return Err(anyhow!("Invalid slot number {}. Valid range: 1-{}", slot_idx, slots.len()));
+                return Err(anyhow!(
+                    "Invalid slot number {}. Valid range: 1-{}",
+                    slot_idx,
+                    slots.len()
+                ));
             }
 
             let selected = &slots[slot_idx - 1];
-            let start = selected.start.as_deref()
+            let start = selected
+                .start
+                .as_deref()
                 .ok_or_else(|| anyhow!("Selected slot has no start time"))?;
             let max_duration = selected.duration_minutes.unwrap_or(60);
 
-            let subject = args.subject.as_deref()
+            let subject = args
+                .subject
+                .as_deref()
                 .ok_or_else(|| anyhow!("--subject/-s is required when using --slot"))?;
 
             let meeting_duration = args.meeting_duration.unwrap_or(30.min(max_duration));
             if meeting_duration > max_duration {
                 return Err(anyhow!(
                     "Meeting duration {}m exceeds slot maximum of {}m",
-                    meeting_duration, max_duration
+                    meeting_duration,
+                    max_duration
                 ));
             }
             if meeting_duration <= 0 {
@@ -8125,7 +8558,13 @@ fn handle_ppl(ctx: &RuntimeContext, cmd: PplCommand) -> Result<()> {
                 let end_time_str = extract_time(&meeting_end.to_rfc3339())
                     .unwrap_or_else(|| meeting_end.format("%H:%M").to_string());
                 println!("Meeting created: {}", subject);
-                println!("  When: {} {}-{} ({}m)", &start[..10], start_time, end_time_str, meeting_duration);
+                println!(
+                    "  When: {} {}-{} ({}m)",
+                    &start[..10],
+                    start_time,
+                    end_time_str,
+                    meeting_duration
+                );
                 println!("  With: {}", display_names.join(", "));
                 if let Some(ref loc) = args.location {
                     println!("  Where: {}", loc);
@@ -8152,8 +8591,7 @@ fn read_config_document(ctx: &RuntimeContext) -> Result<(toml_edit::DocumentMut,
 
 /// Write a toml_edit Document back to disk.
 fn write_config_document(doc: &toml_edit::DocumentMut, path: &std::path::Path) -> Result<()> {
-    fs::write(path, doc.to_string())
-        .with_context(|| format!("writing config: {}", path.display()))
+    fs::write(path, doc.to_string()).with_context(|| format!("writing config: {}", path.display()))
 }
 
 /// Handle alias subcommands.
@@ -8216,7 +8654,10 @@ fn handle_alias(ctx: &RuntimeContext, cmd: AliasCommand) -> Result<()> {
             write_config_document(&doc, &config_path)?;
 
             if let Some(existing) = existing_email {
-                println!("Updated: {} -> {} (was: {})", name_lower, args.email, existing);
+                println!(
+                    "Updated: {} -> {} (was: {})",
+                    name_lower, args.email, existing
+                );
             } else {
                 println!("Added: {} -> {}", name_lower, args.email);
             }
@@ -8305,9 +8746,11 @@ fn handle_alias(ctx: &RuntimeContext, cmd: AliasCommand) -> Result<()> {
 
             let db = Database::open(&db_path).map_err(|e| anyhow!("{e}"))?;
             let addresses = if args.frequent {
-                db.frequent_addresses(args.limit).map_err(|e| anyhow!("{e}"))?
+                db.frequent_addresses(args.limit)
+                    .map_err(|e| anyhow!("{e}"))?
             } else {
-                db.frequent_addresses(args.limit).map_err(|e| anyhow!("{e}"))?
+                db.frequent_addresses(args.limit)
+                    .map_err(|e| anyhow!("{e}"))?
             };
 
             if addresses.is_empty() {
@@ -8379,7 +8822,11 @@ fn handle_alias(ctx: &RuntimeContext, cmd: AliasCommand) -> Result<()> {
                 let suggested = suggest_alias(addr);
 
                 let prompt = if addr.name.is_some() {
-                    format!("Alias for {} <{}>", addr.name.as_deref().unwrap_or(""), addr.email)
+                    format!(
+                        "Alias for {} <{}>",
+                        addr.name.as_deref().unwrap_or(""),
+                        addr.email
+                    )
                 } else {
                     format!("Alias for {}", addr.email)
                 };
@@ -8412,12 +8859,21 @@ fn handle_alias(ctx: &RuntimeContext, cmd: AliasCommand) -> Result<()> {
 
                 people[&alias] = toml_edit::value(&addr.email);
                 added += 1;
-                println!("  {} {} -> {}", "+".green().bold(), alias.green(), addr.email);
+                println!(
+                    "  {} {} -> {}",
+                    "+".green().bold(),
+                    alias.green(),
+                    addr.email
+                );
             }
 
             if added > 0 {
                 write_config_document(&doc, &config_path)?;
-                println!("\nSaved {} new alias(es) to {}", added, config_path.display());
+                println!(
+                    "\nSaved {} new alias(es) to {}",
+                    added,
+                    config_path.display()
+                );
             } else {
                 println!("\nNo aliases added.");
             }
@@ -8547,12 +9003,12 @@ fn render_ppl_agenda(
 
             let status = item.status.as_deref().unwrap_or("Busy");
             let status_icon = match status {
-                "Free" => "\u{2610}",                  // Empty checkbox
-                "Tentative" => "\u{25cb}",             // Circle
-                "Busy" => "\u{2588}",                  // Full block
-                "OOF" | "OutOfOffice" => "\u{2708}",   // Airplane
-                "WorkingElsewhere" => "\u{1f3e0}",     // House (fallback to text)
-                _ => "\u{2588}",                       // Default to busy block
+                "Free" => "\u{2610}",                // Empty checkbox
+                "Tentative" => "\u{25cb}",           // Circle
+                "Busy" => "\u{2588}",                // Full block
+                "OOF" | "OutOfOffice" => "\u{2708}", // Airplane
+                "WorkingElsewhere" => "\u{1f3e0}",   // House (fallback to text)
+                _ => "\u{2588}",                     // Default to busy block
             };
 
             // Subject or status as label
@@ -8895,7 +9351,10 @@ fn interactive_schedule_meeting(
                     start.clone(),
                     end.clone(),
                     duration,
-                    format!("{} {}-{} ({})" , date_str, start_time, end_time, duration_str),
+                    format!(
+                        "{} {}-{} ({})",
+                        date_str, start_time, end_time, duration_str
+                    ),
                 ));
 
                 println!(
@@ -8915,7 +9374,12 @@ fn interactive_schedule_meeting(
     }
 
     // Prompt user to select
-    print!("\n{} ", "Select slot (1-{}), or 'c' to cancel:".replace("{}", &selectable_slots.len().to_string()).cyan());
+    print!(
+        "\n{} ",
+        "Select slot (1-{}), or 'c' to cancel:"
+            .replace("{}", &selectable_slots.len().to_string())
+            .cyan()
+    );
     io::stdout().flush()?;
 
     let mut input = String::new();
@@ -8938,7 +9402,10 @@ fn interactive_schedule_meeting(
     let (start, _end, max_duration, _display) = &selectable_slots[selection];
 
     // Ask for duration
-    print!("{} ", format!("Duration in minutes (max {}m, default 30):", max_duration).cyan());
+    print!(
+        "{} ",
+        format!("Duration in minutes (max {}m, default 30):", max_duration).cyan()
+    );
     io::stdout().flush()?;
 
     let mut duration_input = String::new();
@@ -8962,8 +9429,8 @@ fn interactive_schedule_meeting(
     };
 
     // Calculate meeting end time based on duration
-    let meeting_start = DateTime::parse_from_rfc3339(start)
-        .map_err(|e| anyhow!("Invalid start time: {}", e))?;
+    let meeting_start =
+        DateTime::parse_from_rfc3339(start).map_err(|e| anyhow!("Invalid start time: {}", e))?;
     let meeting_end = meeting_start + ChronoDuration::minutes(duration);
 
     // Ask for subject
@@ -8981,7 +9448,8 @@ fn interactive_schedule_meeting(
 
     // Confirm
     let start_time = extract_time(start).unwrap_or_else(|| start.clone());
-    let end_time_str = extract_time(&meeting_end.to_rfc3339()).unwrap_or_else(|| meeting_end.format("%H:%M").to_string());
+    let end_time_str = extract_time(&meeting_end.to_rfc3339())
+        .unwrap_or_else(|| meeting_end.format("%H:%M").to_string());
 
     println!("\n{}", "Meeting Details:".bold());
     println!("  Subject: {}", subject);
@@ -9198,8 +9666,14 @@ fn pretty_print_item(v: &Value) {
             let end = obj.get("end").and_then(|v| v.as_str()).unwrap_or("");
             let location = obj.get("location").and_then(|v| v.as_str()).unwrap_or("");
             let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let is_all_day = obj.get("is_all_day").and_then(|v| v.as_bool()).unwrap_or(false);
-            let is_cancelled = obj.get("is_cancelled").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_all_day = obj
+                .get("is_all_day")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_cancelled = obj
+                .get("is_cancelled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let organizer = obj.get("organizer").and_then(|v| v.as_str());
             let organizer_name = obj.get("organizer_name").and_then(|v| v.as_str());
             let my_response = obj.get("my_response").and_then(|v| v.as_str());
@@ -9227,7 +9701,11 @@ fn pretty_print_item(v: &Value) {
                     }
                     println!("{}", subject.bold().green());
                     if is_all_day {
-                        println!("  {}: {}", "All day".cyan(), start.split('T').next().unwrap_or(&start));
+                        println!(
+                            "  {}: {}",
+                            "All day".cyan(),
+                            start.split('T').next().unwrap_or(&start)
+                        );
                     } else {
                         println!("  {}", time_range.cyan().bold());
                     }
@@ -9378,7 +9856,8 @@ fn pretty_print_item(v: &Value) {
                         let re_style = regex::Regex::new(r"(?s)<style[^>]*>.*?</style>").unwrap();
                         let re_head = regex::Regex::new(r"(?s)<head[^>]*>.*?</head>").unwrap();
 
-                        let text = re_style.replace_all(b, "")
+                        let text = re_style
+                            .replace_all(b, "")
                             .replace("</style>", "")
                             .replace("<style>", "");
                         let text = re_head.replace_all(&text, "");
@@ -9412,13 +9891,23 @@ fn pretty_print_item(v: &Value) {
                 // Basic format for cal show (no --details)
                 if use_color {
                     if is_cancelled {
-                        println!("{} {} [{}]", time_range.cyan(), subject.strikethrough().bold(), id.dimmed());
+                        println!(
+                            "{} {} [{}]",
+                            time_range.cyan(),
+                            subject.strikethrough().bold(),
+                            id.dimmed()
+                        );
                     } else {
                         println!("{} {} [{}]", time_range.cyan(), subject.bold(), id.dimmed());
                     }
                 } else {
                     if is_cancelled {
-                        println!("{} {} [{}]", time_range, format!("{} (CANCELED)", subject), id);
+                        println!(
+                            "{} {} [{}]",
+                            time_range,
+                            format!("{} (CANCELED)", subject),
+                            id
+                        );
                     } else {
                         println!("{} {} [{}]", time_range, subject, id);
                     }
@@ -9587,142 +10076,7 @@ fn read_pid(path: &std::path::Path) -> Result<Option<u32>> {
     Ok(Some(pid))
 }
 
-/// Check if oama is installed and optionally install it.
-fn ensure_oama() -> Result<()> {
-    // Check if oama is already in PATH
-    if which::which("oama").is_ok() {
-        return Ok(());
-    }
-
-    eprintln!("oama not found in PATH, attempting to install...");
-
-    let install_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow!("could not determine home directory"))?
-        .join(".local")
-        .join("bin");
-
-    // Get latest version from GitHub
-    let client = reqwest::blocking::Client::new();
-    let release: Value = client
-        .get("https://api.github.com/repos/pdobsan/oama/releases/latest")
-        .header("User-Agent", "h8-cli")
-        .send()
-        .context("fetching oama release info")?
-        .json()
-        .context("parsing oama release info")?;
-
-    let version = release["tag_name"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing tag_name in release"))?;
-
-    // Determine platform
-    let (os, arch) = match (env::consts::OS, env::consts::ARCH) {
-        ("macos", "aarch64") => ("Darwin", "arm64"),
-        ("macos", "x86_64") => ("Darwin", "x86_64"),
-        ("linux", "aarch64") => ("Linux", "aarch64"),
-        ("linux", "x86_64") => ("Linux", "x86_64"),
-        (os, arch) => return Err(anyhow!("unsupported platform: {}-{}", os, arch)),
-    };
-
-    let tarball_name = format!("oama-{}-{}-{}.tar.gz", version, os, arch);
-    let download_url = format!(
-        "https://github.com/pdobsan/oama/releases/download/{}/{}",
-        version, tarball_name
-    );
-
-    eprintln!("Downloading oama {} from {}...", version, download_url);
-
-    // Download tarball
-    let response = client
-        .get(&download_url)
-        .send()
-        .context("downloading oama tarball")?;
-
-    if !response.status().is_success() {
-        return Err(anyhow!(
-            "failed to download oama: HTTP {}",
-            response.status()
-        ));
-    }
-
-    let tarball_bytes = response.bytes().context("reading oama tarball")?;
-
-    // Extract to temp dir
-    let temp_dir = tempfile::tempdir().context("creating temp directory")?;
-    let tarball_path = temp_dir.path().join(&tarball_name);
-    fs::write(&tarball_path, &tarball_bytes).context("writing tarball")?;
-
-    // Extract using tar command (simpler than using a tar crate)
-    let status = ProcCommand::new("tar")
-        .arg("-xzf")
-        .arg(&tarball_path)
-        .arg("-C")
-        .arg(temp_dir.path())
-        .status()
-        .context("extracting oama tarball")?;
-
-    if !status.success() {
-        return Err(anyhow!("failed to extract oama tarball"));
-    }
-
-    // Find the oama binary in the extracted files
-    let mut oama_binary = None;
-    for entry in walkdir::WalkDir::new(temp_dir.path())
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_name() == "oama" && entry.file_type().is_file() {
-            oama_binary = Some(entry.path().to_path_buf());
-            break;
-        }
-    }
-
-    let oama_binary =
-        oama_binary.ok_or_else(|| anyhow!("oama binary not found in extracted tarball"))?;
-
-    // Create install directory and copy binary
-    fs::create_dir_all(&install_dir)
-        .with_context(|| format!("creating install directory {}", install_dir.display()))?;
-
-    let install_path = install_dir.join("oama");
-    fs::copy(&oama_binary, &install_path)
-        .with_context(|| format!("copying oama to {}", install_path.display()))?;
-
-    // Make executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&install_path)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&install_path, perms)?;
-    }
-
-    eprintln!("Installed oama to {}", install_path.display());
-
-    // Verify it's now in PATH or warn user
-    if which::which("oama").is_err() {
-        eprintln!(
-            "Warning: oama installed but {} is not in PATH. Add it to your PATH:",
-            install_dir.display()
-        );
-        eprintln!("  export PATH=\"{}:$PATH\"", install_dir.display());
-        // Update PATH for current process
-        let path = env::var("PATH").unwrap_or_default();
-        // SAFETY: We're only modifying PATH for the current process, which is safe
-        // as long as no other threads are reading env vars simultaneously.
-        // This runs early in service startup before any concurrent access.
-        unsafe {
-            env::set_var("PATH", format!("{}:{}", install_dir.display(), path));
-        }
-    }
-
-    Ok(())
-}
-
 fn start_service(ctx: &RuntimeContext) -> Result<()> {
-    // Ensure oama is installed before starting service
-    ensure_oama()?;
-
     let pid_path = service_pid_path(ctx)?;
     if let Some(pid) = read_pid(&pid_path)?
         && pid_running(pid)
@@ -10219,7 +10573,10 @@ fn render_calendar_grid(
                 || start.len() == 10;
 
             if let Ok(date) = NaiveDate::parse_from_str(&start[..10.min(start.len())], "%Y-%m-%d") {
-                events_by_day.entry(date).or_default().push((subject.to_string(), is_all_day));
+                events_by_day
+                    .entry(date)
+                    .or_default()
+                    .push((subject.to_string(), is_all_day));
             }
         }
     }
@@ -10228,7 +10585,12 @@ fn render_calendar_grid(
     let range_label = if from_date == to_date {
         from_date.format("%B %Y").to_string()
     } else if from_date.year() == to_date.year() && from_date.month() == to_date.month() {
-        format!("{} {} - {}", from_date.format("%B"), from_date.day(), to_date.day())
+        format!(
+            "{} {} - {}",
+            from_date.format("%B"),
+            from_date.day(),
+            to_date.day()
+        )
     } else if from_date.year() == to_date.year() {
         format!(
             "{} {} - {} {}",
@@ -10293,11 +10655,7 @@ fn render_calendar_grid(
         .iter()
         .map(|&i| {
             let p = pad(day_names[i]);
-            if i >= 5 {
-                format!("{}", p.dimmed())
-            } else {
-                p
-            }
+            if i >= 5 { format!("{}", p.dimmed()) } else { p }
         })
         .collect();
     println!("{}", top);
@@ -10438,7 +10796,9 @@ fn handle_rules(ctx: &RuntimeContext, command: RulesCommand) -> Result<()> {
             let db = open_database(ctx, &account)?;
             let id_gen = IdGenerator::new(&db);
             let remote_id = resolve_rule_id(&id_gen, &args.id)?;
-            let result = client.rules_get(&account, &remote_id).map_err(|e| anyhow!("{e}"))?;
+            let result = client
+                .rules_get(&account, &remote_id)
+                .map_err(|e| anyhow!("{e}"))?;
             let rule_with_id = assign_rule_id_to_single(&result, &id_gen)?;
             emit_output(&ctx.common, &rule_with_id)?;
         }
@@ -10447,7 +10807,9 @@ fn handle_rules(ctx: &RuntimeContext, command: RulesCommand) -> Result<()> {
             let db = open_database(ctx, &account)?;
             let id_gen = IdGenerator::new(&db);
             let remote_id = resolve_rule_id(&id_gen, &args.id)?;
-            let result = client.rules_enable(&account, &remote_id).map_err(|e| anyhow!("{e}"))?;
+            let result = client
+                .rules_enable(&account, &remote_id)
+                .map_err(|e| anyhow!("{e}"))?;
             let short_id = get_rule_short_id(&result, &id_gen);
             if !ctx.common.json {
                 println!("Rule enabled: {}", short_id);
@@ -10458,7 +10820,9 @@ fn handle_rules(ctx: &RuntimeContext, command: RulesCommand) -> Result<()> {
             let db = open_database(ctx, &account)?;
             let id_gen = IdGenerator::new(&db);
             let remote_id = resolve_rule_id(&id_gen, &args.id)?;
-            let result = client.rules_disable(&account, &remote_id).map_err(|e| anyhow!("{e}"))?;
+            let result = client
+                .rules_disable(&account, &remote_id)
+                .map_err(|e| anyhow!("{e}"))?;
             let short_id = get_rule_short_id(&result, &id_gen);
             if !ctx.common.json {
                 println!("Rule disabled: {}", short_id);
@@ -10479,7 +10843,9 @@ fn handle_rules(ctx: &RuntimeContext, command: RulesCommand) -> Result<()> {
                     return Ok(());
                 }
             }
-            let result = client.rules_delete(&account, &remote_id).map_err(|e| anyhow!("{e}"))?;
+            let result = client
+                .rules_delete(&account, &remote_id)
+                .map_err(|e| anyhow!("{e}"))?;
             let _ = id_gen.delete_rule(&args.id);
             if !ctx.common.json {
                 println!("Rule deleted: {}", args.id);
@@ -10562,9 +10928,15 @@ fn print_rules_list(result: &Value, verbose: bool) {
     if verbose {
         for rule in rules {
             let id = rule.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let name = rule.get("display_name").and_then(|v| v.as_str()).unwrap_or("Untitled");
+            let name = rule
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Untitled");
             let priority = rule.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
-            let enabled = rule.get("is_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let enabled = rule
+                .get("is_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
 
             let status_str = if enabled {
                 "enabled".green().to_string()
@@ -10572,7 +10944,8 @@ fn print_rules_list(result: &Value, verbose: bool) {
                 "disabled".dimmed().to_string()
             };
 
-            println!("{}  {}  (priority: {}, {})",
+            println!(
+                "{}  {}  (priority: {}, {})",
                 id,
                 name.bold(),
                 priority,
@@ -10605,13 +10978,30 @@ fn print_rules_list(result: &Value, verbose: bool) {
         for rule in rules {
             let id = rule.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
             let short_id = if id.len() > 10 { &id[..10] } else { id };
-            let name = rule.get("display_name").and_then(|v| v.as_str()).unwrap_or("Untitled");
+            let name = rule
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Untitled");
             let priority = rule.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
-            let enabled = rule.get("is_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-            let status = if enabled { "on".green().to_string() } else { "off".dimmed().to_string() };
+            let enabled = rule
+                .get("is_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let status = if enabled {
+                "on".green().to_string()
+            } else {
+                "off".dimmed().to_string()
+            };
 
-            let display_name = if name.len() > 30 { format!("{}...", &name[..27]) } else { name.to_string() };
-            println!("{:<12} {:<6} {:<10} {}", short_id, priority, status, display_name);
+            let display_name = if name.len() > 30 {
+                format!("{}...", &name[..27])
+            } else {
+                name.to_string()
+            };
+            println!(
+                "{:<12} {:<6} {:<10} {}",
+                short_id, priority, status, display_name
+            );
         }
     }
 }
@@ -10675,17 +11065,22 @@ fn handle_rules_create(
     }
 
     // If no explicit conditions/actions were given, try to parse natural language
-    let (parsed_name, parsed_conditions, parsed_actions) = if conditions.is_empty() && actions.is_empty() {
-        parse_natural_rule(&name)
-    } else {
-        (name, conditions, actions)
-    };
+    let (parsed_name, parsed_conditions, parsed_actions) =
+        if conditions.is_empty() && actions.is_empty() {
+            parse_natural_rule(&name)
+        } else {
+            (name, conditions, actions)
+        };
 
     if parsed_conditions.is_empty() {
-        return Err(anyhow!("No conditions specified. Use --from, --subject-contains, etc. or provide natural language"));
+        return Err(anyhow!(
+            "No conditions specified. Use --from, --subject-contains, etc. or provide natural language"
+        ));
     }
     if parsed_actions.is_empty() {
-        return Err(anyhow!("No actions specified. Use --move-to, --delete, --mark-read, etc."));
+        return Err(anyhow!(
+            "No actions specified. Use --move-to, --delete, --mark-read, etc."
+        ));
     }
 
     let payload = json!({
@@ -10696,13 +11091,18 @@ fn handle_rules_create(
         "actions": parsed_actions,
     });
 
-    let result = client.rules_create(account, payload).map_err(|e| anyhow!("{e}"))?;
+    let result = client
+        .rules_create(account, payload)
+        .map_err(|e| anyhow!("{e}"))?;
 
     // Assign a readable ID to the newly created rule
     let result_with_id = assign_rule_id_to_single(&result, &id_gen)?;
 
     if !ctx.common.json {
-        let id = result_with_id.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let id = result_with_id
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         println!("Rule created: {} ({})", id, parsed_name);
     }
 
@@ -10713,7 +11113,13 @@ fn handle_rules_create(
 /// Examples:
 ///   "move newsletters to Archive if subject contains 'Weekly'"
 ///   "delete emails from spam@example.com"
-fn parse_natural_rule(name: &str) -> (String, serde_json::Map<String, Value>, serde_json::Map<String, Value>) {
+fn parse_natural_rule(
+    name: &str,
+) -> (
+    String,
+    serde_json::Map<String, Value>,
+    serde_json::Map<String, Value>,
+) {
     let mut conditions: serde_json::Map<String, Value> = serde_json::Map::new();
     let mut actions: serde_json::Map<String, Value> = serde_json::Map::new();
 
@@ -10770,7 +11176,13 @@ fn parse_natural_rule(name: &str) -> (String, serde_json::Map<String, Value>, se
 fn extract_folder_name(s: &str) -> Option<String> {
     // Look for "to FolderName" or "folder FolderName"
     let lower = s.to_lowercase();
-    for pattern in &["move to ", "move emails to ", "copy to ", "copy emails to ", "folder "] {
+    for pattern in &[
+        "move to ",
+        "move emails to ",
+        "copy to ",
+        "copy emails to ",
+        "folder ",
+    ] {
         if let Some(pos) = lower.find(pattern) {
             let start = pos + pattern.len();
             let rest = &s[start..];
@@ -10873,10 +11285,22 @@ fn handle_oof(ctx: &RuntimeContext, command: OofCommand) -> Result<()> {
 fn print_oof_status(result: &Value) {
     use owo_colors::OwoColorize;
 
-    let _state = result.get("state").and_then(|v| v.as_str()).unwrap_or("Unknown");
-    let enabled = result.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-    let scheduled = result.get("scheduled").and_then(|v| v.as_bool()).unwrap_or(false);
-    let audience = result.get("external_audience").and_then(|v| v.as_str()).unwrap_or("Unknown");
+    let _state = result
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    let enabled = result
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let scheduled = result
+        .get("scheduled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let audience = result
+        .get("external_audience")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
 
     if enabled {
         println!("Out-of-Office: {}", "ENABLED".green().bold());
@@ -10945,12 +11369,7 @@ fn handle_sync(ctx: &RuntimeContext, args: SyncArgs) -> Result<()> {
             .format("%Y-%m-%dT23:59:59")
             .to_string();
 
-        match client.calendar_list(
-            &account,
-            0,
-            Some(&cal_start),
-            Some(&cal_end),
-        ) {
+        match client.calendar_list(&account, 0, Some(&cal_start), Some(&cal_end)) {
             Ok(events) => {
                 // Sync to local database
                 let db_path = ctx.paths.sync_db_path(&account);
@@ -10964,37 +11383,54 @@ fn handle_sync(ctx: &RuntimeContext, args: SyncArgs) -> Result<()> {
                                 let _ = id_gen.init_pool(&words);
                             }
                         }
-                        if let Ok(synced) = sync_calendar_events(ctx, &account, &events, Some((&cal_start, &cal_end))) {
+                        if let Ok(synced) = sync_calendar_events(
+                            ctx,
+                            &account,
+                            &events,
+                            Some((&cal_start, &cal_end)),
+                        ) {
                             results.insert("calendar".to_string(), json!({
                                 "status": "ok",
                                 "events_synced": synced.as_array().map(|a| a.len()).unwrap_or(0),
                             }));
                             if !ctx.common.quiet {
-                                println!("  ✓ Calendar: {} events synced", synced.as_array().map(|a| a.len()).unwrap_or(0));
+                                println!(
+                                    "  ✓ Calendar: {} events synced",
+                                    synced.as_array().map(|a| a.len()).unwrap_or(0)
+                                );
                             }
                         } else {
                             has_errors = true;
-                            results.insert("calendar".to_string(), json!({
-                                "status": "error",
-                                "message": "Failed to sync to local database",
-                            }));
+                            results.insert(
+                                "calendar".to_string(),
+                                json!({
+                                    "status": "error",
+                                    "message": "Failed to sync to local database",
+                                }),
+                            );
                         }
                     }
                     Err(e) => {
                         has_errors = true;
-                        results.insert("calendar".to_string(), json!({
-                            "status": "error",
-                            "message": format!("Database error: {}", e),
-                        }));
+                        results.insert(
+                            "calendar".to_string(),
+                            json!({
+                                "status": "error",
+                                "message": format!("Database error: {}", e),
+                            }),
+                        );
                     }
                 }
             }
             Err(e) => {
                 has_errors = true;
-                results.insert("calendar".to_string(), json!({
-                    "status": "error",
-                    "message": format!("Service error: {}", e),
-                }));
+                results.insert(
+                    "calendar".to_string(),
+                    json!({
+                        "status": "error",
+                        "message": format!("Service error: {}", e),
+                    }),
+                );
                 if !ctx.common.quiet {
                     eprintln!("  ✗ Calendar sync failed: {}", e);
                 }
@@ -11018,10 +11454,13 @@ fn handle_sync(ctx: &RuntimeContext, args: SyncArgs) -> Result<()> {
             }
             Err(e) => {
                 has_errors = true;
-                results.insert("mail".to_string(), json!({
-                    "status": "error",
-                    "message": format!("{}", e),
-                }));
+                results.insert(
+                    "mail".to_string(),
+                    json!({
+                        "status": "error",
+                        "message": format!("{}", e),
+                    }),
+                );
                 if !ctx.common.quiet {
                     eprintln!("  ✗ Mail sync failed: {}", e);
                 }
@@ -11038,20 +11477,26 @@ fn handle_sync(ctx: &RuntimeContext, args: SyncArgs) -> Result<()> {
         match client.contacts_list(&account, limit, None) {
             Ok(contacts) => {
                 let count = contacts.as_array().map(|a| a.len()).unwrap_or(0);
-                results.insert("contacts".to_string(), json!({
-                    "status": "ok",
-                    "contacts_synced": count,
-                }));
+                results.insert(
+                    "contacts".to_string(),
+                    json!({
+                        "status": "ok",
+                        "contacts_synced": count,
+                    }),
+                );
                 if !ctx.common.quiet {
                     println!("  ✓ Contacts: {} contacts synced", count);
                 }
             }
             Err(e) => {
                 has_errors = true;
-                results.insert("contacts".to_string(), json!({
-                    "status": "error",
-                    "message": format!("Service error: {}", e),
-                }));
+                results.insert(
+                    "contacts".to_string(),
+                    json!({
+                        "status": "error",
+                        "message": format!("Service error: {}", e),
+                    }),
+                );
                 if !ctx.common.quiet {
                     eprintln!("  ✗ Contacts sync failed: {}", e);
                 }
@@ -11075,4 +11520,264 @@ fn handle_sync(ctx: &RuntimeContext, args: SyncArgs) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+// === Auth ===
+
+fn handle_auth(ctx: &RuntimeContext, command: AuthCommand) -> Result<()> {
+    let client = ctx.service_client()?;
+
+    match command {
+        AuthCommand::Status => {
+            let result = client.auth_accounts().map_err(|e| anyhow!("{e}"))?;
+            if ctx.common.json || ctx.common.yaml {
+                emit_output(&ctx.common, &result)?;
+            } else {
+                print_auth_accounts(&result);
+            }
+        }
+        AuthCommand::Login(args) => {
+            let account = args.account.unwrap_or_else(|| effective_account(ctx));
+            let started = client.auth_login(&account).map_err(|e| anyhow!("{e}"))?;
+            let flow = started.get("flow").and_then(|v| v.as_str()).unwrap_or("");
+            let session_id = started
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("service did not return a session_id for the login flow"))?
+                .to_string();
+
+            match flow {
+                "device_code" => {
+                    let verification_url = started
+                        .get("verification_url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let user_code = started
+                        .get("user_code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    println!("Visit {} and enter code {}", verification_url, user_code);
+                    println!("Waiting for confirmation...");
+                }
+                "auth_url" => {
+                    let auth_url = started
+                        .get("auth_url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    println!("Open this URL in a browser to sign in:");
+                    println!("  {}", auth_url);
+                    let redirect_url = dialoguer::Input::<String>::new()
+                        .with_prompt("After signing in, paste the redirect URL here")
+                        .interact_text()
+                        .map_err(|e| anyhow!("input cancelled: {e}"))?;
+                    client
+                        .auth_login_finish(&session_id, redirect_url.trim())
+                        .map_err(|e| anyhow!("{e}"))?;
+                }
+                other => {
+                    return Err(anyhow!(
+                        "unknown login flow '{}' returned by service",
+                        other
+                    ));
+                }
+            }
+
+            let final_status = poll_login_status(&client, &session_id)?;
+            if !ctx.common.json && !ctx.common.yaml {
+                println!("Login for '{}' succeeded.", account);
+            }
+            emit_output(&ctx.common, &final_status)?;
+        }
+        AuthCommand::Logout(args) => {
+            let account = args.account.unwrap_or_else(|| effective_account(ctx));
+            let result = client.auth_logout(&account).map_err(|e| anyhow!("{e}"))?;
+            if !ctx.common.json && !ctx.common.yaml {
+                println!("Logged out '{}'.", account);
+            }
+            emit_output(&ctx.common, &result)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Poll `GET /auth/login/{session_id}` every 3 seconds until the flow
+/// reports `done` or `error`, or 10 minutes elapse.
+fn poll_login_status(client: &ServiceClient, session_id: &str) -> Result<Value> {
+    const POLL_INTERVAL: Duration = Duration::from_secs(3);
+    const TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+    let start = std::time::Instant::now();
+    loop {
+        let status = client
+            .auth_login_status(session_id)
+            .map_err(|e| anyhow!("{e}"))?;
+        match status.get("status").and_then(|v| v.as_str()) {
+            Some("done") => return Ok(status),
+            Some("error") => {
+                let detail = status
+                    .get("detail")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("login failed");
+                return Err(anyhow!("login failed: {}", detail));
+            }
+            _ => {
+                if start.elapsed() >= TIMEOUT {
+                    return Err(anyhow!("login timed out after 10 minutes"));
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+        }
+    }
+}
+
+fn print_auth_accounts(result: &Value) {
+    let empty = vec![];
+    let accounts = result.as_array().unwrap_or(&empty);
+    if accounts.is_empty() {
+        println!("No accounts configured");
+        return;
+    }
+
+    println!(
+        "{:<16} {:<32} {:<10} {:<8} {}",
+        "ALIAS", "EMAIL", "PROVIDER", "LOGIN", "EXPIRES"
+    );
+    println!("{}", "-".repeat(90));
+    for acct in accounts {
+        let alias = acct.get("alias").and_then(|v| v.as_str()).unwrap_or("-");
+        let email = acct.get("email").and_then(|v| v.as_str()).unwrap_or("-");
+        let provider = acct.get("provider").and_then(|v| v.as_str()).unwrap_or("-");
+        let logged_in = acct
+            .get("logged_in")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let expires_at = acct
+            .get("expires_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        let status = if logged_in { "yes" } else { "no" };
+        println!(
+            "{:<16} {:<32} {:<10} {:<8} {}",
+            alias, email, provider, status, expires_at
+        );
+    }
+}
+
+// === API keys ===
+
+fn handle_keys(ctx: &RuntimeContext, command: KeysCommand) -> Result<()> {
+    let client = ctx.service_client()?;
+
+    match command {
+        KeysCommand::List => {
+            let result = client.keys_list().map_err(|e| anyhow!("{e}"))?;
+            if ctx.common.json || ctx.common.yaml {
+                emit_output(&ctx.common, &result)?;
+            } else {
+                print_keys_list(&result);
+            }
+        }
+        KeysCommand::Create(args) => {
+            let scopes = parse_comma_list(&args.scopes);
+            if scopes.is_empty() {
+                return Err(anyhow!("--scopes must include at least one scope"));
+            }
+            let accounts = args.accounts.as_deref().map(parse_comma_list);
+
+            let result = client
+                .keys_create(&args.name, &scopes, accounts.as_deref())
+                .map_err(|e| anyhow!("{e}"))?;
+            if ctx.common.json || ctx.common.yaml {
+                emit_output(&ctx.common, &result)?;
+            } else {
+                print_key_created(&result);
+            }
+        }
+        KeysCommand::Revoke(args) => {
+            let result = client.keys_revoke(&args.id).map_err(|e| anyhow!("{e}"))?;
+            if !ctx.common.json && !ctx.common.yaml {
+                println!("Revoked key {}", args.id);
+            }
+            emit_output(&ctx.common, &result)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Split a comma-separated CLI value into a trimmed, non-empty list.
+fn parse_comma_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn print_keys_list(result: &Value) {
+    let empty = vec![];
+    let keys = result.as_array().unwrap_or(&empty);
+    if keys.is_empty() {
+        println!("No API keys configured");
+        return;
+    }
+
+    println!(
+        "{:<12} {:<22} {:<26} {:<20} {:<8} {}",
+        "ID", "NAME", "SCOPES", "ACCOUNTS", "STATUS", "CREATED"
+    );
+    println!("{}", "-".repeat(110));
+    for key in keys {
+        let id = key.get("id").and_then(|v| v.as_str()).unwrap_or("-");
+        let name = key.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+        let scopes = key
+            .get("scopes")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        let accounts = key
+            .get("accounts")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| "all".to_string());
+        let disabled = key
+            .get("disabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let created_at = key
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        let status = if disabled { "disabled" } else { "active" };
+        println!(
+            "{:<12} {:<22} {:<26} {:<20} {:<8} {}",
+            id, name, scopes, accounts, status, created_at
+        );
+    }
+}
+
+fn print_key_created(result: &Value) {
+    let token = result.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let name = result.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+
+    println!("API key created: {} ({})", name, id);
+    println!();
+    println!("------------------------------------------------------------");
+    println!("  TOKEN (shown once - store this now, it cannot be shown again):");
+    println!();
+    println!("  {}", token);
+    println!();
+    println!("  If you lose it, revoke this key and create a new one.");
+    println!("------------------------------------------------------------");
 }

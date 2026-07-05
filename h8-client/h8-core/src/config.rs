@@ -216,6 +216,15 @@ pub struct AppConfig {
     pub timezone: String,
     /// URL of the Python EWS service.
     pub service_url: String,
+    /// Bearer token sent to h8-service as `Authorization: Bearer <token>`.
+    ///
+    /// Token discovery order (first match wins): `H8_TOKEN` env var, this
+    /// config field, then `$XDG_STATE_HOME/h8/client.key` (default
+    /// `~/.local/state/h8/client.key`, trimmed). If none is found, requests
+    /// are sent without an Authorization header (the server may be running
+    /// with auth disabled).
+    #[serde(default)]
+    pub service_token: Option<String>,
     /// Free slots configuration.
     pub free_slots: FreeSlotsConfig,
     /// Mail configuration.
@@ -244,6 +253,7 @@ impl Default for AppConfig {
             account: "your.email@example.com".to_string(),
             timezone: "Europe/Berlin".to_string(),
             service_url: "http://127.0.0.1:8787".to_string(),
+            service_token: None,
             free_slots: FreeSlotsConfig::default(),
             mail: MailConfig::default(),
             calendar: CalendarConfig::default(),
@@ -392,25 +402,40 @@ impl AppConfig {
         let (_, group) = self.resource_group(group_name).ok_or_else(|| {
             let available: Vec<&str> = self.resources.keys().map(|s| s.as_str()).collect();
             if available.is_empty() {
-                format!("unknown resource group '{}' (no groups configured in [resources])", group_name)
+                format!(
+                    "unknown resource group '{}' (no groups configured in [resources])",
+                    group_name
+                )
             } else {
-                format!("unknown resource group '{}' (available: {})", group_name, available.join(", "))
+                format!(
+                    "unknown resource group '{}' (available: {})",
+                    group_name,
+                    available.join(", ")
+                )
             }
         })?;
         for (entry_alias, entry) in group {
             if entry_alias.eq_ignore_ascii_case(alias) {
-                return Ok((entry.email().to_string(), entry.desc().map(|s| s.to_string())));
+                return Ok((
+                    entry.email().to_string(),
+                    entry.desc().map(|s| s.to_string()),
+                ));
             }
         }
         let available: Vec<&str> = group.keys().map(|s| s.as_str()).collect();
         Err(format!(
             "unknown resource '{}' in group '{}' (available: {})",
-            alias, group_name, available.join(", ")
+            alias,
+            group_name,
+            available.join(", ")
         ))
     }
 
     /// Find which resource group contains a given alias. Returns (group_name, alias, email, desc).
-    pub fn find_resource_by_alias(&self, alias: &str) -> Option<(String, String, String, Option<String>)> {
+    pub fn find_resource_by_alias(
+        &self,
+        alias: &str,
+    ) -> Option<(String, String, String, Option<String>)> {
         for (group_name, group) in &self.resources {
             for (entry_alias, entry) in group {
                 if entry_alias.eq_ignore_ascii_case(alias) {

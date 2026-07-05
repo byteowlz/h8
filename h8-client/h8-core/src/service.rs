@@ -3,10 +3,11 @@
 use std::path::Path;
 use std::time::Duration;
 
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, RequestBuilder};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
+use crate::paths::default_state_dir;
 use crate::types::{DraftSave, DraftUpdate, FetchFormat, FetchMail};
 
 /// Client for the Python EWS service.
@@ -14,18 +15,87 @@ use crate::types::{DraftSave, DraftUpdate, FetchFormat, FetchMail};
 pub struct ServiceClient {
     http: Client,
     base_url: String,
+    token: Option<String>,
 }
 
 /// Default request timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
+/// Name of the bearer-token file written by `h8-service` on first run.
+const CLIENT_KEY_FILE: &str = "client.key";
+
+/// Discover the bearer token to authenticate against h8-service.
+///
+/// Order (first match wins): the `H8_TOKEN` environment variable, the
+/// `config_token` passed in (typically `AppConfig::service_token`), then
+/// `$XDG_STATE_HOME/h8/client.key` (trimmed). Returns `None` if no token is
+/// found anywhere, in which case requests are sent without an Authorization
+/// header.
+fn discover_token(config_token: Option<&str>) -> Option<String> {
+    if let Ok(env_token) = std::env::var("H8_TOKEN") {
+        let trimmed = env_token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(cfg) = config_token {
+        let trimmed = cfg.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Ok(state_dir) = default_state_dir() {
+        let key_path = state_dir.join(CLIENT_KEY_FILE);
+        if let Ok(content) = std::fs::read_to_string(&key_path) {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 impl ServiceClient {
-    /// Create a new service client.
+    /// Create a new service client with no explicit config-provided token.
+    ///
+    /// Still discovers a token via `H8_TOKEN` or `~/.local/state/h8/client.key`
+    /// (see [`ServiceClient::with_token`]).
     pub fn new(base_url: &str, timeout: Option<Duration>) -> Result<Self> {
+        Self::with_token(base_url, timeout, None)
+    }
+
+    /// Create a new service client, considering `config_token` (typically
+    /// `AppConfig::service_token`) as part of token discovery.
+    ///
+    /// Token discovery order: `H8_TOKEN` env var -> `config_token` ->
+    /// `$XDG_STATE_HOME/h8/client.key`. If none is found, requests are sent
+    /// without an Authorization header.
+    pub fn with_token(
+        base_url: &str,
+        timeout: Option<Duration>,
+        config_token: Option<&str>,
+    ) -> Result<Self> {
         let timeout = timeout.unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
         let http = Client::builder().timeout(timeout).build()?;
         let base_url = base_url.trim_end_matches('/').to_string();
-        Ok(Self { http, base_url })
+        let token = discover_token(config_token);
+        Ok(Self {
+            http,
+            base_url,
+            token,
+        })
+    }
+
+    /// Apply the discovered bearer token (if any) to a request.
+    fn with_auth(&self, req: RequestBuilder) -> RequestBuilder {
+        match &self.token {
+            Some(token) => req.bearer_auth(token),
+            None => req,
+        }
     }
 
     /// Check service health.
@@ -87,15 +157,13 @@ impl ServiceClient {
     }
 
     /// Cancel a calendar event and notify attendees.
-    pub fn calendar_cancel(
-        &self,
-        account: &str,
-        id: &str,
-        message: Option<&str>,
-    ) -> Result<Value> {
+    pub fn calendar_cancel(&self, account: &str, id: &str, message: Option<&str>) -> Result<Value> {
         let payload = serde_json::json!({ "message": message });
         let encoded_id = urlencoding::encode(id);
-        self.post_json(&format!("/calendar/{}/cancel?account={}", encoded_id, account), payload)
+        self.post_json(
+            &format!("/calendar/{}/cancel?account={}", encoded_id, account),
+            payload,
+        )
     }
 
     /// Search calendar events.
@@ -237,11 +305,9 @@ impl ServiceClient {
             form = form.part("attachments", part);
         }
 
-        let url = format!(
-            "{}/mail/send-files?account={}",
-            self.base_url, account
-        );
-        let resp = self.http.post(&url).multipart(form).send()?;
+        let url = format!("{}/mail/send-files?account={}", self.base_url, account);
+        let req = self.with_auth(self.http.post(&url).multipart(form));
+        let resp = req.send()?;
         self.handle_response(resp)
     }
 
@@ -264,32 +330,17 @@ impl ServiceClient {
         let payload = serde_json::to_value(&body)?;
 
         // Use extended timeout for mail fetch (5 minutes)
-        let url = format!("{}{}", self.base_url, format!("/mail/fetch?account={}", account));
+        let url = format!(
+            "{}{}",
+            self.base_url,
+            format!("/mail/fetch?account={}", account)
+        );
         let http = Client::builder()
             .timeout(Duration::from_secs(300)) // 5 minutes
             .build()?;
-        let resp = http.post(&url).json(&payload).send()?;
-
-        let status = resp.status();
-        let text = resp.text()?;
-
-        if !status.is_success() {
-            if let Ok(val) = serde_json::from_str::<Value>(&text)
-                && let Some(detail) = val
-                    .as_object()
-                    .and_then(|m| m.get("detail"))
-                    .and_then(|d| d.as_str())
-            {
-                return Err(Error::Service(format!("service error: {}", detail)));
-            }
-            let snippet: String = text.chars().take(400).collect();
-            return Err(Error::Service(format!(
-                "service error ({}): {}",
-                status, snippet
-            )));
-        }
-
-        serde_json::from_str(&text).map_err(Into::into)
+        let req = self.with_auth(http.post(&url).json(&payload));
+        let resp = req.send()?;
+        self.handle_response(resp)
     }
 
     /// Save a draft to Exchange.
@@ -369,7 +420,10 @@ impl ServiceClient {
         });
         let encoded_id = urlencoding::encode(id);
         self.post_json(
-            &format!("/mail/{}/move?account={}&folder={}", encoded_id, account, folder),
+            &format!(
+                "/mail/{}/move?account={}&folder={}",
+                encoded_id, account, folder
+            ),
             payload,
         )
     }
@@ -403,11 +457,16 @@ impl ServiceClient {
         });
 
         // Use extended timeout for potentially long-running bulk operations.
-        let url = format!("{}{}", self.base_url, format!("/mail/move-old?account={}", account));
+        let url = format!(
+            "{}{}",
+            self.base_url,
+            format!("/mail/move-old?account={}", account)
+        );
         let http = Client::builder()
             .timeout(Duration::from_secs(300))
             .build()?;
-        let resp = http.post(&url).json(&payload).send()?;
+        let req = self.with_auth(http.post(&url).json(&payload));
+        let resp = req.send()?;
         self.handle_response(resp)
     }
 
@@ -435,11 +494,16 @@ impl ServiceClient {
         });
 
         // Use extended timeout for potentially long-running bulk operations.
-        let url = format!("{}{}", self.base_url, format!("/mail/mark?account={}", account));
+        let url = format!(
+            "{}{}",
+            self.base_url,
+            format!("/mail/mark?account={}", account)
+        );
         let http = Client::builder()
             .timeout(Duration::from_secs(300))
             .build()?;
-        let resp = http.post(&url).json(&payload).send()?;
+        let req = self.with_auth(http.post(&url).json(&payload));
+        let resp = req.send()?;
         self.handle_response(resp)
     }
 
@@ -456,7 +520,10 @@ impl ServiceClient {
             "move": move_item,
         });
         let encoded_id = urlencoding::encode(id);
-        self.post_json(&format!("/mail/{}/spam?account={}", encoded_id, account), payload)
+        self.post_json(
+            &format!("/mail/{}/spam?account={}", encoded_id, account),
+            payload,
+        )
     }
 
     /// List contacts.
@@ -497,7 +564,10 @@ impl ServiceClient {
     /// Update a contact.
     pub fn contacts_update(&self, account: &str, id: &str, updates: Value) -> Result<Value> {
         let encoded_id = urlencoding::encode(id);
-        self.put_json(&format!("/contacts/{}?account={}", encoded_id, account), updates)
+        self.put_json(
+            &format!("/contacts/{}?account={}", encoded_id, account),
+            updates,
+        )
     }
 
     /// Find free calendar slots.
@@ -658,7 +728,10 @@ impl ServiceClient {
             "from_date": from_date,
             "to_date": to_date,
         });
-        self.post_json(&format!("/resource/free-window?account={}", account), payload)
+        self.post_json(
+            &format!("/resource/free-window?account={}", account),
+            payload,
+        )
     }
 
     /// Get bookings/events for each resource in a group.
@@ -784,12 +857,18 @@ impl ServiceClient {
 
     /// Enable an inbox rule.
     pub fn rules_enable(&self, account: &str, rule_id: &str) -> Result<Value> {
-        self.post_json(&format!("/rules/{}/enable?account={}", rule_id, account), serde_json::json!({}))
+        self.post_json(
+            &format!("/rules/{}/enable?account={}", rule_id, account),
+            serde_json::json!({}),
+        )
     }
 
     /// Disable an inbox rule.
     pub fn rules_disable(&self, account: &str, rule_id: &str) -> Result<Value> {
-        self.post_json(&format!("/rules/{}/disable?account={}", rule_id, account), serde_json::json!({}))
+        self.post_json(
+            &format!("/rules/{}/disable?account={}", rule_id, account),
+            serde_json::json!({}),
+        )
     }
 
     /// Delete an inbox rule.
@@ -809,7 +888,13 @@ impl ServiceClient {
     }
 
     /// Enable Out-of-Office (immediate).
-    pub fn oof_enable(&self, account: &str, internal_reply: &str, external_reply: Option<&str>, external_audience: &str) -> Result<Value> {
+    pub fn oof_enable(
+        &self,
+        account: &str,
+        internal_reply: &str,
+        external_reply: Option<&str>,
+        external_audience: &str,
+    ) -> Result<Value> {
         let payload = serde_json::json!({
             "internal_reply": internal_reply,
             "external_reply": external_reply,
@@ -819,7 +904,15 @@ impl ServiceClient {
     }
 
     /// Schedule Out-of-Office for a future period.
-    pub fn oof_schedule(&self, account: &str, start: &str, end: &str, internal_reply: &str, external_reply: Option<&str>, external_audience: &str) -> Result<Value> {
+    pub fn oof_schedule(
+        &self,
+        account: &str,
+        start: &str,
+        end: &str,
+        internal_reply: &str,
+        external_reply: Option<&str>,
+        external_audience: &str,
+    ) -> Result<Value> {
         let payload = serde_json::json!({
             "start": start,
             "end": end,
@@ -832,7 +925,10 @@ impl ServiceClient {
 
     /// Disable Out-of-Office.
     pub fn oof_disable(&self, account: &str) -> Result<Value> {
-        self.post_json(&format!("/oof/disable?account={}", account), serde_json::json!({}))
+        self.post_json(
+            &format!("/oof/disable?account={}", account),
+            serde_json::json!({}),
+        )
     }
 
     // === Unsubscribe ===
@@ -856,7 +952,10 @@ impl ServiceClient {
             "safe_senders": safe_senders,
             "blocked_patterns": blocked_patterns,
         });
-        self.post_json(&format!("/mail/unsubscribe/scan?account={}", account), payload)
+        self.post_json(
+            &format!("/mail/unsubscribe/scan?account={}", account),
+            payload,
+        )
     }
 
     /// Execute unsubscribe for given message IDs.
@@ -876,38 +975,141 @@ impl ServiceClient {
             "trusted_domains": trusted_domains,
             "rate_limit_seconds": rate_limit_seconds,
         });
-        self.post_json(&format!("/mail/unsubscribe/execute?account={}", account), payload)
+        self.post_json(
+            &format!("/mail/unsubscribe/execute?account={}", account),
+            payload,
+        )
+    }
+
+    // === Auth ===
+
+    /// List configured accounts and their login status.
+    pub fn auth_accounts(&self) -> Result<Value> {
+        self.get("/auth/accounts", &[])
+    }
+
+    /// Start an interactive login flow for an account (device-code or auth-url).
+    pub fn auth_login(&self, account: &str) -> Result<Value> {
+        let payload = serde_json::json!({ "account": account });
+        self.post_json("/auth/login", payload)
+    }
+
+    /// Poll the status of an in-progress login flow.
+    pub fn auth_login_status(&self, session_id: &str) -> Result<Value> {
+        let encoded = urlencoding::encode(session_id);
+        self.get(&format!("/auth/login/{}", encoded), &[])
+    }
+
+    /// Finish a login flow that requires a pasted redirect URL (auth_url flow).
+    pub fn auth_login_finish(&self, session_id: &str, redirect_url: &str) -> Result<Value> {
+        let encoded = urlencoding::encode(session_id);
+        let payload = serde_json::json!({ "redirect_url": redirect_url });
+        self.post_json(&format!("/auth/login/{}/finish", encoded), payload)
+    }
+
+    /// Log out an account, discarding its stored credentials.
+    pub fn auth_logout(&self, account: &str) -> Result<Value> {
+        let payload = serde_json::json!({ "account": account });
+        self.post_json("/auth/logout", payload)
+    }
+
+    // === API keys ===
+
+    /// List API keys.
+    pub fn keys_list(&self) -> Result<Value> {
+        self.get("/keys", &[])
+    }
+
+    /// Create a new scoped API key. The response includes the raw token
+    /// exactly once; it cannot be retrieved again afterwards.
+    pub fn keys_create(
+        &self,
+        name: &str,
+        scopes: &[String],
+        accounts: Option<&[String]>,
+    ) -> Result<Value> {
+        let payload = serde_json::json!({
+            "name": name,
+            "scopes": scopes,
+            "accounts": accounts,
+        });
+        self.post_json("/keys", payload)
+    }
+
+    /// Revoke (delete) an API key by ID.
+    pub fn keys_revoke(&self, id: &str) -> Result<Value> {
+        let encoded = urlencoding::encode(id);
+        self.delete(&format!("/keys/{}", encoded))
     }
 
     // Internal HTTP methods
 
     fn get(&self, path: &str, params: &[(&str, &str)]) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.http.get(&url).query(params).send()?;
+        let req = self.with_auth(self.http.get(&url).query(params));
+        let resp = req.send()?;
         self.handle_response(resp)
     }
 
     fn post_json(&self, path: &str, payload: Value) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.http.post(&url).json(&payload).send()?;
+        let req = self.with_auth(self.http.post(&url).json(&payload));
+        let resp = req.send()?;
         self.handle_response(resp)
     }
 
     fn put_json(&self, path: &str, payload: Value) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.http.put(&url).json(&payload).send()?;
+        let req = self.with_auth(self.http.put(&url).json(&payload));
+        let resp = req.send()?;
         self.handle_response(resp)
     }
 
     fn delete(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.http.delete(&url).send()?;
+        let req = self.with_auth(self.http.delete(&url));
+        let resp = req.send()?;
         self.handle_response(resp)
     }
 
     fn handle_response(&self, resp: reqwest::blocking::Response) -> Result<Value> {
         let status = resp.status();
         let text = resp.text()?;
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(Error::Service(
+                "service requires authentication; restart h8-service to generate \
+                 ~/.local/state/h8/client.key, or set H8_TOKEN"
+                    .to_string(),
+            ));
+        }
+
+        if status == reqwest::StatusCode::FORBIDDEN {
+            if let Ok(val) = serde_json::from_str::<Value>(&text) {
+                if let Some(scope) = val
+                    .as_object()
+                    .and_then(|m| m.get("required_scope"))
+                    .and_then(|d| d.as_str())
+                {
+                    return Err(Error::Service(format!(
+                        "permission denied: this API key lacks scope {}",
+                        scope
+                    )));
+                }
+                if let Some(detail) = val
+                    .as_object()
+                    .and_then(|m| m.get("detail"))
+                    .and_then(|d| d.as_str())
+                {
+                    return Err(Error::Service(format!("service error: {}", detail)));
+                }
+            }
+            let snippet: String = text.chars().take(400).collect();
+            return Err(Error::Service(format!(
+                "service error ({}): {}",
+                status, snippet
+            )));
+        }
 
         if !status.is_success() {
             // Try to extract error detail from JSON response
@@ -957,5 +1159,65 @@ mod tests {
         let json = serde_json::to_value(&fetch).unwrap();
         assert_eq!(json["folder"], "inbox");
         assert_eq!(json["limit"], 100);
+    }
+
+    /// Exercises the full token discovery order in one test to avoid
+    /// flakiness from parallel tests mutating process-global env vars.
+    #[test]
+    fn test_discover_token_precedence_and_fallback() {
+        let saved_token = std::env::var("H8_TOKEN").ok();
+        let saved_state_home = std::env::var("XDG_STATE_HOME").ok();
+
+        // SAFETY: this test owns the env vars it touches and restores them
+        // (best-effort) before returning.
+        unsafe {
+            std::env::remove_var("H8_TOKEN");
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", temp.path());
+        }
+
+        // Nothing configured anywhere -> None.
+        assert_eq!(discover_token(None), None);
+
+        // Config token used when no env var and no file.
+        assert_eq!(
+            discover_token(Some("  cfg-token  ")),
+            Some("cfg-token".to_string())
+        );
+
+        // client.key file used when no env var and no config token.
+        let h8_state_dir = temp.path().join("h8");
+        std::fs::create_dir_all(&h8_state_dir).unwrap();
+        std::fs::write(h8_state_dir.join("client.key"), "file-token\n").unwrap();
+        assert_eq!(discover_token(None), Some("file-token".to_string()));
+
+        // Config token still takes priority over the file.
+        assert_eq!(
+            discover_token(Some("cfg-token")),
+            Some("cfg-token".to_string())
+        );
+
+        // Env var takes priority over both config and file.
+        unsafe {
+            std::env::set_var("H8_TOKEN", "env-token");
+        }
+        assert_eq!(
+            discover_token(Some("cfg-token")),
+            Some("env-token".to_string())
+        );
+
+        unsafe {
+            match saved_token {
+                Some(v) => std::env::set_var("H8_TOKEN", v),
+                None => std::env::remove_var("H8_TOKEN"),
+            }
+            match saved_state_home {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
     }
 }
