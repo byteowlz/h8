@@ -51,6 +51,48 @@ tenant = "organizations"                              # or your tenant GUID/doma
 h8 auth login work
 ```
 
+#### Choosing login scopes / experimenting
+
+A login requests **one** resource's scopes; Azure AD v2 rejects mixing EWS and
+Graph in a single token/device-code request. The single refresh token that
+results silently mints the *other* resource's tokens later -- but only if your
+app registration is authorized for both. The default requests Graph scopes.
+
+Set the requested scopes per account with `login_scopes` (a preset `"ews"` or
+`"graph"`, or an explicit comma/space-separated scope list):
+
+```toml
+[accounts.work]
+email = "you@example.com"
+provider = "ews"
+client_id = "00000000-0000-0000-0000-000000000000"
+login_scopes = "ews"                   # request only the EWS resource at login
+```
+
+- **`ews`**: requests only `EWS.AccessAsUser.All`. This lets you "borrow" a
+  public client id that is authorized for the EWS resource -- for example
+  Thunderbird's app registration -- so EWS works without registering your own
+  app. That account has **no Graph backend**, since the borrowed app is not
+  authorized for Graph.
+- **`graph`** (default): requests the Graph scopes. Needs **your own** app
+  registration authorized for both resources (as in the setup steps above) so
+  the shared refresh token serves EWS *and* Graph.
+
+You can also try any `(client_id, tenant, login-scopes)` combination for a
+single login without editing config -- the flags override config just for that
+sign-in, and the effective values are printed before the device code:
+
+```bash
+# Borrow Thunderbird's public client id for EWS-only access:
+h8 auth login work --login-scopes ews --client-id <thunderbird-app-id>
+
+# Force Graph scopes against a specific tenant:
+h8 auth login work --login-scopes graph --tenant <tenant-guid>
+```
+
+The same `--login-scopes`, `--client-id`, and `--tenant` flags are available on
+`h8-service auth login`.
+
 ### Google Workspace setup (provider `google`)
 
 Google accounts authenticate through a Google Cloud OAuth client and either a

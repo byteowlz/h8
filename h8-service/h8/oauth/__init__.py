@@ -34,7 +34,9 @@ from h8.oauth.microsoft import (  # noqa: E402
     AccessToken,
     DeviceLogin,
     get_ms_token,
+    parse_login_scopes,
     poll_device_login,
+    resolve_login_scopes,
     start_device_login,
 )
 
@@ -49,6 +51,8 @@ __all__ = [
     "get_ms_token",
     "start_device_login",
     "poll_device_login",
+    "parse_login_scopes",
+    "resolve_login_scopes",
     "get_google_credentials",
     "start_login",
     "finish_url_login",

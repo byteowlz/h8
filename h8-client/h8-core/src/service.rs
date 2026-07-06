@@ -991,9 +991,28 @@ impl ServiceClient {
     }
 
     /// Start an interactive login flow for an account (device-code or auth-url).
-    pub fn auth_login(&self, account: &str) -> Result<Value> {
-        let payload = serde_json::json!({ "account": account });
-        self.post_json("/auth/login", payload)
+    ///
+    /// The Microsoft-only overrides (`login_scopes`, `client_id`, `tenant`) are
+    /// omitted from the request body when `None`.
+    pub fn auth_login(
+        &self,
+        account: &str,
+        login_scopes: Option<&str>,
+        client_id: Option<&str>,
+        tenant: Option<&str>,
+    ) -> Result<Value> {
+        let mut payload = serde_json::Map::new();
+        payload.insert("account".to_string(), Value::from(account));
+        if let Some(scopes) = login_scopes {
+            payload.insert("login_scopes".to_string(), Value::from(scopes));
+        }
+        if let Some(id) = client_id {
+            payload.insert("client_id".to_string(), Value::from(id));
+        }
+        if let Some(t) = tenant {
+            payload.insert("tenant".to_string(), Value::from(t));
+        }
+        self.post_json("/auth/login", Value::Object(payload))
     }
 
     /// Poll the status of an in-progress login flow.

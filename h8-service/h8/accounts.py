@@ -25,6 +25,14 @@ from h8.providers.base import (
 # Provider-neutral placeholder: there is no hardcoded default mailbox anymore.
 # A default account must be supplied via config (top-level ``account`` or an
 # ``[accounts.*]`` table).
+#
+# Keys listed here map to dedicated ``AccountConfig`` fields; every other key in
+# an ``[accounts.*]`` table flows into ``AccountConfig.extra``. Recognized extra
+# keys include:
+#   - ``login_scopes`` (Microsoft): the scopes to request at device-code login --
+#     preset ``"ews"``/``"graph"`` or a raw scope list. Consumed by
+#     ``h8.oauth.microsoft.resolve_login_scopes``. See ``oauth/microsoft.py``.
+#   - ``client_secret`` (Google): installed-app secret.
 _KNOWN_ACCOUNT_KEYS = {"email", "provider", "client_id", "tenant"}
 
 

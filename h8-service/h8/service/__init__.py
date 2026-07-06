@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -61,6 +62,7 @@ from h8.providers.base import (
     CAP_OOF,
     CAP_RESOURCES,
     CAP_RULES,
+    AccountConfig,
     BackendAuthError,
     BackendBusyError,
     BackendError,
@@ -2152,9 +2154,24 @@ async def mail_unsubscribe_execute(
 
 
 class AuthLoginRequest(BaseModel):
-    """Request model for starting a login flow."""
+    """Request model for starting a login flow.
+
+    The optional Microsoft-only overrides let a caller try any combination of
+    ``(client_id, tenant, login_scopes)`` for a single login **without** editing
+    config. They are ignored for non-Microsoft (google) accounts.
+
+    Attributes:
+        account: Account alias or email.
+        login_scopes: Preset ``"ews"``/``"graph"``, or a comma/space-separated
+            raw scope list. Azure forbids requesting EWS and Graph at once.
+        client_id: Override the account's Azure app id for this login only.
+        tenant: Override the MSAL authority tenant for this login only.
+    """
 
     account: str
+    login_scopes: Optional[str] = None
+    client_id: Optional[str] = None
+    tenant: Optional[str] = None
 
 
 class AuthFinishRequest(BaseModel):
@@ -2224,20 +2241,56 @@ def _auth_accounts() -> List[dict]:
     return out
 
 
-def _auth_start_login(account_ref: str) -> dict:
-    """Start a login flow for ``account_ref`` (device-code or google URL)."""
+def _effective_ms_account(
+    acct: AccountConfig,
+    client_id: Optional[str] = None,
+    tenant: Optional[str] = None,
+) -> AccountConfig:
+    """Return ``acct`` with ``client_id``/``tenant`` overridden when provided.
+
+    Overrides apply only for the duration of a single login; nothing is
+    persisted to config. Returns ``acct`` unchanged when no override is given.
+    """
+    changes: Dict[str, Any] = {}
+    if client_id is not None and client_id.strip():
+        changes["client_id"] = client_id.strip()
+    if tenant is not None and tenant.strip():
+        changes["tenant"] = tenant.strip()
+    if not changes:
+        return acct
+    return dataclasses.replace(acct, **changes)
+
+
+def _auth_start_login(
+    account_ref: str,
+    login_scopes: Optional[str] = None,
+    client_id: Optional[str] = None,
+    tenant: Optional[str] = None,
+) -> dict:
+    """Start a login flow for ``account_ref`` (device-code or google URL).
+
+    For Microsoft (``ews``/``graph``) accounts the optional ``login_scopes`` /
+    ``client_id`` / ``tenant`` overrides shape a single login without touching
+    config, and the effective values are echoed back in the response. They are
+    ignored for google accounts.
+    """
     from h8 import oauth
     from h8.oauth import LoginRequired
 
     acct = resolve_account(account_ref)
     try:
         if acct.provider in ("ews", "graph"):
-            device = oauth.start_device_login(acct)
+            effective = _effective_ms_account(acct, client_id, tenant)
+            scopes = oauth.resolve_login_scopes(effective, override=login_scopes)
+            device = oauth.start_device_login(effective, scopes=scopes)
             return {
                 "flow": "device_code",
                 "session_id": device.session_id,
                 "verification_url": device.verification_url,
                 "user_code": device.user_code,
+                "client_id": effective.client_id,
+                "tenant": effective.tenant,
+                "login_scopes": scopes,
             }
         if acct.provider == "google":
             session = oauth.google.start_login(acct, headless=True)
@@ -2317,7 +2370,13 @@ async def auth_login(payload: AuthLoginRequest, request: Request):
     """Start a login flow for an account (device-code or google auth URL)."""
     _enforce_body_account(request, payload.account)
     try:
-        return await run_in_threadpool(_auth_start_login, payload.account)
+        return await run_in_threadpool(
+            _auth_start_login,
+            payload.account,
+            payload.login_scopes,
+            payload.client_id,
+            payload.tenant,
+        )
     except AccountResolutionError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -2413,7 +2472,12 @@ async def keys_delete(key_id: str):
 # service running.
 
 
-def _cli_auth_login(account_ref: Optional[str]) -> int:
+def _cli_auth_login(
+    account_ref: Optional[str],
+    login_scopes: Optional[str] = None,
+    client_id: Optional[str] = None,
+    tenant: Optional[str] = None,
+) -> int:
     from h8 import oauth
     from h8.oauth import LoginRequired
     from h8.providers import registry
@@ -2426,7 +2490,13 @@ def _cli_auth_login(account_ref: Optional[str]) -> int:
 
     try:
         if acct.provider in ("ews", "graph"):
-            device = oauth.start_device_login(acct)
+            effective = _effective_ms_account(acct, client_id, tenant)
+            scopes = oauth.resolve_login_scopes(effective, override=login_scopes)
+            print(
+                f"Using client_id={effective.client_id or '(default)'} "
+                f"tenant={effective.tenant} scopes={' '.join(scopes)}"
+            )
+            device = oauth.start_device_login(effective, scopes=scopes)
             print(
                 f"Visit {device.verification_url} and enter code "
                 f"{device.user_code}"
@@ -2641,10 +2711,32 @@ def _auth_cli(argv: List[str]) -> int:
             default=None,
             help="Account alias or email (default: configured default account)",
         )
+        if action == "login":
+            p.add_argument(
+                "--login-scopes",
+                default=None,
+                help=(
+                    "Microsoft login scopes: preset 'ews' or 'graph', or a "
+                    "comma/space-separated raw scope list (Azure forbids mixing "
+                    "EWS and Graph)"
+                ),
+            )
+            p.add_argument(
+                "--client-id",
+                default=None,
+                help="Override the Azure app client_id for this login only",
+            )
+            p.add_argument(
+                "--tenant",
+                default=None,
+                help="Override the MSAL authority tenant for this login only",
+            )
     args = parser.parse_args(argv)
 
     if args.action == "login":
-        return _cli_auth_login(args.account)
+        return _cli_auth_login(
+            args.account, args.login_scopes, args.client_id, args.tenant
+        )
     if args.action == "status":
         return _cli_auth_status(args.account)
     if args.action == "logout":

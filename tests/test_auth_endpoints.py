@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from h8 import service
 from h8.accounts import AccountResolutionError
+from h8.oauth import microsoft
 from h8.providers.base import AccountConfig
 
 
@@ -92,12 +93,51 @@ def test_auth_login_device_code_flow():
         resp = _client().post("/auth/login", json={"account": "work"})
 
     assert resp.status_code == 200
-    assert resp.json() == {
-        "flow": "device_code",
-        "session_id": "sess-ews",
-        "verification_url": "https://microsoft.com/devicelogin",
-        "user_code": "ABCD-EFGH",
-    }
+    body = resp.json()
+    # Existing fields stay unchanged; effective params are added.
+    assert body["flow"] == "device_code"
+    assert body["session_id"] == "sess-ews"
+    assert body["verification_url"] == "https://microsoft.com/devicelogin"
+    assert body["user_code"] == "ABCD-EFGH"
+    assert body["client_id"] is None  # _ews_account has no client_id override
+    assert body["tenant"] == "organizations"
+    # Default login scopes are the Graph scopes.
+    assert body["login_scopes"] == list(microsoft.GRAPH_SCOPES)
+
+
+def test_auth_login_overrides_reach_device_login_and_echo():
+    device = SimpleNamespace(
+        session_id="sess-ews",
+        verification_url="https://microsoft.com/devicelogin",
+        user_code="ABCD-EFGH",
+        expires_at=0.0,
+    )
+    start = patch("h8.oauth.start_device_login", return_value=device).start()
+    with patch("h8.service.resolve_account", return_value=_ews_account()):
+        resp = _client().post(
+            "/auth/login",
+            json={
+                "account": "work",
+                "login_scopes": "ews",
+                "client_id": "thunderbird-app-id",
+                "tenant": "contoso",
+            },
+        )
+    patch.stopall()
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # Response echoes the effective override values.
+    assert body["client_id"] == "thunderbird-app-id"
+    assert body["tenant"] == "contoso"
+    assert body["login_scopes"] == list(microsoft.EWS_SCOPES)
+
+    # start_device_login received the overridden AccountConfig + resolved scopes.
+    assert start.call_count == 1
+    effective = start.call_args.args[0]
+    assert effective.client_id == "thunderbird-app-id"
+    assert effective.tenant == "contoso"
+    assert start.call_args.kwargs["scopes"] == list(microsoft.EWS_SCOPES)
 
 
 def test_auth_login_google_auth_url_flow():

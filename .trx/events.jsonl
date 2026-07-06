@@ -65,3 +65,5 @@
 {"id":"evt_fksdjhg4","issue_id":"trx-x706.9","action":"created","timestamp":"2026-07-05T12:45:59.669213963Z"}
 {"id":"evt_9jfzprd3","issue_id":"trx-scv9.7","action":"created","timestamp":"2026-07-05T12:45:59.693895297Z"}
 {"id":"evt_45w0dwax","issue_id":"trx-x706.6","action":"closed","timestamp":"2026-07-05T12:58:21.963321135Z","note":"Implemented: bearer token discovery, h8 auth + h8 keys commands, oama check removed; committed in 7941747/6e8282a"}
+{"id":"evt_x97rr9mf","issue_id":"trx-r8p1.7","action":"created","timestamp":"2026-07-05T23:55:18.027267329Z"}
+{"id":"evt_pjzxyte5","issue_id":"trx-r8p1.7","action":"closed","timestamp":"2026-07-06T00:02:46.192875464Z","note":"Implemented configurable Microsoft login scopes + on-the-fly auth override flags: parse_login_scopes/resolve_login_scopes in oauth/microsoft.py, start_device_login(scopes=), AuthLoginRequest login_scopes/client_id/tenant overrides with effective-value echo in /auth/login, h8-service and Rust h8 auth login flags, config+README+design docs, 17 new tests. 352 py tests + full Rust workspace green."}

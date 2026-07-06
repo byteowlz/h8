@@ -249,6 +249,8 @@ enum Command {
     ///   h8 auth status
     ///   h8 auth login
     ///   h8 auth login personal
+    ///   h8 auth login work --login-scopes ews --client-id <thunderbird-app-id>
+    ///   h8 auth login work --login-scopes graph
     ///   h8 auth logout personal
     Auth {
         #[command(subcommand)]
@@ -1670,7 +1672,7 @@ enum AuthCommand {
     /// Show login status for all configured accounts
     Status,
     /// Interactively log in an account (device-code or browser URL flow)
-    Login(AuthAccountArgs),
+    Login(AuthLoginArgs),
     /// Log out an account, discarding its stored credentials
     Logout(AuthAccountArgs),
 }
@@ -1679,6 +1681,23 @@ enum AuthCommand {
 struct AuthAccountArgs {
     /// Account alias or email (defaults to the configured default account)
     account: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AuthLoginArgs {
+    /// Account alias or email (defaults to the configured default account)
+    account: Option<String>,
+    /// Microsoft login scopes: preset `ews` or `graph`, or a comma/space list of
+    /// raw scopes. Azure forbids requesting EWS and Graph at once.
+    #[arg(long)]
+    login_scopes: Option<String>,
+    /// Override the Azure app client_id for this login only (e.g. a borrowed
+    /// public client id such as Thunderbird's for EWS-only access)
+    #[arg(long)]
+    client_id: Option<String>,
+    /// Override the MSAL authority tenant for this login only
+    #[arg(long)]
+    tenant: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -11537,8 +11556,18 @@ fn handle_auth(ctx: &RuntimeContext, command: AuthCommand) -> Result<()> {
             }
         }
         AuthCommand::Login(args) => {
-            let account = args.account.unwrap_or_else(|| effective_account(ctx));
-            let started = client.auth_login(&account).map_err(|e| anyhow!("{e}"))?;
+            let account = args
+                .account
+                .clone()
+                .unwrap_or_else(|| effective_account(ctx));
+            let started = client
+                .auth_login(
+                    &account,
+                    args.login_scopes.as_deref(),
+                    args.client_id.as_deref(),
+                    args.tenant.as_deref(),
+                )
+                .map_err(|e| anyhow!("{e}"))?;
             let flow = started.get("flow").and_then(|v| v.as_str()).unwrap_or("");
             let session_id = started
                 .get("session_id")
@@ -11556,6 +11585,27 @@ fn handle_auth(ctx: &RuntimeContext, command: AuthCommand) -> Result<()> {
                         .get("user_code")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
+                    if !ctx.common.json && !ctx.common.yaml {
+                        let client_id = started
+                            .get("client_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(default)");
+                        let tenant = started.get("tenant").and_then(|v| v.as_str()).unwrap_or("");
+                        let scopes = started
+                            .get("login_scopes")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            })
+                            .unwrap_or_default();
+                        println!(
+                            "Using client_id={} tenant={} scopes={}",
+                            client_id, tenant, scopes
+                        );
+                    }
                     println!("Visit {} and enter code {}", verification_url, user_code);
                     println!("Waiting for confirmation...");
                 }

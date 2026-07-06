@@ -61,6 +61,115 @@ class TestMicrosoftScopes:
         assert "mutated" not in microsoft.GRAPH_SCOPES
 
 
+class TestParseLoginScopes:
+    def test_none_returns_default(self):
+        assert microsoft.parse_login_scopes(None) == list(microsoft.LOGIN_SCOPES)
+
+    def test_empty_string_returns_default(self):
+        assert microsoft.parse_login_scopes("   ") == list(microsoft.LOGIN_SCOPES)
+
+    def test_empty_list_returns_default(self):
+        assert microsoft.parse_login_scopes([]) == list(microsoft.LOGIN_SCOPES)
+
+    def test_ews_preset(self):
+        assert microsoft.parse_login_scopes("ews") == list(microsoft.EWS_SCOPES)
+
+    def test_graph_preset(self):
+        assert microsoft.parse_login_scopes("graph") == list(microsoft.GRAPH_SCOPES)
+
+    def test_preset_case_insensitive(self):
+        assert microsoft.parse_login_scopes("EWS") == list(microsoft.EWS_SCOPES)
+        assert microsoft.parse_login_scopes("Graph") == list(microsoft.GRAPH_SCOPES)
+
+    def test_comma_separated(self):
+        assert microsoft.parse_login_scopes("Mail.Read, Mail.Send") == [
+            "Mail.Read",
+            "Mail.Send",
+        ]
+
+    def test_space_separated(self):
+        assert microsoft.parse_login_scopes("Mail.Read  Mail.Send") == [
+            "Mail.Read",
+            "Mail.Send",
+        ]
+
+    def test_explicit_list_passthrough(self):
+        scopes = ["https://outlook.office365.com/EWS.AccessAsUser.All"]
+        assert microsoft.parse_login_scopes(scopes) == scopes
+
+    def test_unknown_single_word_is_raw_scope(self):
+        # Not a preset -> treated as a one-element raw scope list, not an error.
+        assert microsoft.parse_login_scopes("Calendars.ReadWrite") == [
+            "Calendars.ReadWrite"
+        ]
+
+    def test_url_scope_is_raw_scope(self):
+        url = "https://graph.microsoft.com/.default"
+        assert microsoft.parse_login_scopes(url) == [url]
+
+
+class TestResolveLoginScopes:
+    def test_default_when_nothing_set(self):
+        acct = make_account(extra={})
+        assert microsoft.resolve_login_scopes(acct) == list(microsoft.LOGIN_SCOPES)
+
+    def test_extra_used_when_no_override(self):
+        acct = make_account(extra={"login_scopes": "ews"})
+        assert microsoft.resolve_login_scopes(acct) == list(microsoft.EWS_SCOPES)
+
+    def test_override_beats_extra(self):
+        acct = make_account(extra={"login_scopes": "ews"})
+        assert microsoft.resolve_login_scopes(acct, override="graph") == list(
+            microsoft.GRAPH_SCOPES
+        )
+
+    def test_blank_override_falls_through_to_extra(self):
+        acct = make_account(extra={"login_scopes": "ews"})
+        assert microsoft.resolve_login_scopes(acct, override="  ") == list(
+            microsoft.EWS_SCOPES
+        )
+
+    def test_override_list(self):
+        acct = make_account(extra={})
+        assert microsoft.resolve_login_scopes(acct, override=["A", "B"]) == ["A", "B"]
+
+
+class TestStartDeviceLoginScopes:
+    @patch("h8.oauth.microsoft._get_app")
+    def test_scopes_default_resolved_from_account(self, mock_get_app):
+        app = MagicMock()
+        app.initiate_device_flow.return_value = {
+            "user_code": "CODE",
+            "verification_uri": "https://microsoft.com/devicelogin",
+            "expires_in": 900,
+        }
+        app.acquire_token_by_device_flow.return_value = {"access_token": "t"}
+        mock_get_app.return_value = (app, MagicMock())
+
+        acct = make_account(extra={"login_scopes": "ews"})
+        microsoft.start_device_login(acct)
+
+        app.initiate_device_flow.assert_called_once_with(
+            scopes=list(microsoft.EWS_SCOPES)
+        )
+
+    @patch("h8.oauth.microsoft._get_app")
+    def test_explicit_scopes_override_account(self, mock_get_app):
+        app = MagicMock()
+        app.initiate_device_flow.return_value = {
+            "user_code": "CODE",
+            "verification_uri": "https://microsoft.com/devicelogin",
+            "expires_in": 900,
+        }
+        app.acquire_token_by_device_flow.return_value = {"access_token": "t"}
+        mock_get_app.return_value = (app, MagicMock())
+
+        acct = make_account(extra={"login_scopes": "ews"})
+        microsoft.start_device_login(acct, scopes=["X.Scope"])
+
+        app.initiate_device_flow.assert_called_once_with(scopes=["X.Scope"])
+
+
 class TestMicrosoftClientResolution:
     def test_client_id_from_account(self):
         assert microsoft._resolve_client_id(make_account(client_id="abc")) == "abc"

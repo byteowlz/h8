@@ -26,6 +26,15 @@ service_url = "http://127.0.0.1:8787"
 # provider = "ews"                     # "ews" | "google" | "graph" (later)
 # client_id = "00000000-0000-0000-0000-000000000000"   # Azure app registration id
 # tenant = "organizations"             # or your tenant GUID/domain
+# login_scopes = "ews"                 # or "graph", or an explicit scope list;
+                                       # default requests Graph. Azure forbids
+                                       # requesting EWS and Graph at once, so a
+                                       # login targets a single resource. To use a
+                                       # borrowed public client id (e.g.
+                                       # Thunderbird's) for EWS-only access, set
+                                       # client_id to it and login_scopes = "ews".
+                                       # Override per-login with
+                                       # `h8 auth login work --login-scopes ews`.
 
 # [accounts.personal]
 # email = "you@gmail.com"

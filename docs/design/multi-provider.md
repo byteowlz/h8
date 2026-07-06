@@ -151,9 +151,23 @@ Files (all new; owned by Phase 1 oauth agent):
     MailboxSettings.ReadWrite People.Read User.ReadBasic.All offline_access`.
     Silent first (`acquire_token_silent`), else raise `LoginRequired` (defined in
     `oauth/__init__.py`).
-  - Interactive: `start_device_login(acct) -> DeviceLogin(session_id, verification_url,
-    user_code, expires_at)` + `poll_device_login(session_id) -> "pending"|"done"|"error:..."`.
-    Sessions held in an in-memory dict.
+  - Interactive: `start_device_login(acct, scopes=None) -> DeviceLogin(session_id,
+    verification_url, user_code, expires_at)` + `poll_device_login(session_id) ->
+    "pending"|"done"|"error:..."`. Sessions held in an in-memory dict.
+  - **Login scopes** (`login_scopes`): the *login* request and the per-resource
+    token requests are decoupled. Azure AD v2 **rejects** mixing cross-resource
+    scopes (EWS + Graph) in one token/device-code request, so a login targets a
+    single resource; the resulting refresh token silently mints the other
+    resource's tokens later via `acquire_token_silent` *iff* the app registration
+    is authorized for both. Presets are therefore single-resource -- `"ews"` or
+    `"graph"` (no combined preset); a raw scope list is allowed for power users.
+    `resolve_login_scopes(acct, override=None)` picks scopes by precedence
+    `override` > `acct.extra["login_scopes"]` > default (`LOGIN_SCOPES`, Graph);
+    `parse_login_scopes(value)` normalizes a preset / list / delimited string.
+    This makes the "borrow Thunderbird's public client id for EWS" recipe work:
+    set `client_id` to Thunderbird's app id and `login_scopes = "ews"`.
+    `/auth/login` (and both `auth login` CLIs) accept per-login `login_scopes` /
+    `client_id` / `tenant` overrides and echo the effective values back.
 - `oauth/google.py` — google-auth. Credentials JSON persisted under `google:{email}`.
   - `get_google_credentials(acct) -> google.oauth2.credentials.Credentials`
     (auto-refreshes and re-persists; raises `LoginRequired` when absent/revoked).
@@ -174,8 +188,11 @@ Dependencies added to `pyproject.toml`: `msal`, `google-auth`, `google-auth-oaut
 ### Auth endpoints (service, Phase 2; admin-scoped once Epic D lands)
 
 - `GET  /auth/accounts` → `[{alias, email, provider, logged_in, expires_at}]`
-- `POST /auth/login` `{account}` → device-code: `{flow:"device_code", session_id,
-  verification_url, user_code}`; google-headless: `{flow:"auth_url", session_id, auth_url}`
+- `POST /auth/login` `{account, login_scopes?, client_id?, tenant?}` → device-code:
+  `{flow:"device_code", session_id, verification_url, user_code, client_id, tenant,
+  login_scopes}` (the last three echo the effective values used); google-headless:
+  `{flow:"auth_url", session_id, auth_url}`. The `login_scopes`/`client_id`/`tenant`
+  request fields are Microsoft-only overrides (ignored for google accounts).
 - `POST /auth/login/{session_id}/finish` `{redirect_url?}` → for google URL-paste flow
 - `GET  /auth/login/{session_id}` → `{status: "pending"|"done"|"error", detail?}`
 - `POST /auth/logout` `{account}`
