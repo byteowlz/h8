@@ -1,4 +1,4 @@
-"$schema" = "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/h8/h8.config.schema.json"
+#:schema https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/h8/h8.config.schema.json
 
 # h8 configuration (Rust CLI)
 # Place this at ~/.config/h8/config.toml or $XDG_CONFIG_HOME/h8/config.toml
