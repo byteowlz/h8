@@ -24,6 +24,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -197,8 +198,24 @@ def finish_url_login(session_id: str, redirect_url: str) -> str:
     if session is None or flow is None:
         raise LoginRequired("Unknown or invalid headless login session.")
 
+    # Extract the authorization code from the pasted redirect URL and exchange
+    # it directly. We deliberately do NOT pass ``authorization_response=``:
+    # oauthlib 3.3.x removed the loopback exemption from ``is_secure_transport``,
+    # so the bare ``http://localhost`` redirect raises InsecureTransportError.
+    # Exchanging a bare code skips that check (the token POST itself goes to the
+    # https token endpoint) and is safe because the redirect is a loopback.
     try:
-        flow.fetch_token(authorization_response=redirect_url)
+        params = parse_qs(urlparse(redirect_url).query)
+        codes = params.get("code")
+        if not codes:
+            raise LoginRequired(
+                "Redirect URL is missing the authorization code. Copy the full "
+                "URL from the browser address bar after the consent screen."
+            )
+        flow.fetch_token(code=codes[0])
+    except LoginRequired:
+        _set_session(session_id, "error", "missing authorization code")
+        raise
     except Exception as exc:  # noqa: BLE001
         _set_session(session_id, "error", str(exc))
         raise LoginRequired(f"Failed to exchange authorization code: {exc}") from exc
